@@ -1,0 +1,211 @@
+import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS, formatTime, normalizeSettings, providerState } from './ui.js';
+
+const DEFAULTS = { port: 41770, token: '', account: 'browser-local', intervalMinutes: 15, providers: DEFAULT_PROVIDER_SETTINGS };
+const el = id => document.getElementById(id);
+let currentSettings = DEFAULTS;
+let apiConnected = false;
+
+async function load() {
+  const { settings } = await chrome.storage.local.get('settings');
+  currentSettings = { ...DEFAULTS, ...settings, providers: { ...DEFAULTS.providers, ...settings?.providers } };
+  el('port').value = currentSettings.port;
+  el('token').value = currentSettings.token;
+  el('account').value = currentSettings.account;
+  el('interval').value = currentSettings.intervalMinutes;
+  for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = currentSettings.providers[id];
+  await renderStatus();
+}
+
+function readFormSettings() {
+  return normalizeSettings({
+    port: el('port').value,
+    token: el('token').value.trim(),
+    account: el('account').value.trim(),
+    intervalMinutes: el('interval').value,
+    providers: Object.fromEntries(Object.keys(PROVIDERS).map(id => [id, el(`provider-${id}`).checked])),
+  }, DEFAULTS);
+}
+
+function renderProviderControls() {
+  const list = el('provider-list');
+  list.replaceChildren();
+  for (const [id, provider] of Object.entries(PROVIDERS)) {
+    const row = document.createElement('div');
+    row.className = 'provider-row';
+    row.innerHTML = `<input id="provider-${id}" type="checkbox" /><label for="provider-${id}">${provider.name}<small></small></label><span class="provider-domain"></span>`;
+    row.querySelector('small').textContent = provider.description;
+    row.querySelector('.provider-domain').textContent = provider.site;
+    list.appendChild(row);
+  }
+}
+
+function renderResyncControls(status = {}) {
+  const list = el('resync-list');
+  list.replaceChildren();
+  for (const [id, provider] of Object.entries(PROVIDERS)) {
+    const enabled = currentSettings.providers[id];
+    const row = document.createElement('div');
+    row.className = 'resync-row';
+    row.innerHTML = `<div><strong></strong><small></small></div><button class="button-secondary" type="button">Full resync</button>`;
+    row.querySelector('strong').textContent = provider.name;
+    const description = row.querySelector('small');
+    description.id = `resync-description-${id}`;
+    description.textContent = enabled
+      ? `Re-import all conversations from ${provider.site}.`
+      : 'Enable this provider before running a full resync.';
+    const button = row.querySelector('button');
+    const providerRunning =
+      status[id]?.running && Date.now() - (status[id]?.lastRunMs ?? 0) < 60 * 60 * 1000;
+    button.disabled = !enabled || providerRunning;
+    button.dataset.provider = id;
+    button.setAttribute('aria-label', `${provider.name}: full resync`);
+    button.setAttribute('aria-describedby', description.id);
+    list.appendChild(row);
+  }
+}
+
+function showResyncResult(message, isError = false) {
+  const result = el('resync-result');
+  result.textContent = message;
+  result.className = `resync-result${isError ? ' error' : ''}`;
+  result.setAttribute('role', isError ? 'alert' : 'status');
+}
+
+async function save({ announce = true } = {}) {
+  currentSettings = readFormSettings();
+  await chrome.storage.local.set({ settings: currentSettings });
+  await chrome.runtime.sendMessage({ type: 'settingsChanged' });
+  updateSetupCommand();
+  if (announce) {
+    el('saved').textContent = 'Settings saved';
+    setTimeout(() => (el('saved').textContent = ''), 1800);
+  }
+  await renderStatus();
+}
+
+function updateSetupCommand() {
+  const settings = readFormSettings();
+  el('setup-command').textContent = `ai-memory serve --port ${settings.port} --token-file data/ingest.token`;
+}
+
+async function checkConnection() {
+  const indicator = el('connection-result');
+  const dot = el('connection-dot');
+  indicator.className = 'connection-result checking';
+  dot.className = 'status-dot checking';
+  indicator.textContent = `Checking http://127.0.0.1:${currentSettings.port}…`;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'checkApi' });
+    if (!result?.ok) throw new Error(result?.error);
+    indicator.className = 'connection-result success';
+    dot.className = 'status-dot success';
+    indicator.textContent = `Connected to ${result.url}`;
+    apiConnected = true;
+    await renderStatus();
+    return true;
+  } catch {
+    indicator.className = 'connection-result error';
+    dot.className = 'status-dot error';
+    indicator.textContent = `Cannot reach http://127.0.0.1:${currentSettings.port}. Check that ai-memory serve is running on this exact port.`;
+    apiConnected = false;
+    await renderStatus();
+    return false;
+  }
+}
+
+async function renderStatus() {
+  const { status } = await chrome.storage.local.get('status');
+  const list = el('status-list');
+  list.replaceChildren();
+  for (const [name, provider] of Object.entries(PROVIDERS)) {
+    const entry = status?.[name];
+    const state = providerState(entry, currentSettings.providers[name], { apiConnected });
+    const item = document.createElement('div');
+    item.className = 'status-item';
+    item.innerHTML = `<div class="status-title"><span class="status-dot ${state.tone}"></span><strong>${provider.name}: ${state.label}</strong></div><p></p>`;
+    const copy = item.querySelector('p');
+    copy.textContent = entry?.running ? state.detail : `${state.detail} Last run: ${formatTime(entry?.lastRunMs)}.`;
+    if (state.tone === 'error') copy.className = 'error-copy';
+    list.appendChild(item);
+  }
+  renderResyncControls(status);
+}
+
+async function startFullResync(providerName) {
+  const provider = PROVIDERS[providerName];
+  if (!provider) return;
+
+  showResyncResult(`Checking connection for ${provider.name}…`);
+  await save({ announce: false });
+  if (!currentSettings.providers[providerName]) {
+    showResyncResult(`Enable ${provider.name} before running a full resync.`, true);
+    return;
+  }
+  if (!(await checkConnection())) {
+    showResyncResult('Full resync not started. Check the API connection.', true);
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'fullSyncProvider',
+    provider: providerName,
+  });
+  if (!response?.ok) {
+    showResyncResult(response?.error ?? 'Full resync could not be started.', true);
+    return;
+  }
+  showResyncResult(`${provider.name} full resync started. You can close this page.`);
+  await renderStatus();
+}
+
+renderProviderControls();
+
+el('save').addEventListener('click', async () => {
+  await save();
+  await checkConnection();
+});
+el('sync-now').addEventListener('click', async () => {
+  const button = el('sync-now');
+  button.disabled = true;
+  button.textContent = 'Checking…';
+  await save({ announce: false });
+  const connected = await checkConnection();
+  if (connected) {
+    button.textContent = 'Syncing…';
+    el('saved').textContent = `Sync started using port ${currentSettings.port}`;
+    try { await chrome.runtime.sendMessage({ type: 'syncNow' }); } catch { /* worker still starts */ }
+  } else {
+    el('saved').textContent = 'Sync not started';
+  }
+  button.disabled = false;
+  button.textContent = 'Sync now';
+  setTimeout(() => (el('saved').textContent = ''), 2200);
+});
+el('test-connection').addEventListener('click', async () => {
+  await save({ announce: false });
+  await checkConnection();
+});
+el('resync-list').addEventListener('click', async event => {
+  const button = event.target.closest?.('button[data-provider]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await startFullResync(button.dataset.provider);
+  } catch (error) {
+    showResyncResult(error.message || 'Full resync could not be started.', true);
+  } finally {
+    await renderStatus();
+  }
+});
+el('port').addEventListener('input', updateSetupCommand);
+el('token').addEventListener('input', updateSetupCommand);
+for (const id of Object.keys(PROVIDERS)) {
+  el(`provider-${id}`).addEventListener('change', async () => {
+    currentSettings = readFormSettings();
+    await renderStatus();
+  });
+}
+chrome.storage.onChanged.addListener(changes => { if (changes.status) renderStatus(); });
+await load();
+updateSetupCommand();
+await checkConnection();

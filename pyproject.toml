@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-memory-archive"
+version = "0.1.0"
+description = "Lossless AI conversation archive with NotebookLM memory and MCP"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["notebooklm-py==0.8.6", "mcp>=1.26,<2"]
+
+[project.scripts]
+ai-memory = "ai_memory.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.26,<2", "ruff>=0.12,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_memory"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"vendor/hstry" = "ai_memory/vendor/hstry"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

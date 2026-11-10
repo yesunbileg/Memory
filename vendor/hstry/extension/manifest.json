@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "AI Memory local capture",
+  "version": "0.4.0",
+  "description": "Captures visible ChatGPT, Claude, and Gemini conversations into your local AI Memory archive. NotebookLM upload requires separate approval.",
+  "permissions": [
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "AI Memory capture",
+    "default_popup": "popup.html"
+  }
+}

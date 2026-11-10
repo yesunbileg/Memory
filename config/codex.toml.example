@@ -1,0 +1,7 @@
+# Merge into ~/.codex/config.toml after replacing every /ABSOLUTE/PATH value.
+# Run uv sync --frozen in the Memory checkout first.
+[mcp_servers.ai_memory]
+command = "/ABSOLUTE/PATH/Memory/.venv/bin/ai-memory"
+args = ["--db", "/ABSOLUTE/PATH/archive.sqlite", "mcp"]
+startup_timeout_sec = 30
+tool_timeout_sec = 240

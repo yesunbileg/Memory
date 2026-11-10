@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ai_memory": {
+      "type": "local",
+      "command": [
+        "/ABSOLUTE/PATH/Memory/.venv/bin/ai-memory",
+        "--db",
+        "/ABSOLUTE/PATH/archive.sqlite",
+        "mcp"
+      ],
+      "enabled": true,
+      "timeout": 240000
+    }
+  }
+}

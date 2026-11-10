@@ -1,0 +1,103 @@
+{
+  "repository": "https://github.com/byteowlz/hstry",
+  "commit": "b8719cf630ec15a8ef6b9fa6f1a629be9aa53fbf",
+  "license": "MIT",
+  "upstream_files": {
+    "LICENSE": {
+      "upstream_sha256": "647221b987aeb9a07979d10ff7ca51dea253d3baca226aee75838f7f72b72bf1",
+      "modified": false
+    },
+    "adapters/codex/adapter.ts": {
+      "upstream_sha256": "260e45ee7c250bd283fd1f1922ec6f71258a4be59ff7e1e00d16a5ea3c61b7ad",
+      "modified": true
+    },
+    "adapters/opencode/adapter.ts": {
+      "upstream_sha256": "9aebded1d93d79d032665267a62ded87825747532cfea5ecb47ec039158fef8b",
+      "modified": true
+    },
+    "adapters/types/first-message.ts": {
+      "upstream_sha256": "0fa3db9b3f06fa926ee55ec9add5a054377ca9baffe038654b7c1864f1aa303f",
+      "modified": true
+    },
+    "adapters/types/index.ts": {
+      "upstream_sha256": "87caa8143edf5406aec3f268be68b4d3c24f7f01841beb7d33380683b0cce6eb",
+      "modified": true
+    },
+    "adapters/types/package.json": {
+      "upstream_sha256": "61840ea7ac7d86957aef981205951831147f2d01bdc78bcc828548b38facc9c6",
+      "modified": false
+    },
+    "extension/background.js": {
+      "upstream_sha256": "2229ed5229376b446879ce77fbc692437f1463ada08dca95412f647e58022b32",
+      "modified": true
+    },
+    "extension/lib/common.js": {
+      "upstream_sha256": "5349b3b266b6bb134852c070041e0263e4a53174d2ec957078f5a728bede149e",
+      "modified": false
+    },
+    "extension/manifest.json": {
+      "upstream_sha256": "160c40d18775b3b3c5072529a607f63e6f305d549cbdca2bea539eda0a322bb7",
+      "modified": true
+    },
+    "extension/options.html": {
+      "upstream_sha256": "480242a9dc30b4c30cefda6dd92a225fafa978db562797a167cab91fed219a31",
+      "modified": true
+    },
+    "extension/options.js": {
+      "upstream_sha256": "0402d8a77d870d8490e90c93e89a9ccfbc5f797443bd305a974c359f2b089eb7",
+      "modified": true
+    },
+    "extension/popup.html": {
+      "upstream_sha256": "fd4edad3841f92fdfada33ef6e7264c84c3371d9e392b9d5006a4a186650979c",
+      "modified": false
+    },
+    "extension/popup.js": {
+      "upstream_sha256": "0002a989198a791bc9117878cf3fba25454fe0e3942a191badad9a9b09cb464e",
+      "modified": false
+    },
+    "extension/providers/chatgpt.js": {
+      "upstream_sha256": "8e30ecf6fb855572169aeca56c9b2f6a829f962e616246cc55b621037e40d530",
+      "modified": true
+    },
+    "extension/providers/claude.js": {
+      "upstream_sha256": "5073a3b1cc22c40919cf627d01dd34b162115933480b95af33e1df8fbc46cfba",
+      "modified": true
+    },
+    "extension/providers/gemini.js": {
+      "upstream_sha256": "fdff93ed4b7433cff321bbc84761ff3a42a0df579b01aedd09590ac8d0f44875",
+      "modified": true
+    },
+    "extension/providers/index.js": {
+      "upstream_sha256": "512208bf855448a87aec62d6388288f7b353b12d68ef07b3e93be86fe1262e33",
+      "modified": true
+    },
+    "extension/styles.css": {
+      "upstream_sha256": "392d7bf54d35c7b1ea06f67a4c2846020b8bdce9d72bb949893938bcacea2e73",
+      "modified": false
+    },
+    "extension/test/backoff.js": {
+      "upstream_sha256": "a6bf2fffb97e1c33252d920dcfcb7f5fca2fa69248f3c8eb839e53041eb11626",
+      "modified": false
+    },
+    "extension/test/claude-organizations.js": {
+      "upstream_sha256": "4ad325232ca4d935b05dfa051dd9a7d3077234df8f74d216f32908bf4cc91e3e",
+      "modified": false
+    },
+    "extension/test/gemini-resume.js": {
+      "upstream_sha256": "e4a1b85edd5ed0da3d3cc05bb75a65f1bc6fd24adc61c8955f7538f9ec4f87c7",
+      "modified": false
+    },
+    "extension/test/options-init.js": {
+      "upstream_sha256": "d63c031152d7da1b4cf798b94cad4d73f9c5a08ae053450442b14a1448ad3486",
+      "modified": true
+    },
+    "extension/test/ui.js": {
+      "upstream_sha256": "f9a02f3f5592913af79366080f69c353e65d7cf1cf0209bdd7f02fb4653a23dd",
+      "modified": true
+    },
+    "extension/ui.js": {
+      "upstream_sha256": "f7ef64709a074d5bed3a8fe1b074246c8582865876e56c03d5335d30b3bcc3c2",
+      "modified": true
+    }
+  }
+}

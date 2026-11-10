@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Memory local capture</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      main { width: min(780px, calc(100% - 32px)); margin: 56px auto 80px; }
+      .page-header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--rule-strong); }
+      .page-header p:last-child { max-width: 520px; margin: 7px 0 0; color: var(--muted); }
+      .version { color: var(--faint); font-size: 12px; }
+      .connection-bar { display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 10px; min-height: 54px; padding: 0 2px; border-bottom: 1px solid var(--rule); }
+      .connection-result { color: var(--muted); font-size: 13px; }
+      .connection-result.success { color: var(--success); }
+      .connection-result.error { color: var(--danger); }
+      .section { padding: 30px 0; border-bottom: 1px solid var(--rule); }
+      .section-heading { display: grid; grid-template-columns: 190px 1fr; gap: 24px; margin-bottom: 23px; }
+      .section-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+      .form-grid { display: grid; grid-template-columns: 190px 1fr; gap: 19px 24px; align-items: start; }
+      label { display: block; padding-top: 10px; font-size: 13px; font-weight: 700; }
+      .control input[type='number'], .control input[type='password'], .control input[type='text'] { width: 100%; min-height: 42px; padding: 8px 11px; color: var(--ink); background: var(--panel); border: 1px solid var(--rule-strong); border-radius: 3px; }
+      .hint { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+      .provider-list { border-top: 1px solid var(--rule); }
+      .provider-row { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 10px; min-height: 66px; border-bottom: 1px solid var(--rule); }
+      .provider-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+      .provider-row label { padding: 0; }
+      .provider-row small { display: block; color: var(--muted); font-weight: 400; }
+      .provider-domain { color: var(--faint); font-size: 12px; }
+      .status-list { border-top: 1px solid var(--rule); }
+      .status-item { display: grid; grid-template-columns: 150px 1fr; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--rule); }
+      .status-title { display: flex; align-items: center; gap: 9px; }
+      .status-item p { margin: 0; color: var(--muted); font-size: 13px; }
+      .status-item .error-copy { color: var(--danger); }
+      .advanced-panel { border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+      .advanced-panel summary { padding: 14px 2px; color: var(--accent); font-size: 13px; font-weight: 700; cursor: pointer; }
+      .advanced-panel[open] summary { border-bottom: 1px solid var(--rule); }
+      .resync-note { max-width: 65ch; margin: 15px 0 8px; color: var(--muted); font-size: 13px; }
+      .resync-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 18px; min-height: 62px; border-top: 1px solid var(--rule); }
+      .resync-row:first-of-type { border-top: 0; }
+      .resync-row strong, .resync-row small { display: block; }
+      .resync-row small { color: var(--muted); }
+      .resync-result { min-height: 20px; margin: 10px 0 14px; color: var(--muted); font-size: 12px; }
+      .resync-result.error { color: var(--danger); }
+      .command-row { display: grid; grid-template-columns: 190px 1fr; gap: 24px; align-items: center; margin-top: 22px; }
+      code { padding: 10px 12px; overflow-x: auto; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+      .actions { display: flex; align-items: center; gap: 9px; padding-top: 25px; }
+      #saved { margin-left: 6px; color: var(--muted); font-size: 12px; }
+      @media (max-width: 620px) {
+        main { margin-top: 28px; }
+        .page-header, .section-heading, .form-grid, .command-row, .status-item { grid-template-columns: 1fr; gap: 8px; }
+        .page-header { align-items: start; }
+        label { padding-top: 0; }
+        .status-item { gap: 6px; }
+        .actions { flex-wrap: wrap; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div><h1>AI Memory local capture</h1><p>Import conversations from the accounts already signed in to this browser.</p></div>
+        <span class="version">v0.4.0</span>
+      </header>
+
+      <div class="connection-bar">
+        <span id="connection-dot" class="status-dot checking" aria-hidden="true"></span>
+        <span id="connection-result" class="connection-result" role="status">Checking saved endpoint…</span>
+        <button id="test-connection" class="button-quiet">Check connection</button>
+      </div>
+
+      <section class="section" aria-labelledby="connection-heading">
+        <div class="section-heading"><h2 id="connection-heading">Connection</h2><p>The API must be running on this computer. The ingest token is required. Captured conversations remain local until you approve NotebookLM upload.</p></div>
+        <div class="form-grid">
+          <label for="port">Port</label><div class="control"><input id="port" type="number" min="1" max="65535" /><span class="hint">Default: 41770</span></div>
+          <label for="token">Ingest token</label><div class="control"><input id="token" type="password" autocomplete="off" placeholder="Required ingest token" /><span class="hint">Must match <code style="padding:1px 3px">--token-file</code> or <code style="padding:1px 3px">AI_MEMORY_INGEST_TOKEN</code>.</span></div>
+          <label for="account">Browser account namespace</label><div class="control"><input id="account" type="text" autocomplete="off" /><span class="hint">Use a different name for each signed-in Gemini account or browser profile. ChatGPT and Claude use their native account IDs.</span></div>
+          <label for="interval">Interval</label><div class="control"><input id="interval" type="number" min="1" max="720" /><span class="hint">Minutes between background syncs.</span></div>
+        </div>
+        <div class="command-row"><span class="muted">Start command</span><code id="setup-command">ai-memory serve --port 41770 --token-file data/ingest.token</code></div>
+      </section>
+
+      <section class="section" aria-labelledby="providers-heading">
+        <div class="section-heading"><h2 id="providers-heading">Providers</h2><p>Each provider uses the active browser session. Sign in on the provider site before syncing.</p></div>
+        <div id="provider-list" class="provider-list"></div>
+      </section>
+
+      <section class="section" aria-labelledby="status-heading">
+        <div class="section-heading"><h2 id="status-heading">Last sync</h2><p>Provider results are updated as each import finishes.</p></div>
+        <div id="status-list" class="status-list"></div>
+      </section>
+
+      <section class="section" aria-labelledby="advanced-heading">
+        <div class="section-heading"><h2 id="advanced-heading">Advanced</h2><p>Recovery actions for conversations missed by incremental sync.</p></div>
+        <details class="advanced-panel">
+          <summary>Full resync controls</summary>
+          <p class="resync-note">A full resync re-imports every available conversation for one provider. Existing conversations are updated rather than duplicated.</p>
+          <div id="resync-list"></div>
+          <p id="resync-result" class="resync-result" role="status" aria-live="polite"></p>
+        </details>
+      </section>
+
+      <div class="actions">
+        <button id="save" class="button-secondary">Save</button>
+        <button id="sync-now" class="button-primary">Save & sync now</button>
+        <span id="saved" role="status"></span>
+      </div>
+    </main>
+    <script src="options.js" type="module"></script>
+  </body>
+</html>

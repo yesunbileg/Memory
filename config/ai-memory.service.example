@@ -1,0 +1,14 @@
+[Unit]
+Description=Collect approved AI conversations and sync NotebookLM segments
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Memory
+ExecStart=%h/Memory/.venv/bin/ai-memory --db %h/.local/share/ai-memory/conversations.sqlite watch --codex-path %h/.codex/sessions --opencode-path %h/.local/share/opencode
+Restart=on-failure
+RestartSec=30
+Nice=10
+UMask=0077
+
+[Install]
+WantedBy=default.target

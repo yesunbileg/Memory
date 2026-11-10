@@ -1,0 +1,15 @@
+{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"synthetic-codex","timestamp":"2026-01-01T00:00:00Z","cwd":"/synthetic/project"}}
+{"type":"turn_context","payload":{"model":"gpt-synthetic"}}
+{"type":"response_item","payload":{"type":"message","role":"user","id":"u-1","content":[{"type":"input_text","text":" \tСайн уу — café\n```python\n"},{"type":"input_text","text":"print('漢字 🦦')\n```\n  "}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md\nDO NOT IMPORT instructions"}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"DO NOT IMPORT hidden reasoning"}]}}
+{"type":"response_item","payload":{"type":"function_call","call_id":"tool-1","name":"shell","arguments":"DO NOT IMPORT command"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"tool-1","output":"DO NOT IMPORT output"}}
+{"type":"response_item","payload":{"type":"agent_message","id":"inter-agent","message":"DO NOT IMPORT private subagent chat"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"DO NOT IMPORT analysis"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","recipient":"shell","content":[{"type":"output_text","text":"DO NOT IMPORT tool routing"}]}}
+{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"a-progress","channel":"commentary","content":[{"type":"output_text","text":"  Checking fixtures…\n"}]}}
+{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"  Done.\n\n```js\n  console.log('✓');\n```\n\t"}}
+{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"a-final","content":[{"type":"output_text","text":"  Done.\n\n```js\n  console.log('✓');\n```\n\t"}]}}
+{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"a-repeat","content":[{"type":"output_text","text":"  Done.\n\n```js\n  console.log('✓');\n```\n\t"}]}}
+{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"reasoning","id":"visible-summary","visibility":"ui","summary":[{"type":"summary_text","text":"  Visible summary only.\n"}]}}

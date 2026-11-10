@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+data/
+.superpowers/
+node_modules/
+storage_state.json
+.env
+dist/
+build/
