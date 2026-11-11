@@ -2,14 +2,17 @@
 
 import fcntl
 import json
+import logging
 import os
 import time
 from pathlib import Path
 
+from ai_memory.diagnostics import failure_code
 from ai_memory.privacy import find_sensitive
 from ai_memory.segments import CapacityError, SegmentBuilder, SourceBudgetError
 from ai_memory.store import Store, digest
 
+logger = logging.getLogger(__name__)
 
 class SensitiveData(RuntimeError):
     pass
@@ -143,6 +146,8 @@ class SyncEngine:
         for job in jobs:
             if job["next_attempt"] > time.time():
                 result["deferred"] += 1
+                if job["stage"] == "blocked" and not job["new_source_id"]:
+                    continue
                 # Never overtake an unresolved upload: the notebook may be using its spare slot.
                 return "blocked"
             try:
@@ -151,7 +156,7 @@ class SyncEngine:
             except SpareSlotNeeded:
                 return "merge"
             except Exception as exc:
-                kind = getattr(exc, "code", type(exc).__name__)
+                kind = failure_code(exc)
                 if kind == "processing_failed":
                     latest = db.execute("SELECT new_source_id,stage FROM sync_jobs WHERE id=?", (job["id"],)).fetchone()
                     failed = latest["new_source_id"]
@@ -166,10 +171,20 @@ class SyncEngine:
                         except Exception:
                             # Retry deletion next time; never discard a committed source.
                             kind = "failed_source_cleanup"
+                next_attempt = time.time() + min(3600, 30 * 2 ** min(job["attempts"], 7))
                 with db:
                     db.execute("""UPDATE sync_jobs SET attempts=attempts+1,next_attempt=?,error=? WHERE id=?""",
-                               (time.time() + min(3600, 30 * 2 ** min(job["attempts"], 7)), kind, job["id"]))
-                result["blocked"].append({"segment_id": job["segment_id"], "reason": kind})
+                               (next_attempt, kind, job["id"]))
+                    if isinstance(exc, SensitiveData):
+                        db.execute("UPDATE sync_jobs SET stage='blocked' WHERE id=?", (job["id"],))
+                failure = {"segment_id": job["segment_id"], "reason": kind,
+                           "attempts": job["attempts"] + 1, "next_attempt": next_attempt}
+                result["blocked"].append(failure)
+                # The persisted deadline suppresses repeated scan messages, including restarts.
+                logger.warning("Sync %s: %s; retry at %.0f (attempt %s)",
+                               job["segment_id"], kind, next_attempt, failure["attempts"])
+                if isinstance(exc, SensitiveData) and not job["new_source_id"]:
+                    continue
                 return "blocked"
         return "complete"
 

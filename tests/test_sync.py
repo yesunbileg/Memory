@@ -302,3 +302,53 @@ async def test_tampered_pending_snapshot_is_never_uploaded(tmp_path):
         result = await engine.run_once()
         assert result["blocked"]
         assert not remote.sources
+
+
+@pytest.mark.asyncio
+async def test_privacy_blocked_job_does_not_starve_safe_jobs_or_leak(tmp_path, caplog):
+    secret = "password = 'SyntheticPass987654!'"
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(external_id="secret", title="Secret", messages=[
+            dict(conversation()["messages"][0], text=secret)]), consent=True)
+        store.ingest(conversation(external_id="safe", title="Safe", messages=[
+            dict(conversation()["messages"][0], text="safe message")]), consent=True)
+        remote = Remote()
+        engine = SyncEngine(store, SegmentBuilder(store, target_words=1), remote, tmp_path / "md")
+        result = await engine.run_once()
+        assert result["blocked"][0]["reason"] == "SensitiveData"
+        assert result["completed"] == 1
+        assert len(remote.sources) == 1
+        assert "safe message" in next(iter(remote.sources.values()))["text"]
+        job = store.connection.execute("SELECT * FROM sync_jobs WHERE error='SensitiveData'").fetchone()
+        assert job["stage"] == "blocked"
+        assert job["next_attempt"] > time.time()
+        assert store.get_conversation(store.connection.execute(
+            "SELECT id FROM conversations WHERE external_id='secret'").fetchone()[0])["messages"][0]["text"] == secret
+        await engine.run_once()
+        assert len(caplog.records) == 1
+        assert "SensitiveData" in caplog.text
+        assert "retry" in caplog.text
+        assert secret not in caplog.text + json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_has_safe_status_retry_and_rate_limited_log(tmp_path, caplog):
+    from ai_memory.notebook import NotebookLMAuthError
+
+    class AuthRemote(Remote):
+        async def list_sources(self):
+            raise NotebookLMAuthError()
+
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        engine = SyncEngine(store, SegmentBuilder(store), AuthRemote(), tmp_path / "md")
+        result = await engine.run_once()
+        failure = result["blocked"][0]
+        assert failure["reason"] == "auth_required"
+        assert failure["next_attempt"] > time.time()
+        assert failure["attempts"] == 1
+        assert result["status"]["sync_errors"][0]["reason"] == "auth_required"
+        await engine.run_once()
+        assert len(caplog.records) == 1
+        assert "auth_required" in caplog.text and "retry" in caplog.text
+        assert "Эх текст" not in caplog.text

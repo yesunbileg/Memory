@@ -72,6 +72,8 @@ class SegmentBuilder:
                 del c["messages"]
                 db.execute("INSERT OR REPLACE INTO segment_metadata VALUES(?,?,?)", (segment_id, row[0], json.dumps(c, ensure_ascii=False)))
         text = self.render(segment_id)
+        if len(text.split()) > 500_000:
+            raise CapacityError("Rendered segment exceeds the 500000-word source ceiling; archive retained")
         value = digest(text)
         old = db.execute("SELECT content_hash FROM segments WHERE id=?", (segment_id,)).fetchone()[0]
         if value == old:
@@ -95,12 +97,16 @@ class SegmentBuilder:
             if any(len(m["text"].split()) > self.max_words for m in pending):
                 raise CapacityError("A message exceeds the maximum segment size; archive retained without truncation")
             assigned = 0
+            row = db.execute("SELECT * FROM segments WHERE state='open'").fetchone()
+            if row:
+                used = sum(len(r[0].split()) for r in db.execute("""SELECT text FROM messages m JOIN
+                    segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=?""", (row["id"],)))
+                position = db.execute("SELECT COUNT(*) FROM segment_messages WHERE segment_id=?", (row["id"],)).fetchone()[0]
+            else:
+                used = position = 0
             for m in pending:
-                row = db.execute("SELECT * FROM segments WHERE state='open'").fetchone()
                 words = len(m["text"].split())
                 if row:
-                    used = sum(len(r[0].split()) for r in db.execute("""SELECT text FROM messages m JOIN
-                        segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=?""", (row["id"],)))
                     if used and used + words > self.target_words:
                         db.execute("UPDATE segments SET state='sealed' WHERE id=?", (row["id"],))
                         row = None
@@ -112,10 +118,13 @@ class SegmentBuilder:
                             break
                         raise SourceBudgetError("Active source budget reached; sync a merge before building more segments")
                     sid = self._new()
+                    row = db.execute("SELECT * FROM segments WHERE id=?", (sid,)).fetchone()
+                    used = position = 0
                 else:
                     sid = row["id"]
-                position = db.execute("SELECT COUNT(*) FROM segment_messages WHERE segment_id=?", (sid,)).fetchone()[0]
                 db.execute("INSERT INTO segment_messages VALUES(?,?,?)", (sid, m["id"], position))
+                position += 1
+                used += words
                 assigned += 1
             for row in db.execute("SELECT id FROM segments WHERE state!='retired' ORDER BY id").fetchall():
                 if self._refresh(row["id"]):
@@ -149,6 +158,8 @@ class SegmentBuilder:
                 for m in db.execute("SELECT message_id FROM segment_messages WHERE segment_id=? ORDER BY position", (parent["id"],)).fetchall():
                     db.execute("INSERT INTO segment_messages VALUES(?,?,?)", (sid, m[0], position))
                     position += 1
-                db.execute("UPDATE segments SET state='retired' WHERE id=?", (parent["id"],))
+            # _refresh renders and validates the full snapshot before parents are retired.
             self._refresh(sid)
+            for parent in chosen:
+                db.execute("UPDATE segments SET state='retired' WHERE id=?", (parent["id"],))
         return sid

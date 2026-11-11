@@ -79,6 +79,72 @@ def test_cli_collect_checkpoints_skip_unchanged_and_approve_explicitly(tmp_path)
     assert json.loads(shown.stdout)["messages"][0]["text"].startswith("  ")
 
 
+def test_collect_isolates_bad_jsonl_and_retries_it_after_repair(tmp_path):
+    import shutil
+
+    from ai_memory.cli import collect_into
+    from ai_memory.store import Store
+
+    source = tmp_path / "sessions"
+    source.mkdir()
+    shutil.copyfile(Path(__file__).parent / "fixtures/codex-visible.jsonl", source / "healthy.jsonl")
+    broken = source / "broken.jsonl"
+    broken.write_text('{"type":"session_meta","payload":{"id":"broken"}}\n{"type":', encoding="utf-8")
+    with Store(tmp_path / "archive.sqlite") as store:
+        first = collect_into(store, "codex", source)
+        assert first["imported_conversations"] == 1
+        assert first["failed_files"] == 1
+        assert first["unchanged"] is False
+        assert store.status()["conversations"] == 1
+        assert store.status()["import_failures"][0]["failed_files"] == 1
+        assert store.status()["import_failures"][0]["categories"] == ["parse"]
+
+        repaired = (Path(__file__).parent / "fixtures/codex-visible.jsonl").read_text()
+        broken.write_text(repaired.replace("synthetic-codex", "repaired-codex"), encoding="utf-8")
+        second = collect_into(store, "codex", source)
+        assert second["imported_conversations"] == 1
+        assert second["failed_files"] == 0
+        assert second["unchanged"] is False
+        assert store.status()["conversations"] == 2
+        assert store.status()["import_failures"] == []
+
+
+@pytest.mark.parametrize("import_order", [("old.jsonl", "new.jsonl"), ("new.jsonl", "old.jsonl")])
+def test_collect_latest_edit_wins_independent_of_file_import_order(tmp_path, import_order):
+    from ai_memory.cli import collect_into
+    from ai_memory.store import Store
+
+    source = tmp_path / "sessions"
+    source.mkdir()
+    def rollout(text, updated):
+        records = [
+            {"type": "session_meta", "payload": {"id": "stable-session", "timestamp": "2026-11-10T15:00:00Z"}},
+            {"timestamp": "2026-11-10T15:00:00Z", "type": "response_item", "payload": {
+                "type": "message", "role": "assistant", "id": "stable-message",
+                "content": [{"type": "output_text", "text": text}],
+            }},
+            {"timestamp": updated, "type": "turn_context", "payload": {"model": "synthetic"}},
+        ]
+        return "\n".join(json.dumps(record) for record in records)
+
+    snapshots = {
+        "old.jsonl": rollout("older", "2026-11-10T15:30:00Z"),
+        "new.jsonl": rollout("latest", "2026-11-10T16:00:00Z"),
+    }
+    with Store(tmp_path / "archive.sqlite") as store:
+        for name in import_order:
+            (source / name).write_text(snapshots[name], encoding="utf-8")
+            result = collect_into(store, "codex", source)
+            assert result["failed_files"] == 0
+        conversation = store.get_conversation(store.connection.execute(
+            "SELECT id FROM conversations WHERE external_id='stable-session'"
+        ).fetchone()[0])
+        assert len(conversation["messages"]) == 1
+        assert conversation["messages"][0]["text"] == "latest"
+        assert conversation["messages"][0]["timestamp"] == "2026-11-10T15:00:00.000Z"
+        assert conversation["updated_at"] == "2026-11-10T16:00:00.000Z"
+
+
 def test_upload_approval_is_honored_on_unchanged_import(tmp_path):
     from ai_memory.demo import prepare_inputs
     from ai_memory.store import Store
@@ -124,8 +190,8 @@ def test_background_worker_revisits_pending_jobs_without_waiting_twelve_hours(tm
             raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "sync_archive", simulated_sync)
-    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(cli.time, "sleep", advance)
+    monkeypatch.setattr(cli, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_sleep", advance)
     monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
     args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(source)])
     with pytest.raises(KeyboardInterrupt):
