@@ -11,7 +11,8 @@ Fresh verification before final review:
 - Real browser UI harness passed settings/popup, actual loopback token verification, connection-file import, light/dark, mobile overflow and the Gemini warning without enabling Recents. The harness uses a test Chrome bridge; it is not an installed-extension/live-account run.
 - Extension ZIP built with `manifest.json` at its root. Integration tests verify runtime JS/HTML/icon dependencies, upstream license, exclusion of token/auth/connection/test data, and rejection of missing files/outside asset symlinks.
 - Ruff and `git diff --check` passed. `uv sync --frozen --extra login --dry-run` found **43 installed packages** consistent with the lockfile. The SDK cookie reader is an optional project extra, so login does not require a Chromium download.
-- Wheel build, source demo and genuine stdio MCP smoke passed. Final wheel/resource verification and review are recorded in the handoff commit.
+- Wheel build, installed-wheel resources/demo and genuine source/installed-wheel stdio MCP smoke passed. The installed module path was checked outside the checkout.
+- One fresh read-only whole-branch reviewer found **no Critical, Important or Minor issues** and independently passed 29 focused Python tests, the Gemini warning script, whitespace checking and the documented SDK login help.
 
 The two full-audit reproductions are now regressions:
 
