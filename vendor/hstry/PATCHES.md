@@ -21,3 +21,8 @@ Patch groups:
 4. Three opt-in browser providers, required local token, browser account
    namespace, no `/sources` endpoint dependency, and accurate unknown metadata.
 5. Local synthetic regression tests and adapted retained upstream tests.
+6. Browser-only capture categories with ordinary Recents excluded by default;
+   source-backed ChatGPT/Claude project discovery and pagination, explicit pin/
+   agent metadata, overlap deduplication, selection counts and fail-closed
+   metadata warnings. Gemini organized membership remains unsupported without
+   a verified schema. Existing capture fixtures explicitly select Recents.

@@ -40,6 +40,7 @@ const pushed = [];
 const logs = [];
 const result = await syncClaude({
   state: {},
+  captureTypes: { projects: false, pinned: false, agents: false, recents: true },
   register: async () => {},
   report: async () => {},
   log: message => logs.push(message),

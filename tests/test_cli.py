@@ -1,6 +1,10 @@
+import http.client
 import json
+import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -127,3 +131,75 @@ def test_background_worker_revisits_pending_jobs_without_waiting_twelve_hours(tm
     with pytest.raises(KeyboardInterrupt):
         cli._watch(args)
     assert len(calls) == expected_calls
+
+
+def available_port():
+    with socket.socket() as socket_:
+        socket_.bind(("127.0.0.1", 0))
+        return socket_.getsockname()[1]
+
+
+def test_connect_writes_private_file_starts_receiver_and_reuses_running_setup(tmp_path):
+    port = available_port()
+    db = tmp_path / "archive.sqlite"
+    command = [sys.executable, "-m", "ai_memory", "--db", str(db), "connect", "--port", str(port)]
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    file = tmp_path / "extension-connection.json"
+    try:
+        deadline = time.monotonic() + 7
+        ready = False
+        while time.monotonic() < deadline and process.poll() is None:
+            if file.exists():
+                settings = json.loads(file.read_text())
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.2)
+                try:
+                    connection.request("POST", "/auth/check", body="{}", headers={
+                        "Content-Type": "application/json", "Authorization": "Bearer " + settings["token"],
+                    })
+                    response = connection.getresponse()
+                    ready = response.status == 200
+                    response.read()
+                    if ready:
+                        break
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+            time.sleep(0.03)
+        assert ready
+        assert file.stat().st_mode & 0o777 == 0o600
+        repeated = run_cli("--db", db, "connect", "--port", port)
+        assert repeated.returncode == 0
+        assert "already running" in repeated.stdout.lower()
+        assert str(file) in repeated.stdout
+        token_exposed = settings["token"] in repeated.stdout + repeated.stderr
+        assert not token_exposed
+    finally:
+        process.terminate()
+        output, errors = process.communicate(timeout=5)
+    assert "terminal" in output.lower()
+    assert str(file) in output
+    assert "Traceback" not in errors
+    if file.exists():
+        token_exposed = json.loads(file.read_text())["token"] in output + errors
+        assert not token_exposed
+
+
+def test_connect_explains_occupied_receiver_with_different_token(tmp_path):
+    from ai_memory.ingest import make_server
+
+    server = make_server(tmp_path / "other.sqlite", "other-synthetic-private-token", port=0)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        result = run_cli("--db", tmp_path / "selected.sqlite", "connect", "--port", server.server_port)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+    assert result.returncode == 1
+    assert "port" in result.stdout.lower()
+    assert "token" in result.stdout.lower() or "different connection" in result.stdout.lower()
+    assert "other-synthetic-private-token" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+    assert not (tmp_path / "extension-connection.json").exists()

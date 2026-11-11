@@ -15,9 +15,9 @@ check('new providers are opt-in', DEFAULT_PROVIDER_SETTINGS, {
 });
 check('never synced time', formatTime(null, now), 'Never');
 check('relative sync time', formatTime(now - 17 * 60_000, now), '17m ago');
-check('fresh provider is informative', providerState(undefined, true), { tone: 'idle', label: 'Ready to sync', detail: 'No sync has run yet.' });
-check('disabled provider is paused', providerState(undefined, false).label, 'Paused');
-check('offline error is actionable', friendlyError('cannot reach hstry-api at x'), 'The local hstry API is offline. Start it, then try again.');
+check('fresh provider is informative', providerState(undefined, true, { apiConnected: true }), { tone: 'idle', label: 'Ready to sync', detail: 'Selected chat types will appear here.' });
+check('disabled provider is paused', providerState(undefined, false).label, 'Off');
+check('offline error is actionable', friendlyError('cannot reach hstry-api at x'), 'Start AI Memory on this computer, then try again.');
 check('login error is actionable', friendlyError('claude.ai: not logged in'), 'Open this provider and sign in, then sync again.');
 check('recovered API makes stale offline failure retryable', providerState({
   lastRunMs: now - 27 * 60_000,
@@ -55,6 +55,7 @@ check('visible settings normalize before sync', normalizeSettings({
   account: 'browser-local',
   intervalMinutes: 15,
   providers: { chatgpt: true, claude: true, gemini: false },
+  captureTypes: { projects: true, pinned: true, agents: true, recents: false },
 });
 check('invalid port cannot escape form constraints', normalizeSettings({
   port: '70000',
@@ -67,6 +68,17 @@ check('invalid port cannot escape form constraints', normalizeSettings({
   account: 'browser-local',
   intervalMinutes: 15,
   providers: { chatgpt: false, claude: false, gemini: false },
+  captureTypes: { projects: true, pinned: true, agents: true, recents: false },
 });
+
+check('no connection never claims a provider is ready', providerState(undefined, true).label, 'Waiting for connection');
+check('unavailable category data is visible', providerState({ lastRunMs: now, selectionWarning: 'Unknown category; skipped.' }, true, { apiConnected: true }).tone, 'warning');
+check('raw provider diagnostics never shown', friendlyError('internal bearer very-private-value'), 'This provider could not finish. Open the site, check your sign-in, and try again.');
+check('changed checklist does not reuse an old completed status', providerState({
+  lastRunMs: now, capturePolicy: { projects: true, pinned: true, agents: true, recents: true },
+  progress: { phase: 'complete', created: 1, updated: 0, detected: 1 },
+}, true, { apiConnected: true, captureTypes: { projects: true, pinned: true, agents: true, recents: false } }).label, 'Selection updated');
+check('legacy capture-all status needs a selective run', providerState({lastRunMs:now,progress:{phase:'complete'}}, true,
+  {apiConnected:true,captureTypes:{projects:true,pinned:true,agents:true,recents:false}}).label, 'Selection updated');
 
 process.exit(failures ? 1 : 0);

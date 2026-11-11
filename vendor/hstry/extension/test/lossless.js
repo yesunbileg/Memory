@@ -49,7 +49,7 @@ const push = async (source, adapter, conversations) => {
   return conversations.length;
 };
 for (const sync of [syncChatGPT, syncClaude, syncGemini]) {
-  const result = await sync({ state: {}, push, log: message => { throw new Error(message); } });
+  const result = await sync({ state: {}, captureTypes: { projects: false, pinned: false, agents: false, recents: true }, push, log: message => { throw new Error(message); } });
   assert.equal(result.conversations, 1);
 }
 for (const packet of packets) {

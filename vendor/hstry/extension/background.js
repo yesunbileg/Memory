@@ -1,9 +1,11 @@
 // hstry sync service worker: polls AI chat platforms on an alarm and pushes
 // new/updated conversations to a local hstry-api instance (POST /ingest).
 
-import { NotLoggedInError } from './lib/common.js';
+import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
+import { DEFAULT_CAPTURE_TYPES, normalizeCaptureTypes } from './providers/selection.js';
 import { normalizeSettings } from './ui.js';
+import { checkConnection } from './worker-auth.js';
 
 const DEFAULT_SETTINGS = {
   port: 41770,
@@ -11,6 +13,7 @@ const DEFAULT_SETTINGS = {
   account: 'browser-local',
   intervalMinutes: 15,
   providers: DEFAULT_PROVIDER_SETTINGS,
+  captureTypes: DEFAULT_CAPTURE_TYPES,
 };
 
 const ALARM_NAME = 'hstry-sync';
@@ -20,11 +23,12 @@ let statusWriteQueue = Promise.resolve();
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  return normalizeSettings({
+  const normalized = normalizeSettings({
     ...DEFAULT_SETTINGS,
     ...settings,
     providers: { ...DEFAULT_SETTINGS.providers, ...settings?.providers },
   }, DEFAULT_SETTINGS);
+  return { ...normalized, captureTypes: normalizeCaptureTypes(settings?.captureTypes) };
 }
 
 async function getStatus() {
@@ -63,7 +67,7 @@ const startupReady = clearInterruptedRuns();
 function makePush(settings, onResult = async () => {}) {
   const url = `http://127.0.0.1:${settings.port}/ingest`;
   return async function push(sourceId, adapter, conversations) {
-    if (!settings.token) throw new Error('Set the ingest token in extension settings before syncing');
+    if (!settings.token) throw localError('missing_token');
     let res;
     try {
       res = await fetch(url, {
@@ -72,21 +76,18 @@ function makePush(settings, onResult = async () => {}) {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${settings.token}`,
         },
+        redirect: 'error',
+        credentials: 'omit',
         body: JSON.stringify({ source: sourceId, adapter, account: settings.account, conversations }),
       });
     } catch {
-      // fetch() rejects with a bare "Failed to fetch" when nothing is
-      // listening. Turn it into something actionable.
-      throw new Error(
-        `cannot reach hstry-api at ${url} — is it running on port ${settings.port}? ` +
-          `start it with: ai-memory serve --port ${settings.port} --token-file data/ingest.token`
-      );
+      throw localError('offline');
     }
     if (res.status === 401) {
-      throw new Error(`hstry-api rejected the token (401) — extension token must match the server's token file / AI_MEMORY_INGEST_TOKEN`);
+      throw localError('unauthorized');
     }
     if (!res.ok) {
-      throw new Error(`hstry-api /ingest -> ${res.status}`);
+      throw localError('archive_unavailable');
     }
     const data = await res.json();
     await onResult({
@@ -120,16 +121,25 @@ async function registerEnabledSources(settings) {
 }
 
 async function checkApi() {
-  const settings = await getSettings();
-  const url = `http://127.0.0.1:${settings.port}/health`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return { ok: false, error: `hstry-api /health -> ${res.status}`, url };
-    const data = await res.json();
-    return { ok: data?.status === 'ok', url };
-  } catch {
-    return { ok: false, error: `cannot reach hstry-api on port ${settings.port}`, url };
-  }
+  return checkConnection(await getSettings());
+}
+
+const LOCAL_ERRORS = {
+  missing_token: 'Connect AI Memory using your private connection file first.',
+  unauthorized: 'This connection file does not match the running AI Memory receiver.',
+  offline: 'AI Memory is offline. Run ai-memory connect and keep its terminal open.',
+  archive_unavailable: 'AI Memory could not save this batch. Check its terminal and retry.',
+};
+
+function localError(code) {
+  return Object.assign(new Error(LOCAL_ERRORS[code]), { code });
+}
+
+function safeSyncFailure(error) {
+  if (Object.hasOwn(LOCAL_ERRORS, error?.code)) return { code: error.code, error: LOCAL_ERRORS[error.code] };
+  if (error instanceof NotLoggedInError) return { code: 'not_logged_in', error: 'Open this provider and sign in, then sync again.' };
+  if (error instanceof RateLimitedError) return { code: 'rate_limited', error: 'This provider is busy. Wait a few minutes and try again.' };
+  return { code: 'provider_error', error: 'This provider could not finish syncing. Try again in a moment.' };
 }
 
 async function ensureAlarm() {
@@ -156,23 +166,48 @@ async function runSync(
   await startupReady;
   const settings = await getSettings();
   const status = await getStatus();
-  const selected = Object.entries(PROVIDERS).filter(
+  const eligible = Object.entries(PROVIDERS).filter(
     ([name]) =>
       settings.providers[name] &&
-      (!onlyProvider || name === onlyProvider) &&
-      !activeProviders.has(name)
+      (!onlyProvider || name === onlyProvider)
   );
-  if (selected.length === 0) return false;
+  const selected = eligible.filter(([name]) => !activeProviders.has(name));
+  if (selected.length === 0) return {
+    ok: false,
+    code: eligible.length ? 'already_syncing' : 'no_enabled_providers',
+    error: eligible.length ? 'This provider is already syncing.' : 'Choose a provider in settings before syncing.',
+  };
   for (const [name] of selected) activeProviders.add(name);
   await chrome.action.setBadgeText({ text: '…' });
+
+  // Verify local credentials before any provider makes remote account or chat reads.
+  const connection = await checkConnection(settings);
+  if (!connection.ok) {
+    for (const [name] of selected) {
+      await setStatusEntry(name, {
+        ...(status[name] ?? {}), lastRunMs: Date.now(), trigger, running: false,
+        continuationPending: false, lastError: connection.error, lastErrorCode: connection.code,
+        progress: { phase: 'failed', detected: 0, processed: 0, accepted: 0, created: 0, updated: 0 },
+      });
+      activeProviders.delete(name);
+    }
+    await chrome.action.setBadgeText({ text: '!' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#cc3333' });
+    return connection;
+  }
 
   let anyError = false;
   let startedReported = false;
   await Promise.all(
     selected.map(async ([name, provider]) => {
+      const policyChanged = !status[name]?.capturePolicy ||
+        JSON.stringify(status[name].capturePolicy) !== JSON.stringify(settings.captureTypes);
       const entry = {
         ...(status[name] ?? {}),
-        ...(full && name === onlyProvider ? { state: {} } : {}),
+        ...((full && name === onlyProvider) || policyChanged ? { state: {} } : {}),
+        ...(policyChanged ? { lastSuccessMs: null, lastCount: null, selection: null, selectionWarning: null } : {}),
+        capturePolicy: { ...settings.captureTypes },
+        continuationPending: false,
         lastRunMs: Date.now(),
         trigger,
         running: true,
@@ -192,6 +227,8 @@ async function runSync(
       }
       const report = async progress => {
         entry.progress = { ...entry.progress, ...progress };
+        if (Object.hasOwn(progress, 'selection')) entry.selection = progress.selection;
+        if (Object.hasOwn(progress, 'selectionWarning')) entry.selectionWarning = progress.selectionWarning;
         await setStatusEntry(name, entry);
       };
       const push = makePush(settings, async result => {
@@ -203,32 +240,39 @@ async function runSync(
       });
       const register = makeRegister(settings);
       try {
-        if (!settings.token) throw new Error('Set the ingest token in extension settings before syncing');
         const result = await provider.sync({
           state: entry.state ?? {},
+          captureTypes: { ...settings.captureTypes },
           push,
           register,
           report,
-          log: message => console.warn(`[hstry-sync] ${message}`),
+          // Provider diagnostics can contain account or conversation text.
+          log: () => {},
         });
         entry.state = result.state;
-        entry.lastSuccessMs = Date.now();
+        entry.selection = Object.hasOwn(result, 'selection') ? result.selection : entry.progress.selection ?? null;
+        entry.selectionWarning = Object.hasOwn(result, 'selectionWarning') ? result.selectionWarning : entry.progress.selectionWarning ?? null;
+        if (!entry.selectionWarning) entry.lastSuccessMs = Date.now();
+        else anyError = true;
         entry.lastCount = result.conversations;
         entry.lastError = null;
+        entry.lastErrorCode = null;
         entry.running = false;
         entry.continuationPending = Boolean(result.hasMore);
         entry.progress = {
           ...entry.progress,
-          phase: result.hasMore ? 'queued' : 'complete',
+          phase: result.hasMore ? 'queued' : entry.selectionWarning ? 'attention' : 'complete',
+          selection: entry.selection,
+          selectionWarning: entry.selectionWarning,
         };
         if (result.hasMore) await scheduleContinuation(name);
       } catch (err) {
         anyError = true;
-        entry.lastError =
-          err instanceof NotLoggedInError ? `${err.message} — open the site and log in` : err.message;
+        const failure = safeSyncFailure(err);
+        entry.lastError = failure.error;
+        entry.lastErrorCode = failure.code;
         entry.running = false;
         entry.progress = { ...entry.progress, phase: 'failed' };
-        console.warn(`[hstry-sync] ${name} failed:`, err);
       } finally {
         activeProviders.delete(name);
         await setStatusEntry(name, entry);
@@ -240,7 +284,7 @@ async function runSync(
   if (anyError) {
     await chrome.action.setBadgeBackgroundColor({ color: '#cc3333' });
   }
-  return true;
+  return { ok: true };
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -260,8 +304,8 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name.startsWith(CONTINUE_ALARM_PREFIX)) {
     const providerName = alarm.name.slice(CONTINUE_ALARM_PREFIX.length);
     if (Object.hasOwn(PROVIDERS, providerName)) {
-      runSync('continuation', { onlyProvider: providerName }).then(started => {
-        if (!started) scheduleContinuation(providerName);
+      runSync('continuation', { onlyProvider: providerName }).then(result => {
+        if (result.code === 'already_syncing') scheduleContinuation(providerName);
       });
     }
   }
@@ -270,15 +314,23 @@ chrome.alarms.onAlarm.addListener(alarm => {
 chrome.action.onClicked.addListener(() => runSync('manual'));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  // Acknowledge synchronously and let the work continue in the background. A
-  // full sync can outlive the message channel (or the worker), so we must not
-  // hold the channel open waiting for it — status flows to the UI via
-  // chrome.storage instead. Returning true here would reproduce the
-  // "message channel closed before a response was received" error.
+  // Hold the channel only through the bounded local authentication check.
+  // Once a run starts, report progress through storage instead of waiting for
+  // provider requests that can outlive the channel or this worker.
+  const start = (trigger, options = {}) => {
+    let responded = false;
+    const respond = result => {
+      if (responded) return;
+      responded = true;
+      sendResponse(result);
+    };
+    runSync(trigger, { ...options, onStarted: async () => respond({ ok: true }) })
+      .then(respond)
+      .catch(() => respond({ ok: false, error: 'AI Memory could not start syncing. Try again.' }));
+  };
   if (message?.type === 'syncNow') {
-    runSync('manual');
-    sendResponse({ ok: true });
-    return false;
+    start('manual');
+    return true;
   }
   if (message?.type === 'fullSyncProvider') {
     const providerName = message.provider;
@@ -300,19 +352,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: false, error: 'This provider is already syncing' });
           return;
         }
-        let responded = false;
-        const respond = result => {
-          if (responded) return;
-          responded = true;
-          sendResponse(result);
-        };
-        runSync('full', {
+        start('full', {
           onlyProvider: providerName,
           full: true,
-          onStarted: async () => respond({ ok: true }),
-        }).catch(error => respond({ ok: false, error: error.message }));
+        });
       })
-      .catch(error => sendResponse({ ok: false, error: error.message }));
+      .catch(() => sendResponse({ ok: false, error: 'AI Memory could not start syncing. Try again.' }));
     return true;
   }
   if (message?.type === 'settingsChanged') {

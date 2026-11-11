@@ -42,6 +42,7 @@ async function run(state) {
   const pushed = [];
   const result = await syncGemini({
     state,
+    captureTypes: { projects: false, pinned: false, agents: false, recents: true },
     register: async () => {},
     report: async () => {},
     log: () => {},

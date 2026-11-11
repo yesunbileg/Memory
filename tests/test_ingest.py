@@ -317,3 +317,70 @@ def test_extreme_body_length_header_is_rejected_without_parsing_large_integer(ru
     server, database = running_server
     assert request(server, headers={"Content-Length": "9" * 5000})[0] == 413
     assert archived(database) == []
+
+
+def test_authenticated_connection_probe_does_not_create_or_write_archive(running_server):
+    server, database = running_server
+    status, headers, body = request(server, path="/auth/check", data={}, headers={"Origin": ORIGIN})
+    assert status == 200
+    assert json.loads(body) == {"status": "ok", "service": "ai-memory", "schema": 1}
+    assert headers["Access-Control-Allow-Origin"] == ORIGIN
+    assert not database.exists()
+    assert request(server)[0] == 200
+    before = archived(database)
+    assert request(server, path="/auth/check", data={})[0] == 200
+    assert archived(database) == before
+
+
+@pytest.mark.parametrize("authorization", ["", "Bearer wrong", "Basic synthetic-ingest-token"])
+def test_connection_probe_requires_the_same_bearer_token(running_server, authorization):
+    server, database = running_server
+    assert request(server, path="/auth/check", data={}, headers={"Authorization": authorization})[0] == 401
+    assert not database.exists()
+
+
+@pytest.mark.parametrize("headers", [{"Host": "evil.example"}, {"Origin": "https://evil.example"}])
+def test_connection_probe_rejects_untrusted_host_or_origin(running_server, headers):
+    server, database = running_server
+    status, response_headers, _ = request(server, path="/auth/check", data={}, headers=headers)
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in response_headers
+    assert not database.exists()
+
+
+def test_connection_preflight_is_only_allowed_on_recognized_routes(running_server):
+    server, _ = running_server
+    headers = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST",
+               "Access-Control-Request-Headers": "authorization, content-type"}
+    for path in ("/auth/check", "/ingest"):
+        assert request(server, method="OPTIONS", path=path, headers=headers)[0] == 204
+    for path in ("/auth/check?query=1", "/unknown", "/health"):
+        assert request(server, method="OPTIONS", path=path, headers=headers)[0] == 404
+
+
+def test_connection_probe_rejects_unexpected_payload_without_archiving(running_server):
+    server, database = running_server
+    assert request(server, path="/auth/check", data=payload())[0] == 400
+    assert request(server, path="/auth/check", data=[])[0] == 400
+    assert not database.exists()
+
+
+def test_real_worker_auth_helper_connects_to_loopback_receiver_without_ingesting(running_server):
+    server, database = running_server
+    script = """
+import { checkConnection } from './vendor/hstry/extension/worker-auth.js';
+const settings = {port: Number(process.argv[1]), token: 'synthetic-ingest-token'};
+const accepted = await checkConnection(settings);
+const rejected = await checkConnection({...settings, token: 'wrong-private-token'});
+process.stdout.write(JSON.stringify({accepted, rejected}));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(server.server_port)],
+        cwd=Path(__file__).parents[1], capture_output=True, text=True, check=True, timeout=10,
+    )
+    data = json.loads(result.stdout)
+    assert data["accepted"]["ok"] is True
+    assert data["rejected"]["ok"] is False
+    assert data["rejected"]["code"] == "unauthorized"
+    assert TOKEN not in result.stdout + result.stderr
+    assert not database.exists()

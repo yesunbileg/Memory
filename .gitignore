@@ -7,6 +7,8 @@ data/
 .superpowers/
 node_modules/
 storage_state.json
+ingest.token
+extension-connection.json
 .env
 dist/
 build/

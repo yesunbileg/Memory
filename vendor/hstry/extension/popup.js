@@ -1,64 +1,77 @@
-import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS, formatTime, providerState } from './ui.js';
+import { DEFAULT_CAPTURE_TYPES, DEFAULT_PROVIDER_SETTINGS, PROVIDERS, normalizeSettings, providerState } from './ui.js';
+import { connectionPresentation } from './connection-file.js';
 
-const DEFAULTS = { port: 41770, intervalMinutes: 15, providers: DEFAULT_PROVIDER_SETTINGS };
+const DEFAULTS = { port: 41770, token: '', intervalMinutes: 15, providers: DEFAULT_PROVIDER_SETTINGS, captureTypes: DEFAULT_CAPTURE_TYPES };
 const el = id => document.getElementById(id);
+const marks = { chatgpt: '◎', claude: '✳︎', gemini: '✦' };
 let apiConnected = false;
-
-function providerCard(name, entry, enabled) {
-  const provider = PROVIDERS[name];
-  const state = providerState(entry, enabled, { apiConnected });
-  const article = document.createElement('article');
-  article.className = 'provider';
-  article.innerHTML = `
-    <div><h2>${provider.name}</h2><p></p></div>
-    <div class="provider-meta"><strong>${state.label}</strong><span>${entry?.running ? 'Now' : formatTime(entry?.lastRunMs)}</span></div>`;
-  const detail = article.querySelector('p');
-  detail.textContent = state.detail;
-  if (state.tone === 'error') detail.className = 'error-copy';
-  return article;
-}
+let current = DEFAULTS;
+let busy = false;
+let connectionCheck = 0;
 
 async function render() {
-  const { settings, status } = await chrome.storage.local.get(['settings', 'status']);
-  const merged = { ...DEFAULTS, ...settings, providers: { ...DEFAULTS.providers, ...settings?.providers } };
-  el('api-detail').textContent = `http://127.0.0.1:${merged.port}`;
-  el('schedule').textContent = `Every ${merged.intervalMinutes} minute${merged.intervalMinutes === 1 ? '' : 's'}`;
-  const container = el('providers');
-  container.replaceChildren(...Object.keys(PROVIDERS).map(name => providerCard(name, status?.[name], merged.providers[name])));
-  return merged;
+  const { settings = {}, status = {} } = await chrome.storage.local.get(['settings', 'status']);
+  current = normalizeSettings({ ...DEFAULTS, ...settings, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers } }, DEFAULTS);
+  const names = { projects: 'Projects', pinned: 'Pinned', agents: 'GPTs & agents', recents: 'Recents' };
+  el('selection-summary').textContent = Object.entries(current.captureTypes).filter(([, value]) => value).map(([key]) => names[key]).join(' · ') || 'No chat types selected';
+  el('recents-note').textContent = current.captureTypes.recents ? 'Ordinary Recents included' : 'Ordinary Recents stay out';
+  el('schedule').textContent = `Checks every ${current.intervalMinutes} min`;
+  el('providers').replaceChildren();
+  for (const [id, provider] of Object.entries(PROVIDERS)) {
+    const state = providerState(status[id], current.providers[id], { apiConnected, captureTypes: current.captureTypes });
+    const row = document.createElement('article');
+    row.className = 'popup-provider';
+    row.innerHTML = `<span class="provider-mark ${id}" aria-hidden="true">${marks[id]}</span><div class="popup-provider-copy"><h2>${provider.name}</h2><p></p></div><span class="status-dot ${state.tone}"></span>`;
+    row.querySelector('p').textContent = state.label === 'Off' ? 'Off · enable in settings' : state.detail;
+    if (state.tone === 'error') row.querySelector('p').className = 'error-copy';
+    if (state.tone === 'warning') row.querySelector('p').className = 'warning-copy';
+    el('providers').appendChild(row);
+  }
+  const selected = Object.values(current.providers).some(Boolean) && Object.values(current.captureTypes).some(Boolean);
+  el('sync').textContent = busy ? 'Starting capture…' : !apiConnected ? 'Connect your computer' : selected ? 'Capture selected chats' : 'Choose what to capture';
+  el('sync').disabled = busy;
 }
 
 async function checkApi() {
+  const generation = ++connectionCheck;
+  const requested = { port: current.port, token: current.token };
   el('api-dot').className = 'status-dot checking';
-  el('api-title').textContent = 'Checking local API…';
   el('retry').disabled = true;
-  try {
-    const result = await chrome.runtime.sendMessage({ type: 'checkApi' });
-    if (!result?.ok) throw new Error(result?.error);
-    apiConnected = true;
-    el('api-dot').className = 'status-dot success';
-    el('api-title').textContent = 'Local API connected';
-  } catch {
-    apiConnected = false;
-    el('api-dot').className = 'status-dot error';
-    el('api-title').textContent = 'Local API is offline';
-  } finally {
-    await render();
-    el('retry').disabled = false;
-  }
+  let result;
+  try { result = await chrome.runtime.sendMessage({ type: 'checkApi' }); }
+  catch { result = { ok: false, code: 'offline' }; }
+  if (generation !== connectionCheck || requested.port !== current.port || requested.token !== current.token) return false;
+  apiConnected = result?.ok === true;
+  const state = connectionPresentation(result);
+  el('api-title').textContent = apiConnected ? 'Connected to your computer' : state.label;
+  el('api-detail').textContent = apiConnected ? 'Your selected chats stay on this computer.' : state.detail;
+  el('api-dot').className = `status-dot ${state.tone}`;
+  el('retry').disabled = false;
+  await render();
+  return apiConnected;
 }
 
 el('sync').addEventListener('click', async () => {
-  const button = el('sync');
-  button.disabled = true;
-  button.textContent = 'Syncing…';
-  el('notice').textContent = 'You can close this popup; sync continues in the background.';
-  try { await chrome.runtime.sendMessage({ type: 'syncNow' }); } catch { /* worker still starts */ }
-  setTimeout(() => { button.disabled = false; button.textContent = 'Sync now'; }, 1800);
+  if (busy) return;
+  const selected = Object.values(current.providers).some(Boolean) && Object.values(current.captureTypes).some(Boolean);
+  if (!apiConnected || !selected) { await chrome.runtime.openOptionsPage(); return; }
+  busy = true;
+  await render();
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'syncNow' });
+    el('notice').textContent = result?.ok ? 'Capturing your selection. You can close this popup.' : 'Could not start. Check your connection in settings.';
+  } catch { el('notice').textContent = 'Check your connection in settings and try again.'; }
+  finally { busy = false; await render(); }
 });
-el('settings').addEventListener('click', () => chrome.runtime.openOptionsPage());
+for (const id of ['settings', 'edit-selection']) el(id).addEventListener('click', () => chrome.runtime.openOptionsPage());
 el('retry').addEventListener('click', checkApi);
-chrome.storage.onChanged.addListener(changes => { if (changes.status || changes.settings) render(); });
-
+chrome.storage.onChanged.addListener(async changes => {
+  const previous = { port: current.port, token: current.token };
+  const values = changes.settings?.newValue;
+  const authChanged = values && (Number(values.port) !== previous.port || values.token !== previous.token);
+  if (authChanged) { connectionCheck++; apiConnected = false; }
+  if (changes.status || changes.settings) await render();
+  if (authChanged) await checkApi();
+});
 await render();
 await checkApi();

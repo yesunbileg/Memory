@@ -2,8 +2,10 @@
 // Usage: bun extension/test/options-init.js
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
-const elements = new Map();
+export const elements = new Map();
+export const storageListeners = [];
 
 class FakeElement {
   constructor(id = '') {
@@ -21,9 +23,8 @@ class FakeElement {
   }
 
   set innerHTML(html) {
-    const providerId = html.match(/id="(provider-[^"]+)"/)?.[1];
-    if (providerId) new FakeElement(providerId);
-    for (const selector of ['small', '.provider-domain', 'p', 'strong', 'button']) {
+    for (const match of html.matchAll(/id="([^"]+)"/g)) new FakeElement(match[1]);
+    for (const selector of ['small', '.provider-domain', 'p', 'strong', 'button', '.status-time']) {
       this.queries.set(selector, new FakeElement());
     }
   }
@@ -49,25 +50,8 @@ class FakeElement {
   }
 }
 
-for (const id of [
-  'port',
-  'token',
-  'account',
-  'interval',
-  'provider-list',
-  'status-list',
-  'resync-list',
-  'resync-result',
-  'connection-result',
-  'connection-dot',
-  'test-connection',
-  'setup-command',
-  'saved',
-  'save',
-  'sync-now',
-]) {
-  new FakeElement(id);
-}
+const html = await readFile(new URL('../options.html', import.meta.url), 'utf8');
+for (const match of html.matchAll(/id="([^"]+)"/g)) new FakeElement(match[1]);
 
 globalThis.document = {
   getElementById: id => elements.get(id) ?? null,
@@ -76,14 +60,14 @@ globalThis.document = {
 globalThis.chrome = {
   runtime: {
     sendMessage: async message =>
-      message.type === 'checkApi' ? { ok: true, url: 'http://127.0.0.1:41770' } : { ok: true },
+      message.type === 'checkApi' ? { ok: false, code: 'missing_token' } : { ok: true },
   },
   storage: {
     local: {
       get: async () => ({ settings: undefined, status: {} }),
       set: async () => {},
     },
-    onChanged: { addListener: () => {} },
+    onChanged: { addListener: listener => storageListeners.push(listener) },
   },
 };
 
@@ -95,4 +79,14 @@ for (const provider of ['chatgpt', 'claude', 'gemini']) {
   assert.ok(checkbox.listeners.has('change'), `${provider} change listener was registered`);
 }
 
-console.log('PASS options page initializes dynamic provider controls');
+for (const type of ['projects', 'pinned', 'agents', 'recents']) {
+  const checkbox = elements.get(`capture-${type}`);
+  assert.ok(checkbox, `${type} checkbox exists`);
+  assert.ok(checkbox.listeners.has('change'), `${type} saves on change`);
+  assert.equal(checkbox.checked, type !== 'recents');
+}
+assert.equal(elements.get('connection-label').textContent, 'Not connected');
+assert.equal(elements.get('sync-now').disabled, true);
+assert.equal(elements.get('connection-guide').hidden, false);
+assert.ok(elements.get('import-connection').listeners.has('click'));
+console.log('PASS guided options initializes providers, category checklist, connection import and honest missing-token state');

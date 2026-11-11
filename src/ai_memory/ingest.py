@@ -1,6 +1,6 @@
 """Small authenticated, loopback-only receiver for the hstry extension.
 
-Only health checks and the existing hstry ``POST /ingest`` contract are exposed.
+Public health, authenticated connection checks, and hstry ``POST /ingest`` are exposed.
 Capture archives locally with upload consent disabled; cloud sync is separate.
 """
 
@@ -179,7 +179,7 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 for header in self.headers.get("Access-Control-Request-Headers", "").split(",")
                 if header.strip()
             }
-            if self.path != "/ingest":
+            if self.path not in {"/ingest", "/auth/check"}:
                 self._reply(404, {"error": "not_found"})
             elif (
                 not self.headers.get("Origin")
@@ -193,7 +193,7 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
         def do_POST(self):
             if not self._boundary():
                 return
-            if self.path != "/ingest":
+            if self.path not in {"/ingest", "/auth/check"}:
                 self._reply(404, {"error": "not_found"})
                 return
             authorization = self.headers.get_all("Authorization", [])
@@ -228,7 +228,13 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise ValueError("incomplete body")
-                conversations = _normalize_packet(json.loads(raw.decode("utf-8")))
+                packet = json.loads(raw.decode("utf-8")) if raw else {}
+                if self.path == "/auth/check":
+                    if not isinstance(packet, dict) or packet:
+                        raise ValueError("connection check requires an empty object")
+                    self._reply(200, {"status": "ok", "service": "ai-memory", "schema": 1})
+                    return
+                conversations = _normalize_packet(packet)
             except (ValueError, TypeError, UnicodeError, RecursionError, TimeoutError):
                 self._reply(400, {"error": "invalid_payload"})
                 return

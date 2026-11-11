@@ -2,6 +2,8 @@
 
 import { NotLoggedInError, textPart, toMs } from '../lib/common.js';
 
+import { normalizeCaptureTypes, selectConversation, createSelectionSummary, recordSelection } from './selection.js';
+
 const BASE = 'https://gemini.google.com';
 const OVERLAP_MS = 5 * 60 * 1000;
 const PAGE_SIZE = 20;
@@ -149,8 +151,17 @@ async function readChat(session, summary) {
   };
 }
 
-export async function syncGemini({ state, push, register = async () => {}, log, report = async () => {} }) {
-  await report({ phase: 'discovering' });
+export async function syncGemini({ state = {}, captureTypes, push, register = async () => {}, log = () => {}, report = async () => {} }) {
+  const policy = normalizeCaptureTypes(captureTypes);
+  const selection = createSelectionSummary();
+  if (!Object.values(policy).some(Boolean)) {
+    await report({ phase: 'complete', detected: 0, processed: 0, selection, selectionWarning: null });
+    return { state, conversations: 0, selection, selectionWarning: null, hasMore: false };
+  }
+  const selectionWarning = policy.projects || policy.pinned || policy.agents
+    ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
+    : null;
+  await report({ phase: 'discovering', selection, selectionWarning });
   const session = await getSession();
   await register('gemini-web', 'gemini');
   const lastSyncMs = state?.lastSyncMs ?? null;
@@ -160,9 +171,16 @@ export async function syncGemini({ state, push, register = async () => {}, log, 
   const summaries = Array.isArray(pending?.summaries)
     ? pending.summaries
     : await listChats(session, since);
+  // The tuple schema has no verified project, pin or Gem membership fields.
+  // Do not interpret opaque booleans/indices or a suggestive title as consent.
+  for (const _summary of summaries) recordSelection(selection, selectConversation(null, policy, { recents: true }));
+  if (!policy.recents) {
+    await report({ phase: 'complete', detected: summaries.length, processed: 0, selection, selectionWarning });
+    return { state: { lastSyncMs }, conversations: 0, hasMore: false, selection, selectionWarning };
+  }
   const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
-  await report({ phase: 'importing', detected: summaries.length, processed: startIndex });
+  await report({ phase: 'importing', detected: summaries.length, processed: startIndex, selection, selectionWarning });
   let total = 0;
   let failures = 0;
   let processed = startIndex;
@@ -185,7 +203,7 @@ export async function syncGemini({ state, push, register = async () => {}, log, 
   if (batch.length) total += await push('gemini-web', 'gemini', batch);
   const hasMore = endIndex < summaries.length;
   const hadFailures = Boolean(pending?.hadFailures) || failures > 0;
-  await report({ phase: hasMore ? 'queued' : 'complete', processed });
+  await report({ phase: hasMore ? 'queued' : 'complete', processed, selection, selectionWarning });
   return {
     state: hasMore
       ? {
@@ -200,6 +218,8 @@ export async function syncGemini({ state, push, register = async () => {}, log, 
       : { lastSyncMs: hadFailures ? lastSyncMs : runStartedMs },
     conversations: total,
     hasMore,
+    selection,
+    selectionWarning,
   };
 }
 

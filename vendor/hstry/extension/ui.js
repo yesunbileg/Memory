@@ -1,6 +1,8 @@
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
+import { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES, normalizeCaptureTypes } from './providers/selection.js';
 
 export { DEFAULT_PROVIDER_SETTINGS, PROVIDERS };
+export { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES };
 
 export function normalizeSettings(values, defaults) {
   const port = Number(values.port);
@@ -16,6 +18,7 @@ export function normalizeSettings(values, defaults) {
     providers: Object.fromEntries(
       Object.keys(PROVIDERS).map(id => [id, Boolean(values.providers?.[id])])
     ),
+    captureTypes: normalizeCaptureTypes(values.captureTypes),
   };
 }
 
@@ -32,8 +35,11 @@ export function formatTime(ms, now = Date.now()) {
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export function providerState(entry, enabled = true, { apiConnected = false } = {}) {
-  if (!enabled) return { tone: 'muted', label: 'Paused', detail: 'Enable in settings to sync.' };
+export function providerState(entry, enabled = true, { apiConnected = false, captureTypes = null } = {}) {
+  if (!enabled) return { tone: 'muted', label: 'Off', detail: 'Turn on to capture selected chat types.' };
+  if (entry?.lastRunMs && captureTypes && JSON.stringify(entry.capturePolicy) !== JSON.stringify(normalizeCaptureTypes(captureTypes))) {
+    return { tone: 'idle', label: 'Selection updated', detail: 'Capture again to apply your new checklist.' };
+  }
   if (entry?.running) {
     const progress = entry.progress ?? {};
     if (progress.phase === 'discovering') {
@@ -52,7 +58,8 @@ export function providerState(entry, enabled = true, { apiConnected = false } = 
       detail: `${progressDetail(entry.progress ?? {})} · next batch queued`,
     };
   }
-  if (!entry?.lastRunMs) return { tone: 'idle', label: 'Ready to sync', detail: 'No sync has run yet.' };
+  if (!apiConnected) return { tone: 'muted', label: 'Waiting for connection', detail: 'Connect your computer to start saving chats.' };
+  if (!entry?.lastRunMs) return { tone: 'idle', label: 'Ready to sync', detail: 'Selected chat types will appear here.' };
   if (
     apiConnected &&
     entry.lastError &&
@@ -65,6 +72,7 @@ export function providerState(entry, enabled = true, { apiConnected = false } = 
     };
   }
   if (entry.lastError) return { tone: 'error', label: 'Needs attention', detail: friendlyError(entry.lastError) };
+  if (entry.selectionWarning) return { tone: 'warning', label: 'Some chats skipped', detail: entry.selectionWarning };
   if (entry.progress?.phase === 'complete') {
     const progress = entry.progress;
     const changed = progress.created + progress.updated;
@@ -75,7 +83,9 @@ export function providerState(entry, enabled = true, { apiConnected = false } = 
         ? `${progress.created} new · ${progress.updated} updated · ${progress.detected} detected`
         : progress.accepted > 0
           ? `${progress.accepted} accepted · ${progress.detected} detected`
-          : `No changes · ${progress.detected} detected`,
+          : (entry.selection?.skipped ?? 0) > 0
+            ? `No new chats · ${entry.selection.skipped} outside your selection`
+            : `No changes · ${progress.detected} checked`,
     };
   }
   return {
@@ -98,7 +108,7 @@ export function friendlyError(error) {
   const text = String(error ?? 'Unknown sync error');
   if (text.includes('not logged in')) return 'Open this provider and sign in, then sync again.';
   if (text.includes('cannot reach hstry-api') || text.includes('Failed to fetch')) {
-    return 'The local hstry API is offline. Start it, then try again.';
+    return 'Start AI Memory on this computer, then try again.';
   }
   if (text.includes('rejected the token') || text.includes('401')) {
     return 'The ingest token does not match the local API.';
@@ -106,5 +116,6 @@ export function friendlyError(error) {
   if (text.includes('429') || text.includes('RateLimited')) {
     return 'The provider is rate-limiting requests. Wait a few minutes and retry.';
   }
-  return text;
+  if (text.includes('token')) return 'Choose your connection file to finish setup.';
+  return 'This provider could not finish. Open the site, check your sign-in, and try again.';
 }

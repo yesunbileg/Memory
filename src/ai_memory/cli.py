@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -38,6 +39,8 @@ def parser():
     serve = sub.add_parser("serve", help="Authenticated loopback ingest for the hstry browser extension")
     serve.add_argument("--port", type=int, default=41770)
     serve.add_argument("--token-file", type=Path)
+    connect = sub.add_parser("connect", help="Create a private extension connection file and start AI Memory")
+    connect.add_argument("--port", type=int, default=41770)
     sub.add_parser("mcp", help="Serve memory_ask and memory_status over stdio")
     watch = sub.add_parser("watch", help="Incrementally scan selected sources; sync only approved text")
     watch.add_argument("--codex-path", type=Path)
@@ -142,6 +145,53 @@ def execute(args):
         return None
     if args.command == "watch":
         return _watch(args)
+    if args.command == "connect":
+        from ai_memory.connection import (
+            check_running_receiver,
+            prepare_connection,
+            write_connection_file,
+        )
+        from ai_memory.ingest import make_server
+
+        files = prepare_connection(args.db, args.port, write_config=False)
+        try:
+            server = make_server(args.db, files.token, port=files.port)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+            status = check_running_receiver(files.port, files.token)
+            if status == "ok":
+                write_connection_file(files)
+                print(
+                    "AI Memory is already running.\n"
+                    "In extension settings, choose this private connection file:\n"
+                    f"{files.connection_file}\n"
+                    "Keep the receiver's terminal open while you use the extension.",
+                    flush=True,
+                )
+                return None
+            if status == "unauthorized":
+                raise ValueError(
+                    f"Port {files.port} is using a different connection token. "
+                    "Use that receiver's connection file, or choose another port with --port."
+                ) from None
+            raise ValueError(
+                f"Port {files.port} is already in use by an incompatible receiver. "
+                "Stop it before running connect, or choose another port with --port."
+            ) from None
+        try:
+            write_connection_file(files)
+            print(
+                "AI Memory is ready.\n"
+                "In extension settings, choose this private connection file:\n"
+                f"{files.connection_file}\n"
+                "Keep this terminal open while you use the extension. Press Ctrl+C to stop.",
+                flush=True,
+            )
+            server.serve_forever()
+        finally:
+            server.server_close()
+        return None
     if args.command == "serve":
         from ai_memory.ingest import make_server
         token = args.token_file.read_text().strip() if args.token_file else os.environ.get("AI_MEMORY_INGEST_TOKEN", "")
@@ -197,6 +247,10 @@ def main(argv=None):
         return 130
     except Exception as exc:
         from ai_memory.notebook import NotebookLMError
+        if args.command == "connect":
+            message = str(exc) if isinstance(exc, ValueError) else "Connection setup failed. Check the archive directory and try again."
+            print(f"AI Memory could not connect. {message}", flush=True)
+            return 1
         if isinstance(exc, NotebookLMError):
             result = {"error": {"code": exc.code, "message": str(exc)}}
         elif isinstance(exc, ValueError):
