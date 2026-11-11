@@ -64,3 +64,35 @@ def test_collect_partial_failure_returns_unsuccessful_cli_status(tmp_path, monke
     })
     assert cli.main(["--db", str(tmp_path / "db"), "collect", "codex", str(tmp_path)]) == 1
     assert '"failed_files": 1' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reason", ["CapacityError", "SnapshotError", "SourceQuota"])
+def test_worker_reports_preflight_blockers_without_private_details_or_log_spam(tmp_path, monkeypatch, caplog, reason):
+    db = tmp_path / "archive.sqlite"
+    source = tmp_path / "sessions"
+    source.mkdir()
+    with Store(db) as store:
+        store.set_setting("notebook_id", "synthetic")
+    clock, syncs = [0], []
+
+    async def blocked_sync(store):
+        syncs.append(clock[0])
+        return {"blocked": [{"reason": reason, "detail": "PRIVATE-ARCHIVE-VALUE"}],
+                "status": {"sync_status": "pending"}}
+
+    def advance(seconds):
+        clock[0] += seconds
+        if clock[0] >= 90:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "sync_archive", blocked_sync)
+    monkeypatch.setattr(cli, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_sleep", advance)
+    monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
+    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(source)])
+    with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
+        cli._watch(args)
+    assert syncs == [0, 30, 60]
+    assert len(caplog.records) == 1
+    assert reason in caplog.text and "retry" in caplog.text
+    assert "PRIVATE-ARCHIVE-VALUE" not in caplog.text

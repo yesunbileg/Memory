@@ -220,6 +220,12 @@ def _watch(args):
                 if not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1):
                     try:
                         result = asyncio.run(sync_archive(store))
+                        # Preflight capacity/snapshot failures have no persisted
+                        # job and therefore do not pass through the queue logger.
+                        for blocker in result.get("blocked", []):
+                            code = blocker.get("reason")
+                            if not blocker.get("segment_id") and code in {"CapacityError", "SnapshotError", "SourceQuota"}:
+                                report(("sync", code), code)
                     except Exception as error:
                         code = failure_code(error)
                         report(("sync", code), code)
