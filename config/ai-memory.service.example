@@ -3,8 +3,8 @@ Description=Collect approved AI conversations and sync NotebookLM segments
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Memory
-ExecStart=%h/Memory/.venv/bin/ai-memory --db %h/.local/share/ai-memory/conversations.sqlite watch --codex-path %h/.codex/sessions --opencode-path %h/.local/share/opencode
+WorkingDirectory=/ABSOLUTE/PATH/Memory
+ExecStart=/ABSOLUTE/PATH/Memory/.venv/bin/ai-memory --db /ABSOLUTE/PATH/archive.sqlite watch --codex-path %h/.codex/sessions --opencode-path %h/.local/share/opencode
 Restart=on-failure
 RestartSec=30
 Nice=10

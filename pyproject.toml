@@ -10,6 +10,9 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = ["notebooklm-py==0.8.6", "mcp>=1.26,<2"]
 
+[project.optional-dependencies]
+login = ["notebooklm-py[cookies]==0.8.6"]
+
 [project.scripts]
 ai-memory = "ai_memory.cli:main"
 

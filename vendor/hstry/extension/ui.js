@@ -35,8 +35,13 @@ export function formatTime(ms, now = Date.now()) {
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export function providerState(entry, enabled = true, { apiConnected = false, captureTypes = null } = {}) {
+export function providerState(entry, enabled = true, { apiConnected = false, captureTypes = null, providerId = null } = {}) {
   if (!enabled) return { tone: 'muted', label: 'Off', detail: 'Turn on to capture selected chat types.' };
+  const types = captureTypes ? normalizeCaptureTypes(captureTypes) : null;
+  if (apiConnected && providerId === 'gemini' && types && !types.recents &&
+      (types.projects || types.pinned || types.agents)) {
+    return { tone: 'warning', label: 'Selection unavailable', detail: 'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.' };
+  }
   if (entry?.lastRunMs && captureTypes && JSON.stringify(entry.capturePolicy) !== JSON.stringify(normalizeCaptureTypes(captureTypes))) {
     return { tone: 'idle', label: 'Selection updated', detail: 'Capture again to apply your new checklist.' };
   }

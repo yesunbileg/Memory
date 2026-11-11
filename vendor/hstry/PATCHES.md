@@ -26,3 +26,9 @@ Patch groups:
    agent metadata, overlap deduplication, selection counts and fail-closed
    metadata warnings. Gemini organized membership remains unsupported without
    a verified schema. Existing capture fixtures explicitly select Recents.
+7. OpenCode JSON session-file entrypoints reuse the native new/legacy readers
+   with strict UTF-8, allowing per-session failure isolation and retries. SQLite
+   remains preferred at a source root; mixed JSON layouts prefer new duplicates.
+8. Extension 0.5.2 explains unsupported Gemini organized selection before the
+   first capture without enabling Recents. A stdlib build script packages public
+   runtime assets plus this license, excluding tests and connection/auth data.

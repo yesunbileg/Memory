@@ -1,4 +1,17 @@
-# Extension status — version 0.5.1
+# Extension status — version 0.5.2
+
+## Current local handoff
+
+- Existing logo, guided connection, responsive light/dark settings/popup and provider/category checklists are retained. Ordinary Recents remains off by default.
+- Gemini organized capture is explained before the first run, in Settings and Popup. The UI never enables Recents to compensate for missing category data.
+- `python scripts/package_extension.py` builds `dist/ai-memory-extension-0.5.2.zip` with runtime assets and license, excluding test/connection/auth data. Loading the repository's `vendor/hstry/extension` folder directly remains convenient for local development.
+- Existing-browser login uses `uv sync --frozen --extra login` then `notebooklm login --browser-cookies brave` (Chrome/Firefox also supported). No separate Chromium download is required for login.
+- Backend recovery now isolates OpenCode JSON sessions and tries smaller/later merge candidates before reporting real exhaustion. Worker preflight errors are visible and rate-limited.
+- Fresh checks: **172 Python tests**, **14 Node scripts**, real browser UI/local-auth harness, ZIP integration checks, Ruff, whitespace, frozen dependency and wheel build passed. Signed-in provider/Google behavior still needs the user's local test.
+
+Follow [the local Mongolian guide](local-testing.mn.md) for update, extension loading, a four-chat inclusion/exclusion test, Google demo, MCP and optional receiver/worker services.
+
+## Previous 0.5.1 recovery
 
 Development resumed after the earlier 0.5.0 snapshot. The four recorded follow-up defects are now covered by regressions and fixed.
 

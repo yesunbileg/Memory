@@ -2,6 +2,8 @@
 
 A lightweight archive for AI conversations, built from the [supplied architecture](docs/specification.mn.md).
 
+Локалд шинэчлэх, extension суулгах, Google login болон шалгалтын дараалал: [Монгол заавар](docs/local-testing.mn.md).
+
 Codex / OpenCode / web chats → hstry text collectors → SQLite → Markdown segments → **NotebookLM** → MCP.
 
 SQLite stores original text and operational state. NotebookLM is the only AI memory engine. There is no local LLM, vector database, automatic summary, dashboard, or paid API dependency. notebooklm-py uses Google's unofficial API; availability and free-account limits depend on Google.
@@ -37,7 +39,7 @@ The demo imports **synthetic** Codex and OpenCode histories through the actual d
 
 The default archive is `data/conversations.sqlite`; use `--db PATH` **before** the subcommand to select another archive. Import prints the actual conversation IDs. Histories are imported locally without upload consent. `approve` grants consent for the specified conversation, including future continuations; `collect --approve-upload` grants it during import. Review the archived text before approving. A conservative credential detector blocks uploads while keeping the original local text intact; it cannot identify every possible secret.
 
-Incremental scans checkpoint the selected path's file inventory. Unchanged histories skip parsing; changed trees are reparsed with idempotent native-ID upserts. Partial snapshots never delete absent messages. This initial version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. Missing timestamps and model names remain unknown.
+Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. Missing timestamps and model names remain unknown.
 
 ## Connect NotebookLM
 
@@ -47,7 +49,7 @@ Keep your existing auth location when reauthenticating. For a new setup on a clo
 
 ```bash
 # Install the optional cookie reader; no browser download is needed.
-uv pip install --python .venv/bin/python 'notebooklm-py[cookies]==0.8.6'
+uv sync --frozen --extra login
 
 # Use the same auth directory or --storage path as your worker/MCP server.
 .venv/bin/notebooklm login --browser-cookies brave
@@ -90,6 +92,8 @@ Load `vendor/hstry/extension` as an unpacked Chrome/Brave extension. From the pr
 .venv/bin/ai-memory connect
 ```
 
+For a standalone archive, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.5.2.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and the upstream license; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
+
 Keep the terminal open. The command creates/reuses private connection files and starts the local receiver. Open extension Settings → **Choose connection file**, then select `data/extension-connection.json` (or the path printed for your selected archive). Connection status verifies the bearer token and application identity; public health alone cannot show Connected. When reusing an occupied port, the CLI also verifies the exact archive identity and refuses another database.
 
 Enable the desired ChatGPT, Claude or Gemini providers. All are off initially. The category checklist defaults to **Projects & folders**, **Pinned & favorites**, and **GPTs & agents** on, with **Ordinary Recents** off. Organized chats can appear in Recents and still match their selected category; Recents-only does not override unchecked organized categories. Unknown membership stays out unless Recents is explicitly enabled. Existing archived history is retained. Codex/OpenCode local collection is independent of these browser filters.
@@ -107,6 +111,6 @@ The optional worker scans every 30 seconds and batches new cloud sync every 12 h
 
 ## Reliability and scope
 
-Segments target 150,000 words, with a 450,000-word merge ceiling and at most 49 active sources plus one replacement slot. Sealed segments stay stable unless their archived messages are edited. Continuations append to the current segment. A SQLite queue persists upload/reconciliation/readiness/cleanup stages with backoff. New sources must be ready before their predecessors are deleted. Overflow merges adjacent old segments without rewriting text; exhausted capacity pauses instead of summarizing or creating another notebook.
+Segments target 150,000 body words, with a 450,000-body-word merge ceiling and a 500,000-word ceiling on the complete rendered source. At most 49 sources are active, with one replacement slot. A merge that exceeds the rendered ceiling rolls back its candidate and tries a smaller or later adjacent group. Sealed segments stay stable unless their archived messages are edited. Continuations append to the current segment. A SQLite queue persists upload/reconciliation/readiness/cleanup stages with backoff. New sources must be ready before their predecessors are deleted. Exhausted capacity pauses instead of summarizing or creating another notebook.
 
 The current implementation supports Codex and OpenCode local adapters plus the three web providers. Other local agents, full historical web coverage, long-running Google auth stability, 150k/300k/450k retrieval benchmarks, and real Mongolian retrieval quality remain unverified. See [donor audit](docs/donor-audit.md), [validation](docs/validation.md), and [third-party notices](THIRD_PARTY_NOTICES.md).

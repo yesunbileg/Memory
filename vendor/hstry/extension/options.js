@@ -64,6 +64,7 @@ function updateSelection() {
     : 'Ordinary Recents stay out. A project or pinned chat is still included even when it also appears in Recents.';
   const selected = Object.values(types).some(Boolean);
   const enabled = Object.values(currentSettings.providers).some(Boolean);
+  el('gemini-selection-warning').hidden = !(currentSettings.providers.gemini && !types.recents && selected);
   el('sync-now').disabled = !apiConnected || !selected || !enabled || checking;
 }
 
@@ -104,7 +105,7 @@ async function renderStatus() {
   rescans.replaceChildren();
   for (const [id, provider] of Object.entries(PROVIDERS)) {
     const entry = status[id];
-    const state = providerState(entry, currentSettings.providers[id], { apiConnected, captureTypes: currentSettings.captureTypes });
+    const state = providerState(entry, currentSettings.providers[id], { apiConnected, captureTypes: currentSettings.captureTypes, providerId: id });
     const item = document.createElement('div');
     item.className = 'status-item';
     item.innerHTML = `<span class="status-dot ${state.tone}"></span><div class="status-content"><strong>${provider.name} · ${state.label}</strong><p></p></div><span class="status-time"></span>`;

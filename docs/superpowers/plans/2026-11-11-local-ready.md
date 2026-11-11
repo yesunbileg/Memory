@@ -50,20 +50,23 @@
 
 ## Task 3: Extension local handoff
 
-**Files:** `vendor/hstry/extension/ui.js`, `options.js`, `popup.js`, tests, manifest, `scripts/package_extension.py`, `tests/test_extension_package.py`.
+**Files:** `vendor/hstry/extension/ui.js`, `options.js`, `options.html`, `popup.js`, `styles.css`, tests, manifest, `scripts/extension_ui_check.py`, `scripts/package_extension.py`, `tests/test_extension_package.py`.
 
 **Interfaces:** Extend the shared provider presentation with the provider ID so unsupported Gemini organized capture is explained before a first run. Keep capture policy unchanged. Package a ZIP with `manifest.json` at its root and only runtime files, icons and the upstream license; no browser profile, token, connection file or test fixture.
 
-- [ ] Add an observable UI-state regression before changing the warning presentation.
-- [ ] Implement the warning for settings and popup; keep existing selection and authentication tests passing.
-- [ ] Add an archive integration regression, implement the stdlib packager, and bump the extension patch version.
-- [ ] Run every Node script and the real browser UI/local-auth harness; build and inspect the ZIP.
+- [x] Add an observable UI-state regression before changing the warning presentation.
+- [x] Implement the warning for settings and popup; keep existing selection and authentication tests passing.
+- [x] Add an archive integration regression, implement the stdlib packager, and bump the extension patch version.
+- [x] Run every Node script and the real browser UI/local-auth harness; build and inspect the ZIP.
 
 ## Task 4: Local instructions, review and main
 
-**Files:** `docs/local-testing.mn.md`, `README.md`, `docs/validation.md`, `docs/extension-handoff.md`, `vendor/hstry/PATCHES.md`.
+**Files:** `docs/local-testing.mn.md`, `README.md`, `docs/validation.md`, `docs/extension-handoff.md`, `vendor/hstry/PATCHES.md`, optional-login configuration in `pyproject.toml`/`uv.lock`, and user-service examples in `config/`.
 
-- [ ] Document update/install, existing-browser authentication, extension loading, synthetic demo, MCP and optional worker setup using a consistent archive/auth path.
+Declare the existing SDK cookie extra as optional `login` support so a frozen install can retain it without a second unmanaged pip step. Keep core dependencies unchanged. User services remain examples for local installation; do not install or start them in the cloud.
+
+- [x] Document update/install, existing-browser authentication, extension loading, synthetic demo, MCP and optional worker setup using a consistent archive/auth path.
+- [x] Ensure returned preflight capacity/snapshot blockers produce safe rate-limited worker notices, including when no queue job exists.
 - [ ] Run full Python/Node, Ruff, whitespace, frozen dependencies, wheel/resource/demo/MCP and the two original audit repros.
 - [ ] Obtain one fresh whole-branch review and address important findings with focused regressions.
 - [ ] Commit verified changes and push them to main under the user's standing authorization; confirm the remote commit and leave the working directory clean.

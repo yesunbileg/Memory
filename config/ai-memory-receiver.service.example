@@ -1,0 +1,13 @@
+[Unit]
+Description=Receive selected browser conversations into the local AI Memory archive
+
+[Service]
+Type=simple
+WorkingDirectory=/ABSOLUTE/PATH/Memory
+ExecStart=/ABSOLUTE/PATH/Memory/.venv/bin/ai-memory --db /ABSOLUTE/PATH/archive.sqlite connect
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

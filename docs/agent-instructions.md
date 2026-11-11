@@ -2,8 +2,8 @@
 
 Install the project with `uv sync --frozen`. Configure the archive and NotebookLM
 notebook with `ai-memory init`, then approve, build, and sync the conversations
-you want NotebookLM to receive. Install the optional `notebooklm-py[cookies]`
-dependency and use `notebooklm login --browser-cookies brave` to import the
+you want NotebookLM to receive. Install optional login support with
+`uv sync --frozen --extra login` and use `notebooklm login --browser-cookies brave` to import the
 session already signed in to NotebookLM in Brave; use `chrome` or `firefox`
 for those browsers. No separate Chromium installation is required. Run login
 as the browser's operating-system user, and use the same `NOTEBOOKLM_HOME` or

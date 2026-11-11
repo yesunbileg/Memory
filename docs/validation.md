@@ -1,5 +1,40 @@
 # Validation record
 
+## Current local handoff — 2026-11-11
+
+Extension version: **0.5.2**. The V1 architecture remains SQLite → Markdown → NotebookLM → two-tool MCP. Signed-in provider/Google tests are for the user's local environment; this handoff did not access a personal browser profile or upload a personal archive.
+
+Fresh verification before final review:
+
+- Full Python suite: **172 passed in 40.75s**. Actual Codex/OpenCode parsers, SQLite/filesystem state, local HTTP and stdio MCP run; Google responses are simulated in contract/recovery tests.
+- All **14 Node test scripts** passed. Includes default Recents exclusion, organized overlap, capture revocation, partial failure/cursors, auth races and the pre-capture Gemini warning.
+- Real browser UI harness passed settings/popup, actual loopback token verification, connection-file import, light/dark, mobile overflow and the Gemini warning without enabling Recents. The harness uses a test Chrome bridge; it is not an installed-extension/live-account run.
+- Extension ZIP built with `manifest.json` at its root. Integration tests verify runtime JS/HTML/icon dependencies, upstream license, exclusion of token/auth/connection/test data, and rejection of missing files/outside asset symlinks.
+- Ruff and `git diff --check` passed. `uv sync --frozen --extra login --dry-run` found **43 installed packages** consistent with the lockfile. The SDK cookie reader is an optional project extra, so login does not require a Chromium download.
+- Wheel build, source demo and genuine stdio MCP smoke passed. Final wheel/resource verification and review are recorded in the handoff commit.
+
+The two full-audit reproductions are now regressions:
+
+| Failure | Verified result |
+|---|---|
+| A broken OpenCode JSON session blocks healthy sessions | New/legacy JSON sessions checkpoint independently; corrupt metadata/message/part remains retryable while healthy sessions import. Part-only changes and explicit session-file dependencies are observed. SQLite retains priority; new-layout duplicates win. |
+| An oversized three-parent render blocks a feasible pair/later window | Each candidate uses a savepoint and validates the complete source. The real 49-source test retains **22,547 original messages**, peaks at **50 remote sources**, uploads the valid pair, deletes parents only after readiness, and repeats with no additional upload. All-infeasible rollback remains covered. |
+| Worker ignores preflight blockers without queue jobs | Capacity/snapshot/quota notices are allowlisted and rate-limited, without raw details or duplicate queue-job logs. |
+
+Synthetic demo: 2 conversations / 5 visible messages / 1 segment; 0.4222s wall time, parent peak RSS 17.93 MiB and max child RSS 66.37 MiB. This is a small import measurement, not a production soak test.
+
+Current external limits remain explicit:
+
+- The latest cloud live attempt stopped at `auth_required`; an unauthenticated NotebookLM network probe returned proxy CONNECT 403. No successful Google upload/retrieval is claimed for this handoff.
+- Managed Chromium blocks installing arbitrary unpacked extensions. The harness validates real page code and local HTTP using a test bridge.
+- Gemini project/pinned/agent metadata is not available in the verified schema. With Ordinary Recents off, Gemini capture stays excluded and the UI explains why.
+- Claude Code/Gemini CLI adapters, browser Codex task capture, real account quotas, long-lived login, Mongolian retrieval quality and optimal 150k/300k/450k Google source sizes remain outside the verified V1 scope.
+- A free-form answer's conversation/message IDs are not themselves verified citations. Structured IDs require an exact current archive heading; otherwise source/segment references remain.
+
+Local steps, including installed-extension checks, synthetic Google testing, MCP and optional user services: [Монгол заавар](local-testing.mn.md).
+
+## Historical initial verification — 2026-11-10
+
 Tests performed in this cloud environment on 2026-11-10 (Asia/Ulaanbaatar). The repository began empty; all input conversations in these checks are synthetic. No personal histories were scanned and no Google data was uploaded.
 
 ## Verified locally

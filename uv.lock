@@ -17,6 +17,11 @@ dependencies = [
     { name = "notebooklm-py" },
 ]
 
+[package.optional-dependencies]
+login = [
+    { name = "notebooklm-py", extra = ["cookies"] },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -28,7 +33,9 @@ dev = [
 requires-dist = [
     { name = "mcp", specifier = ">=1.26,<2" },
     { name = "notebooklm-py", specifier = "==0.8.6" },
+    { name = "notebooklm-py", extras = ["cookies"], marker = "extra == 'login'", specifier = "==0.8.6" },
 ]
+provides-extras = ["login"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -406,6 +413,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/aa/83f99848e8a25e1a8614998ed1b66dc52ef14468487a7c7f07467a65f745/notebooklm_py-0.8.6-py3-none-any.whl", hash = "sha256:85b4c4f2ed13d188b2189430bac8b67be0631c7d3c4d7e7698681d3e52e1f446", size = 2114064, upload-time = "2026-10-29T04:48:55.591Z" },
 ]
 
+[package.optional-dependencies]
+cookies = [
+    { name = "rookie-cookies" },
+]
+
 [[package]]
 name = "packaging"
 version = "26.3"
@@ -686,6 +698,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
+]
+
+[[package]]
+name = "rookie-cookies"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/07/398e39b02212b78cd79443d97ad0ec088d1c6860c67cbad169a1babe8880/rookie_cookies-0.6.0.tar.gz", hash = "sha256:9b833cf490e4868b7dd2f4a289dbdd6598b5c6175a0ea90f16fceeb1528b2236", size = 635724, upload-time = "2026-08-23T17:48:25.357Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/c9/fa17508fbc079c63d15d02f4b9b73995b758a1a5862e74edeb75cc5e7379/rookie_cookies-0.6.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9a664a703267e5a088a590007f3dfac6891966101be9501cc0af0f464f52e22c", size = 2021172, upload-time = "2026-08-23T17:48:17.683Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/e8/aa9dc3b26b51acc3c50dc5da45cd6f3aef4adab799b868251d275949887c/rookie_cookies-0.6.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:962d80a51bae45df711643593486852cfb8e34a27c758d33066371d6e2696bd7", size = 1944327, upload-time = "2026-08-23T17:48:19.299Z" },
+    { url = "https://files.pythonhosted.org/packages/94/bc/5f86935b5e9fe19cc5f842e69bd5f140b25617c236b580f01f5972d7a654/rookie_cookies-0.6.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a02c21e0305a77931d3ee3a130ff3cab0916ffa8b9c8d4050195eb9522ee7f1c", size = 2819636, upload-time = "2026-08-23T17:48:20.712Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/09/9342db5073d08227d319dad702ae382bbe18c00b2684390e4c9614a4ce77/rookie_cookies-0.6.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7b7a6bdf61fdc0706bd74576a37bbd675ef5213dc97dcdc1215b9ca1a82a4eea", size = 2929671, upload-time = "2026-08-23T17:48:22.288Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/87/c6c0b7ee71c34b3d919e407179624809eb8e84f5871d3d5583ce6c829403/rookie_cookies-0.6.0-cp311-abi3-win_amd64.whl", hash = "sha256:25c9861870f3a5f4b46221e337172a512bf4b755a4c00a44e355155ddb42593b", size = 2620104, upload-time = "2026-08-23T17:48:23.7Z" },
 ]
 
 [[package]]

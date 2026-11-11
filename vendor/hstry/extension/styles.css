@@ -70,6 +70,7 @@ button svg,.selection-note svg,.app-symbol svg { width:22px; height:22px; fill:n
 .section-kicker { display:block; color:var(--faint); font-size:9px; font-weight:650; letter-spacing:1.4px; margin-bottom:9px; }
 .section-heading>p { font-size:12px; margin-top:6px; }
 .provider-list,.capture-list { padding:0 25px; }
+.provider-note { margin:0 25px 18px; font-size:12px; line-height:1.6; color:var(--warning); }
 .provider-row { display:flex; align-items:center; gap:11px; min-height:76px; border-bottom:1px solid var(--rule); cursor:pointer; }
 .provider-mark { width:34px; height:34px; display:grid; place-items:center; border-radius:10px; background:var(--soft); font-size:18px; color:var(--ink); flex:none; }
 .provider-mark.claude { color:#bb7250; background:#fbf2eb; } .provider-mark.gemini { color:#6c63d6; background:#f1effd; }

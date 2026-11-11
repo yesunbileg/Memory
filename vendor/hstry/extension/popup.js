@@ -18,7 +18,7 @@ async function render() {
   el('schedule').textContent = `Checks every ${current.intervalMinutes} min`;
   el('providers').replaceChildren();
   for (const [id, provider] of Object.entries(PROVIDERS)) {
-    const state = providerState(status[id], current.providers[id], { apiConnected, captureTypes: current.captureTypes });
+    const state = providerState(status[id], current.providers[id], { apiConnected, captureTypes: current.captureTypes, providerId: id });
     const row = document.createElement('article');
     row.className = 'popup-provider';
     row.innerHTML = `<span class="provider-mark ${id}" aria-hidden="true">${marks[id]}</span><div class="popup-provider-copy"><h2>${provider.name}</h2><p></p></div><span class="status-dot ${state.tone}"></span>`;

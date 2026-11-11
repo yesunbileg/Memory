@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { DEFAULT_CAPTURE_TYPES, providerState } from '../ui.js';
+import { elements } from './options-init.js';
+
+const captureTypes = { ...DEFAULT_CAPTURE_TYPES };
+const context = { apiConnected: true, providerId: 'gemini', captureTypes };
+assert.equal(providerState(undefined, true, context).tone, 'warning', 'unsupported Gemini selection must be explained before the first capture');
+assert.equal(providerState({ lastRunMs: 1, capturePolicy: captureTypes }, true, context).tone, 'warning');
+assert.equal(providerState(undefined, false, context).tone, 'muted');
+assert.equal(providerState(undefined, true, { ...context, apiConnected: false }).tone, 'muted');
+assert.equal(providerState(undefined, true, { ...context, providerId: 'chatgpt' }).tone, 'idle');
+assert.equal(providerState(undefined, true, { ...context, captureTypes: { ...captureTypes, recents: true } }).tone, 'idle');
+assert.equal(captureTypes.recents, false, 'presentation cannot enable Recents');
+
+let stored = {};
+chrome.storage.local.get = async key => key === 'status' ? { status: {} } : { settings: stored };
+chrome.storage.local.set = async value => { if (value.settings) stored = structuredClone(value.settings); };
+chrome.runtime.sendMessage = async () => ({ ok: true });
+elements.get('provider-gemini').checked = true;
+await elements.get('provider-gemini').listeners.get('change')();
+await elements.get('test-connection').listeners.get('click')();
+assert.equal(elements.get('gemini-selection-warning').hidden, false);
+assert.equal(elements.get('capture-recents').checked, false);
+assert.equal(stored.captureTypes.recents, false);
+elements.get('capture-recents').checked = true;
+await elements.get('capture-recents').listeners.get('change')();
+assert.equal(elements.get('gemini-selection-warning').hidden, true);
+elements.get('capture-recents').checked = false;
+await elements.get('capture-recents').listeners.get('change')();
+assert.equal(elements.get('gemini-selection-warning').hidden, false);
+assert.equal(stored.captureTypes.recents, false);
+console.log('PASS Gemini selection warning is visible before capture and never broadens the checklist');
