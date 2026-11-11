@@ -2,10 +2,16 @@
 
 Install the project with `uv sync --frozen`. Configure the archive and NotebookLM
 notebook with `ai-memory init`, then approve, build, and sync the conversations
-you want NotebookLM to receive. `notebooklm login` supplies browser authentication
-for the same operating-system user running the MCP server. A Google service
-account does not replace this browser login. Keep authentication files outside
-the repository; do not copy cookie values into MCP configuration.
+you want NotebookLM to receive. Install the optional `notebooklm-py[cookies]`
+dependency and use `notebooklm login --browser-cookies brave` to import the
+session already signed in to NotebookLM in Brave; use `chrome` or `firefox`
+for those browsers. No separate Chromium installation is required. Run login
+as the browser's operating-system user, and use the same `NOTEBOOKLM_HOME` or
+explicit `--storage` path as the worker/MCP server. A cloud host cannot read a
+browser profile on another computer. A Google service account does not replace
+this browser session. Keep authentication files outside version control; do
+not copy cookie values into MCP configuration. See the
+[login instructions](../README.md#connect-notebooklm).
 
 Replace the absolute paths in [the Codex example](../config/codex.toml.example)
 and merge it into `~/.codex/config.toml`, or merge
