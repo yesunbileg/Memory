@@ -8,6 +8,25 @@ from notebooklm import AskResult, ChatReference, Source
 from notebooklm.types import SourceStatus
 
 
+def test_stored_client_allows_large_segment_uploads_without_short_write_timeout(monkeypatch):
+    from notebooklm import NotebookLMClient
+
+    from ai_memory.notebook import _stored_client
+
+    seen = {}
+    sentinel = object()
+
+    def from_storage(**kwargs):
+        seen.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(NotebookLMClient, "from_storage", from_storage)
+    assert _stored_client(Path("private-auth.json")) is sentinel
+    assert seen["path"] == "private-auth.json"
+    timeout = seen["config"].transfers.finalize_timeout
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (10, 300, 120, 10)
+
+
 class SimulatedSDK:
     """A typed SDK boundary; assertions exercise adapter inputs and outputs."""
 

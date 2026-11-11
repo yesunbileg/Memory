@@ -112,6 +112,8 @@ Chrome/Firefox бол `brave`-ийг `chrome`/`firefox` гэж солино. Pro
 
 Өөрийн жинхэнэ ярианаас Google руу дамжуулахыг зөвшөөрсөн ID-уудыг л `ai-memory approve ID1 ID2` командад өгч, дараа нь `ai-memory sync` ажиллуулна. Web capture нь Google upload зөвшөөрлийг автоматаар өгөхгүй.
 
+Upload хийх хувилбарт танигдсан API key, password/token, cookie, JWT болон private key-ийн нууц утгыг урттай нь тэнцүү тооны `*` тэмдэгтээр солино. Нэр, хашилт, бусад текст, мөрийн шилжилт хадгалагдана. SQLite болон локал Markdown export эх текстээ хадгална; `data/sync/` доторх cloud snapshot масктай байна. Таних дүрэмд хамрагдаагүй нууц байж болох тул зөвшөөрөл өгөхөөс өмнө эх яриагаа шалгана.
+
 ## 6. Codex/OpenCode болон background worker
 
 ```bash

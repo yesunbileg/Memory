@@ -86,9 +86,19 @@ def _safe_error(error: Exception, *, loading_auth: bool = False) -> NotebookLMEr
 
 def _stored_client(storage_path: Path | None) -> AbstractAsyncContextManager[NotebookLMClient]:
     from notebooklm import NotebookLMClient
+    from notebooklm.options import ClientConfig, TimeoutOptions, TransferOptions
 
     # The SDK owns browser cookies, profiles, auth refresh, and network transport.
-    return NotebookLMClient.from_storage(path=str(storage_path) if storage_path else None)
+    # Segment uploads can stall beyond the SDK's default 10-second write window.
+    # Keep finite limits while allowing the configured large Markdown sources.
+    config = ClientConfig(
+        transfers=TransferOptions(
+            finalize_timeout=TimeoutOptions(connect=10, read=300, write=120, pool=10)
+        )
+    )
+    return NotebookLMClient.from_storage(
+        path=str(storage_path) if storage_path else None, config=config
+    )
 
 
 class NotebookLMAdapter:

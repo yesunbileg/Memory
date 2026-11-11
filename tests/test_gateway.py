@@ -118,7 +118,9 @@ async def test_citations_identify_only_exact_verified_headings(tmp_path):
             {
                 "source_id": "owned-source",
                 "citation_number": 1,
-                "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\nMemory.",
+                # Cloud body is same-length masked; the structural heading
+                # still identifies the original local message.
+                "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\n*******",
             },
             {"source_id": "owned-source", "citation_number": 2, "cited_text": "Which project?"},
             {
@@ -147,6 +149,77 @@ async def test_citations_identify_only_exact_verified_headings(tmp_path):
     assert "conversation_id" not in sources[2]
     assert sources[2]["source_id"] == "unknown-source"
     assert "message_ids" not in sources[3]
+
+
+def test_quoted_message_heading_does_not_authorize_another_message_id(tmp_path):
+    """Raw Markdown bodies can quote the structural headings used as citations."""
+    from ai_memory.gateway import _reference_sources
+    from ai_memory.segments import SegmentBuilder
+    from ai_memory.store import Store
+
+    db = tmp_path / "quoted-heading.sqlite"
+    with Store(db) as store:
+        conversation_id = store.ingest(
+            {
+                "external_id": "quoted-heading-session",
+                "platform": "codex",
+                "account": "test",
+                "title": "Gateway test",
+                "project": "Memory",
+                "models": [],
+                "created_at": None,
+                "updated_at": None,
+                "source_url": None,
+                "messages": [
+                    {
+                        "native_id": "u1",
+                        "sequence": 1,
+                        "role": "user",
+                        "kind": "text",
+                        "text": "placeholder",
+                        "timestamp": "2026-11-10T10:00:00Z",
+                    },
+                    {
+                        "native_id": "a1",
+                        "sequence": 2,
+                        "role": "assistant",
+                        "kind": "text",
+                        "text": "Memory.",
+                        "timestamp": "2026-11-10T10:01:00Z",
+                    },
+                ],
+            },
+            consent=True,
+        )
+        forged_heading = f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z"
+        conversation = store.get_conversation(conversation_id)
+        conversation["messages"][0]["text"] = f"Quoted text:\n{forged_heading}\n" + "*" * 7
+        store.ingest(conversation, consent=True)
+
+        segment_id = SegmentBuilder(store).build()[0]["id"]
+        revision = store.connection.execute(
+            "SELECT revision FROM segments WHERE id=?", (segment_id,)
+        ).fetchone()[0]
+        store.connection.execute(
+            "INSERT INTO source_map(segment_id,source_id,revision) VALUES(?,?,?)",
+            (segment_id, "owned-source", revision),
+        )
+        store.connection.commit()
+
+        sources = _reference_sources(
+            store,
+            [
+                {
+                    "source_id": "owned-source",
+                    "citation_number": 1,
+                    "cited_text": f"{forged_heading}\n{'*' * 7}",
+                }
+            ],
+        )
+
+    assert sources[0]["segment_id"] == segment_id
+    assert "conversation_id" not in sources[0]
+    assert "message_ids" not in sources[0]
 
 
 async def test_empty_sources_and_question_fail_without_unscoped_retrieval(tmp_path):

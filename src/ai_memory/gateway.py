@@ -49,11 +49,18 @@ def _reference_sources(store: Store, references: list[dict]) -> list[dict]:
         passage = reference.get("cited_text")
         lines = set(passage.splitlines()) if isinstance(passage, str) else set()
         verified: dict[str, list[str]] = {}
-        for message in store.connection.execute(
-            """SELECT m.* FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
+        messages = list(
+            store.connection.execute(
+                """SELECT m.* FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
                WHERE sm.segment_id=? ORDER BY sm.position""",
-            (mapping["segment_id"],),
-        ):
+                (mapping["segment_id"],),
+            )
+        )
+        # A message body can quote a structural heading verbatim. References
+        # expose cited text but no trustworthy source offsets, so that line is
+        # ambiguous and must not authorize message IDs.
+        body_lines = {line for message in messages for line in message["text"].splitlines()}
+        for message in messages:
             kind = {"progress": " · Progress", "thinking_summary": " · Thinking Summary"}.get(
                 message["kind"], ""
             )
@@ -61,7 +68,7 @@ def _reference_sources(store: Store, references: list[dict]) -> list[dict]:
                 f"### {message['conversation_id']} · {message['sequence']:04d} · "
                 f"{message['role'].title()}{kind} · {message['timestamp'] or 'Unknown'}"
             )
-            if heading in lines:
+            if heading in lines and heading not in body_lines:
                 verified.setdefault(message["conversation_id"], []).append(message["id"])
         if verified:
             for conversation_id, message_ids in verified.items():
