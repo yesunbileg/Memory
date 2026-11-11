@@ -69,6 +69,6 @@ Declare the existing SDK cookie extra as optional `login` support so a frozen in
 - [x] Ensure returned preflight capacity/snapshot blockers produce safe rate-limited worker notices, including when no queue job exists.
 - [x] Run full Python/Node, Ruff, whitespace, frozen dependencies, wheel/resource/demo/MCP and the two original audit repros.
 - [x] Obtain one fresh whole-branch review and address important findings with focused regressions.
-- [ ] Commit verified changes and push them to main under the user's standing authorization; confirm the remote commit and leave the working directory clean.
+- [x] Commit verified changes and push them to main under the user's standing authorization; confirm the remote commit and leave the working directory clean.
 
 **Execution:** Inline in the existing cloud checkout. The user explicitly asked to finish autonomously and will perform personal-account tests locally. Existing-browser login is already cherry-picked from `2997ab0` onto the current main base.
