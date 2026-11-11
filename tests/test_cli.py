@@ -13,8 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_cli(*args):
-    return subprocess.run([sys.executable, "-m", "ai_memory", *map(str, args)], cwd=ROOT,
-                          text=True, capture_output=True, timeout=30)
+    return subprocess.run(
+        [sys.executable, "-m", "ai_memory", *map(str, args)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
 
 
 def test_cli_init_status_and_missing_notebook(tmp_path):
@@ -87,9 +92,13 @@ def test_collect_isolates_bad_jsonl_and_retries_it_after_repair(tmp_path):
 
     source = tmp_path / "sessions"
     source.mkdir()
-    shutil.copyfile(Path(__file__).parent / "fixtures/codex-visible.jsonl", source / "healthy.jsonl")
+    shutil.copyfile(
+        Path(__file__).parent / "fixtures/codex-visible.jsonl", source / "healthy.jsonl"
+    )
     broken = source / "broken.jsonl"
-    broken.write_text('{"type":"session_meta","payload":{"id":"broken"}}\n{"type":', encoding="utf-8")
+    broken.write_text(
+        '{"type":"session_meta","payload":{"id":"broken"}}\n{"type":', encoding="utf-8"
+    )
     with Store(tmp_path / "archive.sqlite") as store:
         first = collect_into(store, "codex", source)
         assert first["imported_conversations"] == 1
@@ -116,13 +125,23 @@ def test_collect_latest_edit_wins_independent_of_file_import_order(tmp_path, imp
 
     source = tmp_path / "sessions"
     source.mkdir()
+
     def rollout(text, updated):
         records = [
-            {"type": "session_meta", "payload": {"id": "stable-session", "timestamp": "2026-11-10T15:00:00Z"}},
-            {"timestamp": "2026-11-10T15:00:00Z", "type": "response_item", "payload": {
-                "type": "message", "role": "assistant", "id": "stable-message",
-                "content": [{"type": "output_text", "text": text}],
-            }},
+            {
+                "type": "session_meta",
+                "payload": {"id": "stable-session", "timestamp": "2026-11-10T15:00:00Z"},
+            },
+            {
+                "timestamp": "2026-11-10T15:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "stable-message",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            },
             {"timestamp": updated, "type": "turn_context", "payload": {"model": "synthetic"}},
         ]
         return "\n".join(json.dumps(record) for record in records)
@@ -136,9 +155,11 @@ def test_collect_latest_edit_wins_independent_of_file_import_order(tmp_path, imp
             (source / name).write_text(snapshots[name], encoding="utf-8")
             result = collect_into(store, "codex", source)
             assert result["failed_files"] == 0
-        conversation = store.get_conversation(store.connection.execute(
-            "SELECT id FROM conversations WHERE external_id='stable-session'"
-        ).fetchone()[0])
+        conversation = store.get_conversation(
+            store.connection.execute(
+                "SELECT id FROM conversations WHERE external_id='stable-session'"
+            ).fetchone()[0]
+        )
         assert len(conversation["messages"]) == 1
         assert conversation["messages"][0]["text"] == "latest"
         assert conversation["messages"][0]["timestamp"] == "2026-11-10T15:00:00.000Z"
@@ -169,7 +190,9 @@ def test_cli_rejects_fast_watch_and_empty_server_token(tmp_path):
 
 
 @pytest.mark.parametrize("pending,expected_calls", [(True, 3), (False, 1)])
-def test_background_worker_revisits_pending_jobs_without_waiting_twelve_hours(tmp_path, monkeypatch, pending, expected_calls):
+def test_background_worker_revisits_pending_jobs_without_waiting_twelve_hours(
+    tmp_path, monkeypatch, pending, expected_calls
+):
     from ai_memory import cli
     from ai_memory.demo import prepare_inputs
     from ai_memory.store import Store
@@ -209,7 +232,9 @@ def test_connect_writes_private_file_starts_receiver_and_reuses_running_setup(tm
     port = available_port()
     db = tmp_path / "archive.sqlite"
     command = [sys.executable, "-m", "ai_memory", "--db", str(db), "connect", "--port", str(port)]
-    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     file = tmp_path / "extension-connection.json"
     try:
         deadline = time.monotonic() + 7
@@ -219,9 +244,15 @@ def test_connect_writes_private_file_starts_receiver_and_reuses_running_setup(tm
                 settings = json.loads(file.read_text())
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.2)
                 try:
-                    connection.request("POST", "/auth/check", body="{}", headers={
-                        "Content-Type": "application/json", "Authorization": "Bearer " + settings["token"],
-                    })
+                    connection.request(
+                        "POST",
+                        "/auth/check",
+                        body="{}",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": "Bearer " + settings["token"],
+                        },
+                    )
                     response = connection.getresponse()
                     ready = response.status == 200
                     response.read()
@@ -258,7 +289,9 @@ def test_connect_explains_occupied_receiver_with_different_token(tmp_path):
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        result = run_cli("--db", tmp_path / "selected.sqlite", "connect", "--port", server.server_port)
+        result = run_cli(
+            "--db", tmp_path / "selected.sqlite", "connect", "--port", server.server_port
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -275,18 +308,18 @@ def test_connect_rejects_running_receiver_for_other_database_in_same_directory(t
     from ai_memory.connection import prepare_connection
     from ai_memory.ingest import make_server
 
-    first, second = tmp_path / 'first.sqlite', tmp_path / 'second.sqlite'
+    first, second = tmp_path / "first.sqlite", tmp_path / "second.sqlite"
     files = prepare_connection(first, 41770, write_config=False)
     server = make_server(first, files.token, port=0)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        result = run_cli('--db', second, 'connect', '--port', server.server_port)
+        result = run_cli("--db", second, "connect", "--port", server.server_port)
     finally:
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
     assert result.returncode == 1
-    assert 'different archive' in result.stdout.lower()
-    assert not (tmp_path / 'extension-connection.json').exists()
+    assert "different archive" in result.stdout.lower()
+    assert not (tmp_path / "extension-connection.json").exists()
     assert not first.exists() and not second.exists()

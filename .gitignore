@@ -10,5 +10,12 @@ storage_state.json
 ingest.token
 extension-connection.json
 .env
+.env.*
+!.env.example
+.axiomcode/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sync.lock
 dist/
 build/

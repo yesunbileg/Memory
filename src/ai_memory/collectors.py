@@ -7,15 +7,13 @@ small, lossless input contract. No personal paths are inspected implicitly.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import os
 import shutil
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+from .normalization import normalize_conversation as normalize_conversation
 
 
 def _vendor_root() -> Path:
@@ -28,147 +26,147 @@ def _vendor_root() -> Path:
     raise RuntimeError("Vendored hstry adapters are missing; reinstall AI Memory")
 
 
-def _timestamp(value: Any) -> str | None:
-    # hstry's contract is Unix milliseconds. Unknown remains unknown.
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-        try:
-            return (
-                datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-                .isoformat(timespec="milliseconds")
-                .replace("+00:00", "Z")
-            )
-        except (ValueError, OverflowError, OSError):
-            return None
-    return None
+def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
+    """Find rollouts without following symlinks, preferring plain mirrors.
 
-
-def _string(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
-    """Normalize trusted adapter shape while excluding unmarked reasoning.
-
-    Multipart text is concatenated in source order without inserted characters.
-    Visible thinking requires an explicit ``visibility: ui`` marker. Canonical
-    part IDs are adapter counters, so source message IDs (or record positions)
-    determine identity instead.
+    Direct batch retries match the adapter's depth bound. Incremental archive
+    imports pass no bound to retain their recursive explicit-source behavior.
     """
-    if not isinstance(raw, dict) or not isinstance(raw.get("messages"), list):
-        raise ValueError("conversation must contain a messages list")
-    external_id = _string(raw.get("externalId"))
-    if external_id is None:
-        raise ValueError("conversation externalId is required")
-    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-    messages: list[dict] = []
-    models: list[str] = []
-    fallback_counts: dict[str, int] = {}
-    for message in raw["messages"]:
-        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
-            continue
-        meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        if (
-            meta.get("visibility") == "hidden"
-            or meta.get("source") == "response_item.agent_message"
-        ):
-            continue
-        if meta.get("channel") in {"analysis", "justify", "confidence"}:
-            continue
-        model = _string(message.get("model"))
-        native_id = (
-            _string(message.get("clientId"))
-            or _string(meta.get("id"))
-            or _string(message.get("id"))
-        )
-        if not native_id:
-            parts = message.get("parts")
-            stable_parts = [
-                {key: part.get(key) for key in ("type", "text", "visibility", "synthetic", "ignored")
-                 if key in part}
-                for part in parts if isinstance(part, dict)
-            ] if isinstance(parts, list) else None
-            signature = hashlib.sha256(json.dumps(
-                [message["role"], message.get("createdAt"), message.get("model"),
-                 message.get("content"), stable_parts],
-                ensure_ascii=False, sort_keys=True,
-            ).encode("utf-8")).hexdigest()
-            occurrence = fallback_counts.get(signature, 0)
-            fallback_counts[signature] = occurrence + 1
-            native_id = f"derived:{signature[:32]}:{occurrence}"
-
-        groups: list[tuple[str, str, int]] = []
-        parts = message.get("parts")
-        if isinstance(parts, list) and parts:
-            for part_index, part in enumerate(parts):
-                if not isinstance(part, dict) or not isinstance(part.get("text"), str):
-                    continue
+    roots = [path]
+    roots.extend(
+        candidate
+        for name in ("sessions", "archived_sessions")
+        if (candidate := path / name).is_dir() and not candidate.is_symlink()
+    )
+    files: set[Path] = set()
+    for root in roots:
+        for directory, directories, filenames in os.walk(root, followlinks=False):
+            parent = Path(directory)
+            depth = len(parent.relative_to(root).parts)
+            directories[:] = [name for name in directories if not (parent / name).is_symlink()]
+            if max_depth is not None and depth >= max_depth:
+                directories.clear()
+            for name in filenames:
+                candidate = parent / name
                 if (
-                    part.get("visibility") == "hidden"
-                    or part.get("synthetic") is True
-                    or part.get("ignored") is True
+                    not candidate.is_symlink()
+                    and candidate.is_file()
+                    and name.endswith((".jsonl", ".jsonl.zst"))
                 ):
-                    continue
-                kind = None
-                if part.get("type") == "text":
-                    kind = "progress" if meta.get("kind") == "progress" else "text"
-                elif part.get("type") == "thinking" and part.get("visibility") == "ui":
-                    kind = "thinking_summary"
-                if kind is None or not part["text"]:
-                    continue
-                if groups and groups[-1][0] == kind:
-                    previous_kind, previous_text, first_part = groups[-1]
-                    groups[-1] = (previous_kind, previous_text + part["text"], first_part)
-                else:
-                    groups.append((kind, part["text"], part_index))
-        elif isinstance(message.get("content"), str) and message["content"]:
-            kind = meta.get("kind", "text")
-            if kind in {"text", "progress"}:
-                groups.append((kind, message["content"], 0))
-            elif kind == "thinking_summary" and meta.get("visibility") == "ui":
-                groups.append((kind, message["content"], 0))
+                    files.add(candidate)
+    # Match hstry's preference when a rollout exists in both encodings.
+    files = {f for f in files if not (f.name.endswith(".jsonl.zst") and f.with_suffix("").exists())}
+    return sorted(files)
 
-        kind_counts: dict[str, int] = {}
-        for kind, content, part_index in groups:
-            ordinal = kind_counts.get(kind, 0)
-            kind_counts[kind] = ordinal + 1
-            if kind in {"text", "progress"} and ordinal == 0:
-                group_id = native_id
-            elif (
-                kind == "thinking_summary"
-                and meta.get("kind") == "thinking_summary"
-                and ordinal == 0
-            ):
-                group_id = native_id
-            else:
-                group_id = f"{native_id}:{kind}:{ordinal}"
-            item = {
-                "native_id": group_id,
-                "sequence": len(messages) + 1,
-                "role": message["role"],
-                "kind": kind,
-                "text": content,
-                "timestamp": _timestamp(message.get("createdAt")),
-            }
-            if model:
-                item["model"] = model
-                if model not in models:
-                    models.append(model)
-            messages.append(item)
-    conversation_model = _string(raw.get("model"))
-    if conversation_model and conversation_model not in models:
-        models.append(conversation_model)
-    return {
-        "platform": platform.lower(),
-        "account": account,
-        "external_id": external_id,
-        "title": _string(raw.get("title")),
-        "project": _string(raw.get("workspace")),
-        "models": models,
-        "created_at": _timestamp(raw.get("createdAt")),
-        "updated_at": _timestamp(raw.get("updatedAt")),
-        "source_url": _string(metadata.get("url")),
-        "messages": messages,
-    }
+
+def _merge_codex_snapshots(conversations: list[dict]) -> list[dict]:
+    """Merge snapshots per native conversation, preferring newest message versions."""
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for conversation in conversations:
+        key = (
+            conversation["platform"],
+            conversation["account"],
+            conversation["external_id"],
+        )
+        grouped.setdefault(key, []).append(conversation)
+
+    merged: list[dict] = []
+    for snapshots in grouped.values():
+        snapshots.sort(key=lambda item: item.get("_snapshot_rank", ("", 0, "")))
+        newest = snapshots[-1]
+        result = dict(newest)
+        for field in ("title", "project", "created_at", "updated_at", "source_url"):
+            if result.get(field) is None:
+                result[field] = next(
+                    (
+                        item.get(field)
+                        for item in reversed(snapshots[:-1])
+                        if item.get(field) is not None
+                    ),
+                    None,
+                )
+        result["models"] = list(
+            dict.fromkeys(model for item in snapshots for model in item.get("models", []))
+        )
+
+        message_versions: dict[str, dict] = {}
+        for snapshot in snapshots:
+            for message in snapshot["messages"]:
+                message_versions[message["native_id"]] = dict(message)
+
+        order = list(dict.fromkeys(m["native_id"] for m in newest["messages"]))
+        # Add messages unique to older snapshots at their nearest known position.
+        for snapshot in reversed(snapshots[:-1]):
+            ids = [m["native_id"] for m in snapshot["messages"]]
+            order = _insert_missing_ids(order, ids)
+
+        result["messages"] = []
+        for sequence, native_id in enumerate(order, 1):
+            message = message_versions[native_id]
+            message["sequence"] = sequence
+            result["messages"].append(message)
+        result.pop("_snapshot_rank", None)
+        merged.append(result)
+
+    merged.sort(
+        key=lambda item: (item.get("created_at") or "", item["external_id"]),
+        reverse=True,
+    )
+    return merged
+
+
+def _insert_missing_ids(order: list[str], older_ids: list[str]) -> list[str]:
+    """Place older-only runs before their next anchor, or after the last one.
+
+    Assemble a new list once per snapshot instead of repeatedly scanning and
+    inserting into a growing transcript.
+    """
+    present = set(order)
+    before: dict[str, list[str]] = {}
+    missing: list[str] = []
+    previous = None
+    for native_id in dict.fromkeys(older_ids):
+        if native_id in present:
+            before[native_id] = missing
+            missing = []
+            previous = native_id
+        else:
+            missing.append(native_id)
+    result = []
+    for native_id in order:
+        result.extend(before.get(native_id, []))
+        result.append(native_id)
+        if native_id == previous:
+            result.extend(missing)
+    if previous is None:
+        result.extend(missing)
+    return result
+
+
+def _collect_codex_files(path: Path, account: str) -> list[dict]:
+    conversations: list[dict] = []
+    for rollout in codex_rollout_files(path):
+        snapshot = collect("codex", rollout, account)
+        rank = _snapshot_rank(snapshot[0], rollout) if snapshot else None
+        for conversation in snapshot:
+            if rank is not None:
+                conversation["_snapshot_rank"] = rank
+            conversations.append(conversation)
+    return _merge_codex_snapshots(conversations)
+
+
+def _snapshot_rank(conversation: dict, source_file: Path | None) -> tuple[str, int, str]:
+    timestamp = conversation.get("updated_at") or conversation.get("created_at") or ""
+    mtime_ns = 0
+    filename = ""
+    if source_file is not None:
+        try:
+            stat = source_file.stat()
+            mtime_ns = stat.st_mtime_ns
+            filename = source_file.name
+        except OSError:
+            pass
+    return timestamp, mtime_ns, filename
 
 
 def collect(platform: str, path: Path, account: str = "local") -> list[dict]:
@@ -204,6 +202,23 @@ def collect(platform: str, path: Path, account: str = "local") -> list[dict]:
             "hstry adapter returned invalid output; Node.js 24+ is required"
         ) from error
     if result.returncode or not isinstance(parsed, list):
+        if (
+            platform == "codex"
+            and path.is_dir()
+            and isinstance(parsed, dict)
+            and parsed.get("error") == "RangeError: Invalid string length"
+        ):
+            return _collect_codex_files(path, account)
         # Do not expose adapter stderr: source data and personal paths can occur.
         raise RuntimeError(f"hstry {platform} parser failed; verify the selected source format")
-    return [normalize_conversation(raw, platform, account) for raw in parsed]
+    conversations = []
+    for raw in parsed:
+        conversation = normalize_conversation(raw, platform, account)
+        if platform == "codex":
+            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            source_file = metadata.get("file")
+            conversation["_snapshot_rank"] = _snapshot_rank(
+                conversation, Path(source_file) if isinstance(source_file, str) else None
+            )
+        conversations.append(conversation)
+    return _merge_codex_snapshots(conversations) if platform == "codex" else conversations

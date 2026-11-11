@@ -1,41 +1,205 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light dark" />
-  <title>AI Memory · Settings</title>
-  <link rel="icon" href="icons/icon-32.png" />
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body class="options-page">
-<main class="settings-shell">
-  <header class="app-header">
-    <a class="brand" href="#" aria-label="AI Memory settings"><img src="icons/icon-128.png" alt="" width="44" height="44" /><span>AI Memory</span></a>
-    <span class="privacy-label"><span aria-hidden="true">◉</span> Private by default</span>
-  </header>
-  <div class="page-heading"><p class="eyebrow">YOUR MEMORY, YOUR CHOICE</p><h1>Keep what matters.</h1><p>Bring your important conversations together.<br />Choose what stays. Everyday chats can stay out.</p></div>
-  <section class="card connection-card" aria-labelledby="connection-title">
-    <div class="card-header connection-header">
-      <span class="app-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M9 21h6m-3-4v4"/></svg></span>
-      <div class="header-copy"><h2 id="connection-title">Let’s connect your computer</h2><p id="connection-result" aria-live="polite">Checking your connection…</p></div>
-      <span id="connection-pill" class="status-pill idle"><span id="connection-dot" class="status-dot idle"></span><span id="connection-label">Not connected</span></span>
-    </div>
-    <div id="connection-guide" class="connection-guide">
-      <div class="setup-step"><span class="step-number">1</span><div><h3>Start AI Memory</h3><p>Open a terminal in your project folder and run this once. Keep it open while capturing.</p><div class="command-box"><code id="setup-command">.venv/bin/ai-memory connect</code><button id="copy-command" class="icon-button" aria-label="Copy startup command" title="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button></div></div></div>
-      <div class="setup-step"><span class="step-number">2</span><div><h3>Choose your connection file</h3><p>The app creates <strong>extension-connection.json</strong> in its data folder. Choose that file to finish connecting.</p><button id="import-connection" class="button-primary">Choose connection file <span aria-hidden="true">↗</span></button><input id="connection-file" type="file" accept=".json,application/json" hidden /><p id="import-result" class="inline-feedback" role="status" aria-live="polite"></p></div></div>
-    </div>
-    <div id="connection-ready" class="connection-ready" hidden><span class="success-check" aria-hidden="true">✓</span><p>You’re all set. Your selected chats will be saved on this computer.</p><button id="change-connection" class="button-quiet">Change connection</button></div>
-    <div class="connection-footer"><details id="manual-connection"><summary>Connect manually</summary><div class="manual-fields"><label for="port">Port<input id="port" type="number" min="1" max="65535" value="41770" inputmode="numeric" /></label><label for="token">Connection token<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your local connection token" /></label><button id="save" class="button-secondary">Save & verify</button></div></details><button id="test-connection" class="button-quiet">Check connection</button></div>
-  </section>
-  <div class="settings-grid">
-    <section class="card" aria-labelledby="providers-heading"><div class="section-heading"><span class="section-kicker">01 / SOURCES</span><h2 id="providers-heading">Where your chats live</h2><p>Choose the websites you want to capture.</p></div><div id="provider-list" class="provider-list"></div><p id="gemini-selection-warning" class="provider-note" role="status" hidden>Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.</p><div class="local-source"><span class="local-source-icon" aria-hidden="true">⌘</span><div><strong>Codex</strong><p>Local collector · runs on this computer.<br />Browser filters don’t change local sessions.</p></div><span class="small-tag">Local</span></div></section>
-    <section class="card" aria-labelledby="capture-heading"><div class="section-heading"><span class="section-kicker">02 / YOUR SELECTION</span><h2 id="capture-heading">What you want to keep</h2><p>Pick the types of conversations that matter.</p></div><div id="capture-list" class="capture-list"></div><div class="selection-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg><p id="selection-summary">Ordinary Recents are excluded. Project and pinned chats can still appear in Recents.</p></div></section>
-  </div>
-  <section class="card activity-card" aria-labelledby="status-heading"><div class="activity-header"><div><h2 id="status-heading">Activity</h2><p>See what was saved and what stayed out.</p></div><button id="sync-now" class="button-primary" disabled>Capture selected chats <span aria-hidden="true">↻</span></button></div><div id="status-list" class="status-list" aria-live="polite"></div><p id="saved" class="inline-feedback" role="status" aria-live="polite"></p></section>
-  <details class="advanced-card"><summary><span>Advanced settings</span><span aria-hidden="true">⌄</span></summary><div class="advanced-content"><div class="advanced-grid"><label for="account">Browser profile name<input id="account" type="text" value="browser-local" autocomplete="off" /><span class="field-hint">Use a different name for each browser profile.</span></label><label for="interval">Check for changes every <span class="field-hint">minutes</span><input id="interval" type="number" min="1" max="720" value="15" /></label></div><p class="field-hint">If a website cannot identify a chat’s category, it stays out unless you select Ordinary Recents. This does not delete previously archived chats.</p><h3>Rescan selected chats</h3><p class="field-hint">Recheck older chats using your current checklist. Existing chats won’t be duplicated.</p><div id="resync-list" class="resync-list"></div><p id="resync-result" class="inline-feedback" role="status" aria-live="polite"></p></div></details>
-  <footer class="app-footer"><span>Conversations stay local. NotebookLM upload needs separate approval.</span><span id="app-version">AI Memory</span></footer>
-</main>
-<script src="options.js" type="module"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>AI Memory · Settings</title>
+    <link rel="icon" href="icons/icon-32.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options-page">
+    <main class="settings-shell">
+      <header class="app-header">
+        <a class="brand" href="#" aria-label="AI Memory settings"
+          ><img src="icons/icon-128.png" alt="" width="44" height="44" /><span>AI Memory</span></a
+        >
+        <span class="privacy-label"><span aria-hidden="true">◉</span> Private by default</span>
+      </header>
+      <div class="page-heading">
+        <p class="eyebrow">YOUR MEMORY, YOUR CHOICE</p>
+        <h1>Keep what matters.</h1>
+        <p>
+          Bring your important conversations together.<br />Choose what stays. Everyday chats can
+          stay out.
+        </p>
+      </div>
+      <section class="card connection-card" aria-labelledby="connection-title">
+        <div class="card-header connection-header">
+          <span class="app-symbol" aria-hidden="true"
+            ><svg viewBox="0 0 24 24">
+              <rect x="3" y="4" width="18" height="13" rx="2" />
+              <path d="M9 21h6m-3-4v4" /></svg
+          ></span>
+          <div class="header-copy">
+            <h2 id="connection-title">Let’s connect your computer</h2>
+            <p id="connection-result" aria-live="polite">Checking your connection…</p>
+          </div>
+          <span id="connection-pill" class="status-pill idle"
+            ><span id="connection-dot" class="status-dot idle"></span
+            ><span id="connection-label">Not connected</span></span
+          >
+        </div>
+        <div id="connection-guide" class="connection-guide">
+          <div class="setup-step">
+            <span class="step-number">1</span>
+            <div>
+              <h3>Start AI Memory</h3>
+              <p>
+                Open a terminal in your project folder and run this once. Keep it open while
+                capturing.
+              </p>
+              <div class="command-box">
+                <code id="setup-command">.venv/bin/ai-memory connect</code
+                ><button
+                  id="copy-command"
+                  class="icon-button"
+                  aria-label="Copy startup command"
+                  title="Copy command"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="12" height="13" rx="2" />
+                    <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="setup-step">
+            <span class="step-number">2</span>
+            <div>
+              <h3>Choose your connection file</h3>
+              <p>
+                The app creates <strong>extension-connection.json</strong> in its data folder.
+                Choose that file to finish connecting.
+              </p>
+              <button id="import-connection" class="button-primary">
+                Choose connection file <span aria-hidden="true">↗</span></button
+              ><input id="connection-file" type="file" accept=".json,application/json" hidden />
+              <p id="import-result" class="inline-feedback" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+        </div>
+        <div id="connection-ready" class="connection-ready" hidden>
+          <span class="success-check" aria-hidden="true">✓</span>
+          <p>You’re all set. Your selected chats will be saved on this computer.</p>
+          <button id="change-connection" class="button-quiet">Change connection</button>
+        </div>
+        <div class="connection-footer">
+          <details id="manual-connection">
+            <summary>Connect manually</summary>
+            <div class="manual-fields">
+              <label for="port"
+                >Port<input
+                  id="port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value="41770"
+                  inputmode="numeric" /></label
+              ><label for="token"
+                >Connection token<input
+                  id="token"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Paste your local connection token" /></label
+              ><button id="save" class="button-secondary">Save & verify</button>
+            </div>
+          </details>
+          <button id="test-connection" class="button-quiet">Check connection</button>
+        </div>
+      </section>
+      <div class="settings-grid">
+        <section class="card" aria-labelledby="providers-heading">
+          <div class="section-heading">
+            <span class="section-kicker">01 / SOURCES</span>
+            <h2 id="providers-heading">Where your chats live</h2>
+            <p>Choose the websites you want to capture.</p>
+          </div>
+          <div id="provider-list" class="provider-list"></div>
+          <p id="gemini-selection-warning" class="provider-note" role="status" hidden>
+            Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off,
+            Gemini chats stay out.
+          </p>
+          <div class="local-source">
+            <span class="local-source-icon" aria-hidden="true">⌘</span>
+            <div>
+              <strong>Codex</strong>
+              <p>
+                Local collector · runs on this computer.<br />Browser filters don’t change local
+                sessions.
+              </p>
+            </div>
+            <span class="small-tag">Local</span>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="capture-heading">
+          <div class="section-heading">
+            <span class="section-kicker">02 / YOUR SELECTION</span>
+            <h2 id="capture-heading">What you want to keep</h2>
+            <p>Pick the types of conversations that matter.</p>
+          </div>
+          <div id="capture-list" class="capture-list"></div>
+          <div class="selection-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z" />
+              <path d="m8 12 3 3 5-6" />
+            </svg>
+            <p id="selection-summary">
+              Ordinary Recents are excluded. Project and pinned chats can still appear in Recents.
+            </p>
+          </div>
+        </section>
+      </div>
+      <section class="card activity-card" aria-labelledby="status-heading">
+        <div class="activity-header">
+          <div>
+            <h2 id="status-heading">Activity</h2>
+            <p>See what was saved and what stayed out.</p>
+          </div>
+          <button id="sync-now" class="button-primary" disabled>
+            Capture selected chats <span aria-hidden="true">↻</span>
+          </button>
+        </div>
+        <div id="status-list" class="status-list" aria-live="polite"></div>
+        <p id="saved" class="inline-feedback" role="status" aria-live="polite"></p>
+      </section>
+      <details class="advanced-card">
+        <summary><span>Advanced settings</span><span aria-hidden="true">⌄</span></summary>
+        <div class="advanced-content">
+          <div class="advanced-grid">
+            <label for="account"
+              >Browser profile name<input
+                id="account"
+                type="text"
+                value="browser-local"
+                autocomplete="off"
+              /><span class="field-hint"
+                >Use a different name for each browser profile.</span
+              ></label
+            ><label for="interval"
+              >Check for changes every <span class="field-hint">minutes</span
+              ><input id="interval" type="number" min="1" max="720" value="15"
+            /></label>
+          </div>
+          <p class="field-hint">
+            If a website cannot identify a chat’s category, it stays out unless you select Ordinary
+            Recents. This does not delete previously archived chats.
+          </p>
+          <h3>Rescan selected chats</h3>
+          <p class="field-hint">
+            Recheck older chats using your current checklist. Existing chats won’t be duplicated.
+          </p>
+          <div id="resync-list" class="resync-list"></div>
+          <p id="resync-result" class="inline-feedback" role="status" aria-live="polite"></p>
+        </div>
+      </details>
+      <footer class="app-footer">
+        <span>Conversations stay local. NotebookLM upload needs separate approval.</span
+        ><span id="app-version">AI Memory</span>
+      </footer>
+    </main>
+    <script src="options.js" type="module"></script>
+  </body>
 </html>

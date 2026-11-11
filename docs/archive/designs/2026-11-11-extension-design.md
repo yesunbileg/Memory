@@ -1,3 +1,5 @@
+> Historical development record. Use [development](../../development.md) and [current validation](../../validation.md) for today's workflow.
+
 # Extension setup and selective capture
 
 The user requested an iPhone-like friendly extension, a logo, and a checklist that excludes ordinary Recents by default while allowing projects, pinned/favorite chats, and GPT/agent conversations. Preserve existing archive text and local Codex collection. No deletion of previously archived chats is authorized.

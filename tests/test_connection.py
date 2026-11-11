@@ -24,7 +24,9 @@ def test_connection_files_are_private_and_repeatable(tmp_path):
         assert stat.S_IMODE(file.stat().st_mode) == 0o600
     original = [file.read_bytes() for file in (files.token_file, files.connection_file)]
     repeated = prepare_connection(db, 41770)
-    artifacts_unchanged = original == [file.read_bytes() for file in (repeated.token_file, repeated.connection_file)]
+    artifacts_unchanged = original == [
+        file.read_bytes() for file in (repeated.token_file, repeated.connection_file)
+    ]
     assert artifacts_unchanged
     token_exposed = files.token in repr(files)
     assert not token_exposed
@@ -46,8 +48,17 @@ def test_existing_private_connection_can_restore_missing_token_file(tmp_path):
     from ai_memory.connection import prepare_connection
 
     file = tmp_path / "extension-connection.json"
-    file.write_text(json.dumps({"schema": 1, "application": "ai-memory", "host": "127.0.0.1",
-                                "port": 41770, "token": SYNTHETIC_TOKEN}))
+    file.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "application": "ai-memory",
+                "host": "127.0.0.1",
+                "port": 41770,
+                "token": SYNTHETIC_TOKEN,
+            }
+        )
+    )
     file.chmod(0o600)
     before = file.read_bytes()
     files = prepare_connection(tmp_path / "archive.sqlite", 41770)
@@ -110,13 +121,16 @@ def test_running_receiver_identity_distinguishes_archives_without_exposing_paths
     from ai_memory.connection import check_running_receiver
     from ai_memory.ingest import make_server
 
-    first, second = tmp_path / 'first.sqlite', tmp_path / 'second.sqlite'
+    first, second = tmp_path / "first.sqlite", tmp_path / "second.sqlite"
     server = make_server(first, SYNTHETIC_TOKEN, port=0)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        assert check_running_receiver(server.server_port, SYNTHETIC_TOKEN, first) == 'ok'
-        assert check_running_receiver(server.server_port, SYNTHETIC_TOKEN, second) == 'different_archive'
+        assert check_running_receiver(server.server_port, SYNTHETIC_TOKEN, first) == "ok"
+        assert (
+            check_running_receiver(server.server_port, SYNTHETIC_TOKEN, second)
+            == "different_archive"
+        )
     finally:
         server.shutdown()
         server.server_close()

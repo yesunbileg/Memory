@@ -26,7 +26,7 @@ export class NotLoggedInError extends Error {
 }
 
 export function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Cap on how long we honor a server-provided Retry-After (ms). */
@@ -48,7 +48,9 @@ export async function fetchJson(url, init = {}, { retries = 5, baseDelayMs = 100
 
     if (res.status === 429 || res.status === 502 || res.status === 503) {
       if (attempt >= retries) {
-        throw new RateLimitedError(`${init.method ?? 'GET'} ${url} -> ${res.status} (gave up after ${retries} retries)`);
+        throw new RateLimitedError(
+          `${init.method ?? 'GET'} ${url} -> ${res.status} (gave up after ${retries} retries)`,
+        );
       }
       const retryAfter = Number(res.headers.get('retry-after'));
       const headerMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
@@ -84,5 +86,8 @@ export function toMs(value) {
 }
 
 export function shortId(id) {
-  return String(id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toLowerCase();
+  return String(id)
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .slice(0, 8)
+    .toLowerCase();
 }

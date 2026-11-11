@@ -28,11 +28,14 @@ asyncio_default_fixture_loop_scope = "function"
 packages = ["src/ai_memory"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"vendor/hstry" = "ai_memory/vendor/hstry"
+"vendor/hstry/adapters" = "ai_memory/vendor/hstry/adapters"
+"vendor/hstry/LICENSE" = "ai_memory/vendor/hstry/LICENSE"
+"vendor/hstry/UPSTREAM.json" = "ai_memory/vendor/hstry/UPSTREAM.json"
+"vendor/hstry/PATCHES.md" = "ai_memory/vendor/hstry/PATCHES.md"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I"]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "PIE"]

@@ -2,7 +2,12 @@
 
 import { NotLoggedInError, textPart, toMs } from '../lib/common.js';
 
-import { normalizeCaptureTypes, selectConversation, createSelectionSummary, recordSelection } from './selection.js';
+import {
+  normalizeCaptureTypes,
+  selectConversation,
+  createSelectionSummary,
+  recordSelection,
+} from './selection.js';
 
 const BASE = 'https://gemini.google.com';
 const OVERLAP_MS = 5 * 60 * 1000;
@@ -11,8 +16,8 @@ const SYNC_CHUNK_SIZE = 10;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 function extractSession(html) {
-  const read = key => html.match(new RegExp(`"${key}":"((?:\\\\.|[^"\\\\])*)"`))?.[1];
-  const decode = value => value ? JSON.parse(`"${value}"`) : '';
+  const read = (key) => html.match(new RegExp(`"${key}":"((?:\\\\.|[^"\\\\])*)"`))?.[1];
+  const decode = (value) => (value ? JSON.parse(`"${value}"`) : '');
   return {
     at: decode(read('SNlM0e')),
     sid: decode(read('FdrFJe')),
@@ -68,7 +73,10 @@ async function batchExecute(session, rpcId, arg) {
   const res = await fetch(url, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'X-Same-Domain': '1' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+      'X-Same-Domain': '1',
+    },
     body,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -117,7 +125,16 @@ async function readChat(session, summary) {
   const turns = [];
   let cursor = null;
   for (let page = 0; page < 200; page++) {
-    const data = await batchExecute(session, 'hNvQHb', [summary.rawId, 20, cursor, 1, [0], [4], null, 1]);
+    const data = await batchExecute(session, 'hNvQHb', [
+      summary.rawId,
+      20,
+      cursor,
+      1,
+      [0],
+      [4],
+      null,
+      1,
+    ]);
     const pageTurns = Array.isArray(data?.[0]) ? data[0] : [];
     turns.push(...pageTurns);
     const nextCursor = data?.[1] ?? null;
@@ -128,14 +145,33 @@ async function readChat(session, summary) {
 
   const messages = [];
   for (const [index, turn] of turns.entries()) {
-    const turnId = typeof turn?.[0] === 'string' ? turn[0] : typeof turn?.[0]?.[0] === 'string' ? turn[0][0] : `record:${index + 1}`;
+    const turnId =
+      typeof turn?.[0] === 'string'
+        ? turn[0]
+        : typeof turn?.[0]?.[0] === 'string'
+          ? turn[0][0]
+          : `record:${index + 1}`;
     const user = turn?.[2]?.[0]?.[0];
     const assistant = assistantText(turn);
     if (typeof user === 'string' && user.length) {
-      messages.push({ role: 'user', content: user, createdAt: null, model: null, parts: [textPart(user)], metadata: { id: `${turnId}:user` } });
+      messages.push({
+        role: 'user',
+        content: user,
+        createdAt: null,
+        model: null,
+        parts: [textPart(user)],
+        metadata: { id: `${turnId}:user` },
+      });
     }
     if (assistant.length) {
-      messages.push({ role: 'assistant', content: assistant, createdAt: null, model: null, parts: [textPart(assistant)], metadata: { id: `${turnId}:assistant` } });
+      messages.push({
+        role: 'assistant',
+        content: assistant,
+        createdAt: null,
+        model: null,
+        parts: [textPart(assistant)],
+        metadata: { id: `${turnId}:assistant` },
+      });
     }
   }
   if (messages.length === 0) return null;
@@ -151,16 +187,30 @@ async function readChat(session, summary) {
   };
 }
 
-export async function syncGemini({ state = {}, captureTypes, push, register = async () => {}, log = () => {}, report = async () => {} }) {
+export async function syncGemini({
+  state = {},
+  captureTypes,
+  push,
+  register = async () => {},
+  log = () => {},
+  report = async () => {},
+}) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
   if (!Object.values(policy).some(Boolean)) {
-    await report({ phase: 'complete', detected: 0, processed: 0, selection, selectionWarning: null });
+    await report({
+      phase: 'complete',
+      detected: 0,
+      processed: 0,
+      selection,
+      selectionWarning: null,
+    });
     return { state, conversations: 0, selection, selectionWarning: null, hasMore: false };
   }
-  let selectionWarning = policy.projects || policy.pinned || policy.agents
-    ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
-    : null;
+  let selectionWarning =
+    policy.projects || policy.pinned || policy.agents
+      ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
+      : null;
   await report({ phase: 'discovering', selection, selectionWarning });
   const session = await getSession();
   await register('gemini-web', 'gemini');
@@ -173,14 +223,27 @@ export async function syncGemini({ state = {}, captureTypes, push, register = as
     : await listChats(session, since);
   // The tuple schema has no verified project, pin or Gem membership fields.
   // Do not interpret opaque booleans/indices or a suggestive title as consent.
-  for (const _summary of summaries) recordSelection(selection, selectConversation(null, policy, { recents: true }));
+  for (const _summary of summaries)
+    recordSelection(selection, selectConversation(null, policy, { recents: true }));
   if (!policy.recents) {
-    await report({ phase: 'complete', detected: summaries.length, processed: 0, selection, selectionWarning });
+    await report({
+      phase: 'complete',
+      detected: summaries.length,
+      processed: 0,
+      selection,
+      selectionWarning,
+    });
     return { state: { lastSyncMs }, conversations: 0, hasMore: false, selection, selectionWarning };
   }
   const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
-  await report({ phase: 'importing', detected: summaries.length, processed: startIndex, selection, selectionWarning });
+  await report({
+    phase: 'importing',
+    detected: summaries.length,
+    processed: startIndex,
+    selection,
+    selectionWarning,
+  });
   let total = 0;
   let failures = 0;
   let processed = startIndex;
@@ -203,9 +266,13 @@ export async function syncGemini({ state = {}, captureTypes, push, register = as
   if (batch.length) total += await push('gemini-web', 'gemini', batch);
   const hasMore = endIndex < summaries.length;
   const hadFailures = Boolean(pending?.hadFailures) || failures > 0;
-  if (hadFailures) selectionWarning = [selectionWarning,
-    'Some selected Gemini conversations could not be read. Capture is incomplete; retry after checking your sign-in.',
-  ].filter(Boolean).join(' ');
+  if (hadFailures)
+    selectionWarning = [
+      selectionWarning,
+      'Some selected Gemini conversations could not be read. Capture is incomplete; retry after checking your sign-in.',
+    ]
+      .filter(Boolean)
+      .join(' ');
   await report({ phase: hasMore ? 'queued' : 'complete', processed, selection, selectionWarning });
   return {
     state: hasMore

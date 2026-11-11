@@ -1,16 +1,14 @@
 // Claude provider: syncs conversations from claude.ai via its web API,
 // authenticated with the browser session cookies (no bearer token needed).
 
-import {
-  fetchJson,
-  shortId,
-  sleep,
-  textPart,
-  thinkingPart,
-  toMs,
-} from '../lib/common.js';
+import { fetchJson, shortId, sleep, textPart, thinkingPart, toMs } from '../lib/common.js';
 
-import { normalizeCaptureTypes, selectConversation, createSelectionSummary, recordSelection } from './selection.js';
+import {
+  normalizeCaptureTypes,
+  selectConversation,
+  createSelectionSummary,
+  recordSelection,
+} from './selection.js';
 
 const MAX_DISCOVERY_PAGES = 200;
 const BASE = 'https://claude.ai';
@@ -25,8 +23,8 @@ async function listOrganizations() {
     throw new Error('Claude returned an unreadable organizations response');
   }
   const available = orgs
-    .map(org => ({ id: org?.uuid ?? org?.id, name: org?.name ?? 'organization' }))
-    .filter(org => org.id);
+    .map((org) => ({ id: org?.uuid ?? org?.id, name: org?.name ?? 'organization' }))
+    .filter((org) => org.id);
   if (available.length === 0) {
     throw new Error('Claude returned no available organizations');
   }
@@ -38,11 +36,12 @@ async function* listUpdatedConversations(orgId, sinceMs) {
   for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
     const offset = page * PAGE_SIZE;
     const data = await fetchJson(
-      `${BASE}/api/organizations/${orgId}/chat_conversations?limit=${PAGE_SIZE}&offset=${offset}&consistency=eventual`
+      `${BASE}/api/organizations/${orgId}/chat_conversations?limit=${PAGE_SIZE}&offset=${offset}&consistency=eventual`,
     );
     const items = Array.isArray(data) ? data : data?.data;
     if (!Array.isArray(items)) throw new Error('Claude conversation list shape is unavailable');
-    if (items.length && items.every(item => seen.has(item?.uuid))) throw new Error('Claude conversation pagination did not advance');
+    if (items.length && items.every((item) => seen.has(item?.uuid)))
+      throw new Error('Claude conversation pagination did not advance');
     for (const item of items) seen.add(item?.uuid);
     for (const item of items) {
       const updatedMs = toMs(item.updated_at);
@@ -61,7 +60,8 @@ async function listProjects(orgId) {
   // cursor API. A changed/paginated envelope must be reported as unavailable.
   if (!Array.isArray(data)) throw new Error('Claude project catalog shape is unavailable');
   for (const project of data) {
-    if (typeof project?.uuid !== 'string' || !project.uuid) throw new Error('Claude project identifier is unavailable');
+    if (typeof project?.uuid !== 'string' || !project.uuid)
+      throw new Error('Claude project identifier is unavailable');
   }
   return data;
 }
@@ -70,13 +70,16 @@ async function* listProjectConversations(orgId, projectId) {
   const seen = new Set();
   for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
     const offset = page * PAGE_SIZE;
-    const url = new URL(`${BASE}/api/organizations/${encodeURIComponent(orgId)}/projects/${encodeURIComponent(projectId)}/conversations_v2`);
+    const url = new URL(
+      `${BASE}/api/organizations/${encodeURIComponent(orgId)}/projects/${encodeURIComponent(projectId)}/conversations_v2`,
+    );
     url.searchParams.set('limit', String(PAGE_SIZE));
     url.searchParams.set('offset', String(offset));
     const data = await fetchJson(url.href);
     const items = Array.isArray(data) ? data : data?.data;
     if (!Array.isArray(items)) throw new Error('Claude project conversation shape is unavailable');
-    if (items.length && items.every(item => seen.has(item?.uuid))) throw new Error('Claude project pagination did not advance');
+    if (items.length && items.every((item) => seen.has(item?.uuid)))
+      throw new Error('Claude project pagination did not advance');
     for (const item of items) seen.add(item?.uuid);
     for (const item of items) yield item;
     if (items.length < PAGE_SIZE) return;
@@ -96,7 +99,12 @@ function extractMessage(msg, index) {
     if (block.type === 'text' && typeof block.text === 'string' && block.text) {
       texts.push(block.text);
       parts.push(textPart(block.text));
-    } else if (block.type === 'thinking' && block.visibility === 'ui' && typeof block.summary === 'string' && block.summary) {
+    } else if (
+      block.type === 'thinking' &&
+      block.visibility === 'ui' &&
+      typeof block.summary === 'string' &&
+      block.summary
+    ) {
       parts.push({ ...thinkingPart(block.summary), visibility: 'ui' });
     }
   }
@@ -107,7 +115,11 @@ function extractMessage(msg, index) {
   }
   if (!content && parts.length === 0) return null;
   return {
-    role, content, createdAt: toMs(msg.created_at), model: msg.model ?? null, parts,
+    role,
+    content,
+    createdAt: toMs(msg.created_at),
+    model: msg.model ?? null,
+    parts,
     metadata: { id: msg.uuid ?? msg.id ?? `record:${index + 1}` },
   };
 }
@@ -131,11 +143,24 @@ function toParsedConversation(detail, orgId) {
   };
 }
 
-export async function syncClaude({ state = {}, captureTypes, push, register = async () => {}, log = () => {}, report = async () => {} }) {
+export async function syncClaude({
+  state = {},
+  captureTypes,
+  push,
+  register = async () => {},
+  log = () => {},
+  report = async () => {},
+}) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
   if (!Object.values(policy).some(Boolean)) {
-    await report({ phase: 'complete', detected: 0, processed: 0, selection, selectionWarning: null });
+    await report({
+      phase: 'complete',
+      detected: 0,
+      processed: 0,
+      selection,
+      selectionWarning: null,
+    });
     return { state, conversations: 0, selection, selectionWarning: null };
   }
   await report({ phase: 'discovering', selection });
@@ -160,16 +185,23 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
     let projectMembershipAvailable = false;
     let failures = 0;
     const add = (item, context = {}) => {
-      if (typeof item?.uuid !== 'string' || !item.uuid) throw new Error('Claude conversation identifier is unavailable');
+      if (typeof item?.uuid !== 'string' || !item.uuid)
+        throw new Error('Claude conversation identifier is unavailable');
       const previous = candidates.get(item.uuid);
-      candidates.set(item.uuid, { item: { ...previous?.item, ...item }, context: { ...previous?.context, ...context } });
+      candidates.set(item.uuid, {
+        item: { ...previous?.item, ...item },
+        context: { ...previous?.context, ...context },
+      });
     };
     try {
       const selective = policy.projects || policy.pinned || policy.agents;
-      for await (const item of listUpdatedConversations(org.id, selective ? null : since)) add(item, { recents: true });
+      for await (const item of listUpdatedConversations(org.id, selective ? null : since))
+        add(item, { recents: true });
     } catch (error) {
       failures++;
-      warnings.add('Claude conversation discovery is incomplete; unavailable entries were not captured.');
+      warnings.add(
+        'Claude conversation discovery is incomplete; unavailable entries were not captured.',
+      );
       log(`claude: skipping organization ${key} conversation list: ${error.message}`);
     }
     if (policy.projects) {
@@ -178,18 +210,23 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
         let complete = true;
         for (const project of projects) {
           try {
-            for await (const item of listProjectConversations(org.id, project.uuid)) add(item, { projectId: project.uuid });
+            for await (const item of listProjectConversations(org.id, project.uuid))
+              add(item, { projectId: project.uuid });
           } catch (error) {
             complete = false;
             failures++;
-            warnings.add('Claude project conversation discovery is incomplete; unavailable pages were not captured.');
+            warnings.add(
+              'Claude project conversation discovery is incomplete; unavailable pages were not captured.',
+            );
             log(`claude: project conversations unavailable: ${error.message}`);
           }
         }
         projectMembershipAvailable = complete;
       } catch (error) {
         failures++;
-        warnings.add('Claude project discovery is unavailable; only explicit verified project metadata can match.');
+        warnings.add(
+          'Claude project discovery is unavailable; only explicit verified project metadata can match.',
+        );
         log(`claude: project catalog unavailable: ${error.message}`);
       }
     }
@@ -198,11 +235,20 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
     let first = true;
     for (const { item, context } of candidates.values()) {
       detected++;
-      const decision = selectConversation(item, policy, { recents: false, ...context, projectMembershipAvailable });
+      const decision = selectConversation(item, policy, {
+        recents: false,
+        ...context,
+        projectMembershipAvailable,
+      });
       recordSelection(selection, decision);
-      if (!policy.recents && !decision.selected && decision.unavailable.some(category => policy[category])) {
+      if (
+        !policy.recents &&
+        !decision.selected &&
+        decision.unavailable.some((category) => policy[category])
+      ) {
         missingMetadata++;
-        for (const category of decision.unavailable.filter(category => policy[category])) missingTypes.add(category);
+        for (const category of decision.unavailable.filter((category) => policy[category]))
+          missingTypes.add(category);
       }
       if (!decision.selected) {
         await report({ phase: 'importing', detected, processed, selection });
@@ -212,13 +258,15 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
       first = false;
       try {
         const detail = await fetchJson(
-          `${BASE}/api/organizations/${encodeURIComponent(org.id)}/chat_conversations/${encodeURIComponent(item.uuid)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`
+          `${BASE}/api/organizations/${encodeURIComponent(org.id)}/chat_conversations/${encodeURIComponent(item.uuid)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`,
         );
         const conv = toParsedConversation(detail, org.id);
         if (conv) batch.push(conv);
       } catch (error) {
         failures++;
-        warnings.add('Some selected Claude conversations could not be read. Capture is incomplete; retry after checking your sign-in.');
+        warnings.add(
+          'Some selected Claude conversations could not be read. Capture is incomplete; retry after checking your sign-in.',
+        );
         log(`claude: skipping conversation ${item.uuid}: ${error.message}`);
       }
       processed++;
@@ -231,7 +279,10 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
     if (batch.length) total += await push(sourceId, 'claude-web', batch);
     newState.orgs[key] = { lastSyncMs: failures > 0 ? lastSyncMs : runStartedMs, name: org.name };
   }
-  if (missingMetadata) warnings.add(`Claude category metadata unavailable for ${missingMetadata} conversation(s) (${[...missingTypes].join(', ')}); those unverified chats were skipped.`);
+  if (missingMetadata)
+    warnings.add(
+      `Claude category metadata unavailable for ${missingMetadata} conversation(s) (${[...missingTypes].join(', ')}); those unverified chats were skipped.`,
+    );
   const selectionWarning = [...warnings].join(' ') || null;
   await report({ phase: 'complete', detected, processed, selection, selectionWarning });
   return { state: newState, conversations: total, selection, selectionWarning };

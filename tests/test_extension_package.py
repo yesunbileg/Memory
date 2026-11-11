@@ -18,9 +18,19 @@ def package_source(tmp_path):
 
 
 def package(source, output):
-    return subprocess.run([sys.executable, str(ROOT / "scripts/package_extension.py"),
-                           "--source", str(source), "--output", str(output)],
-                          capture_output=True, text=True, timeout=15)
+    return subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/package_extension.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
 
 
 def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp_path):
@@ -35,8 +45,17 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
     assert result.returncode == 0, result.stderr
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
-        for name in ("manifest.json", "background.js", "options.html", "options.js", "popup.js",
-                     "providers/chatgpt.js", "providers/selection.js", "lib/common.js", "icons/icon-128.png"):
+        for name in (
+            "manifest.json",
+            "background.js",
+            "options.html",
+            "options.js",
+            "popup.js",
+            "providers/chatgpt.js",
+            "providers/selection.js",
+            "lib/common.js",
+            "icons/icon-128.png",
+        ):
             assert archive.read(name) == (source / name).read_bytes()
         assert archive.read("LICENSE") == (source.parent / "LICENSE").read_bytes()
         manifest = json.loads(archive.read("manifest.json"))

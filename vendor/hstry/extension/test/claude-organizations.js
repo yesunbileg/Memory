@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { syncClaude } from '../providers/claude.js';
 
 const now = new Date(Date.now() - 3_600_000).toISOString();
-globalThis.fetch = async url => {
+globalThis.fetch = async (url) => {
   const { pathname } = new URL(url);
   if (pathname === '/api/organizations') {
     return Response.json({
@@ -43,7 +43,7 @@ const result = await syncClaude({
   captureTypes: { projects: false, pinned: false, agents: false, recents: true },
   register: async () => {},
   report: async () => {},
-  log: message => logs.push(message),
+  log: (message) => logs.push(message),
   push: async (source, adapter, conversations) => {
     pushed.push({ source, adapter, conversations });
     return conversations.length;
@@ -54,10 +54,10 @@ assert.equal(result.conversations, 1);
 assert.equal(pushed.length, 1);
 assert.equal(pushed[0].source, 'claude-web-accessib');
 assert.deepEqual(
-  pushed[0].conversations[0].messages.map(message => message.content),
-  ['hello', 'response']
+  pushed[0].conversations[0].messages.map((message) => message.content),
+  ['hello', 'response'],
 );
-assert.ok(logs.some(message => message.includes('skipping organization deniedor')));
+assert.ok(logs.some((message) => message.includes('skipping organization deniedor')));
 assert.equal(result.state.orgs.deniedor.lastSyncMs, null);
 assert.ok(result.state.orgs.accessib.lastSyncMs > 0);
 

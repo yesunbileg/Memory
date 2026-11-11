@@ -13,15 +13,17 @@ SQLite stores original text and operational state. NotebookLM is the only AI mem
 Requires Python 3.12+, Node.js 24+, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd /workspace/Memory
-UV_CACHE_DIR=/workspace/.cache/uv uv sync --frozen
+git clone https://github.com/yesunbileg/Memory.git
+cd Memory
+uv sync --frozen
 .venv/bin/ai-memory demo
 .venv/bin/python scripts/mcp_smoke.py
-.venv/bin/pytest -q
-node vendor/hstry/extension/test/lossless.js
+.venv/bin/python scripts/check.py
 ```
 
-On your own machine, use the checkout directory and your usual writable uv cache. The existing cloud checkout is already isolated; no Git worktree is needed.
+For an existing checkout, update it with `git pull --ff-only` after saving local
+changes. See [development](docs/development.md) for formatting and tests. Managed
+cloud executor setup is separate and documented in [config/cloud-start.md](config/cloud-start.md).
 
 The demo imports **synthetic** Codex and OpenCode histories through the actual donor adapters. It creates `data/demo/conversations.sqlite` and `data/demo/segments/SEG-001.md`, prints conversation IDs and process resource measurements, and can be repeated without duplicate messages. No data is sent to Google. MCP smoke testing starts a real stdio server and calls `memory_status`; it does not invent a NotebookLM answer.
 
@@ -39,13 +41,15 @@ The demo imports **synthetic** Codex and OpenCode histories through the actual d
 
 The default archive is `data/conversations.sqlite`; use `--db PATH` **before** the subcommand to select another archive. Import prints the actual conversation IDs. Histories are imported locally without upload consent. `approve` grants consent for the specified conversation, including future continuations; `collect --approve-upload` grants it during import. Review the archived text before approving. A conservative credential detector blocks uploads while keeping the original local text intact; it cannot identify every possible secret.
 
-Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. Missing timestamps and model names remain unknown.
+Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. Direct Codex directory reads reconcile overlapping snapshots and can fall back to individual files if batch serialization overflows. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. A complete Codex user message containing one reserved internal goal wrapper is excluded; mixed or quoted wrappers retain their visible text. Missing timestamps and model names remain unknown.
 
 ## Connect NotebookLM
 
 Sign in to NotebookLM in **the Brave, Chrome or Firefox profile you already use**, then import that session with notebooklm-py's supported cookie reader. This does not launch another browser or require a separate Chromium/Playwright installation. A service-account credential does not authenticate NotebookLM. Keep the saved session private and outside version control.
 
-Keep your existing auth location when reauthenticating. For a new setup on a cloud host with a read-only home, first set a writable location with `export NOTEBOOKLM_HOME="$PWD/data/notebooklm"`.
+Keep your existing auth location when reauthenticating. Login, the worker and MCP
+must use the same saved session. Custom locations use `NOTEBOOKLM_HOME` or an
+explicit `--storage` file.
 
 ```bash
 # Install the optional cookie reader; no browser download is needed.
@@ -71,18 +75,21 @@ Use the same `NOTEBOOKLM_HOME` for login, the worker, MCP and the demo. If your 
 
 This live demo creates or reuses `AI Memory — synthetic integration demo`, syncs its generated Markdown and asks a real source-filtered question. It retains the demo notebook so you can inspect it. Errors exit nonzero. A successful request still needs answer-quality review; offline tests cannot establish Google's retrieval quality.
 
-In restricted cloud networking, allow `notebooklm.google.com` and `accounts.google.com` for API/auth traffic. Signing in through your usual browser may also require the specific Google static/redirect hosts it reports. Existing package-registry rules must remain. This environment's initial live attempt was blocked by missing browser auth and an HTTP CONNECT 403 for NotebookLM; see [validation](docs/validation.md).
-
 ## MCP with Codex and OpenCode
 
 Use the examples in [config/](config/) and the short [agent instructions](docs/agent-instructions.md). Replace checkout/database paths as appropriate; do not overwrite your existing client configuration.
 
 ```bash
-codex mcp add memory -- /workspace/Memory/.venv/bin/ai-memory \
-  --db /workspace/Memory/data/conversations.sqlite mcp
+codex mcp add ai_memory -- "$PWD/.venv/bin/ai-memory" \
+  --db "$PWD/data/conversations.sqlite" mcp
 ```
 
-Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns conversation/message IDs only when exact citation headings can be verified. Stale or uncertain citations keep source-level references. Historical instructions remain historical context; current user instructions take priority.
+Use the [OpenCode 2 example](config/opencode-v2.json.example) for `mcp.servers`,
+or the [legacy example](config/opencode.json.example) for clients using a flat
+`mcp` map. The [Codex example](config/codex.toml.example) also grants access to
+the two tools for unattended sessions; apply it only to this trusted local server.
+
+Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns verified conversation/message IDs in structured `sources` only when exact citation headings can be verified. IDs in free-form answer text remain unverified. Stale or uncertain citations keep source-level references. Historical instructions remain historical context; current user instructions take priority.
 
 ## Web capture and background collection
 
@@ -92,7 +99,7 @@ Load `vendor/hstry/extension` as an unpacked Chrome/Brave extension. From the pr
 .venv/bin/ai-memory connect
 ```
 
-For a standalone archive, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.5.2.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and the upstream license; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
+For a standalone archive, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.5.3.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and the upstream license; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
 
 Keep the terminal open. The command creates/reuses private connection files and starts the local receiver. Open extension Settings → **Choose connection file**, then select `data/extension-connection.json` (or the path printed for your selected archive). Connection status verifies the bearer token and application identity; public health alone cannot show Connected. When reusing an occupied port, the CLI also verifies the exact archive identity and refuses another database.
 

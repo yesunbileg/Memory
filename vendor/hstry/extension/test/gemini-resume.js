@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { syncGemini } from '../providers/gemini.js';
 
 function rpc(rpcId, data) {
-  return `)]}'\n${JSON.stringify([["wrb.fr", rpcId, JSON.stringify(data), null]])}\n`;
+  return `)]}'\n${JSON.stringify([['wrb.fr', rpcId, JSON.stringify(data), null]])}\n`;
 }
 
 const nowSec = Math.floor(Date.now() / 1000) - 3600;

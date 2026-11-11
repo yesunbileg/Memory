@@ -13,8 +13,8 @@ import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from .collectors import normalize_conversation
 from .connection import archive_identity
+from .normalization import normalize_conversation
 from .store import Store
 
 MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -233,8 +233,15 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 if self.path == "/auth/check":
                     if not isinstance(packet, dict) or packet:
                         raise ValueError("connection check requires an empty object")
-                    self._reply(200, {"status": "ok", "service": "ai-memory", "schema": 1,
-                                      "archive_id": archive_identity(db_path)})
+                    self._reply(
+                        200,
+                        {
+                            "status": "ok",
+                            "service": "ai-memory",
+                            "schema": 1,
+                            "archive_id": archive_identity(db_path),
+                        },
+                    )
                     return
                 conversations = _normalize_packet(packet)
             except (ValueError, TypeError, UnicodeError, RecursionError, TimeoutError):

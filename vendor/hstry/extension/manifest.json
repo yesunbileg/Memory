@@ -1,12 +1,9 @@
 {
   "manifest_version": 3,
   "name": "AI Memory",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Keep selected project, pinned and agent chats in your local archive. Ordinary Recents are off by default.",
-  "permissions": [
-    "alarms",
-    "storage"
-  ],
+  "permissions": ["alarms", "storage"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",

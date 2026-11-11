@@ -1,8 +1,23 @@
-import { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES, DEFAULT_PROVIDER_SETTINGS, PROVIDERS, formatTime, normalizeSettings, providerState } from './ui.js';
+import {
+  CAPTURE_TYPES,
+  DEFAULT_CAPTURE_TYPES,
+  DEFAULT_PROVIDER_SETTINGS,
+  PROVIDERS,
+  formatTime,
+  normalizeSettings,
+  providerState,
+} from './ui.js';
 import { connectionPresentation, parseConnectionFile } from './connection-file.js';
 
-const DEFAULTS = { port: 41770, token: '', account: 'browser-local', intervalMinutes: 15, providers: DEFAULT_PROVIDER_SETTINGS, captureTypes: DEFAULT_CAPTURE_TYPES };
-const el = id => document.getElementById(id);
+const DEFAULTS = {
+  port: 41770,
+  token: '',
+  account: 'browser-local',
+  intervalMinutes: 15,
+  providers: DEFAULT_PROVIDER_SETTINGS,
+  captureTypes: DEFAULT_CAPTURE_TYPES,
+};
+const el = (id) => document.getElementById(id);
 const marks = { chatgpt: '◎', claude: '✳︎', gemini: '✦' };
 const typeCopy = {
   projects: ['Projects & folders', 'Chats organized inside a project or folder.'],
@@ -15,7 +30,9 @@ let apiConnected = false;
 let checking = false;
 let connectionCheck = 0;
 
-function sameConnection(a, b) { return a.port === b.port && a.token === b.token; }
+function sameConnection(a, b) {
+  return a.port === b.port && a.token === b.token;
+}
 
 function feedback(id, text, error = false) {
   el(id).textContent = text;
@@ -38,12 +55,21 @@ function renderControls() {
 }
 
 function readSettings() {
-  return normalizeSettings({
-    port: el('port').value, token: el('token').value, account: el('account').value,
-    intervalMinutes: el('interval').value,
-    providers: Object.fromEntries(Object.keys(PROVIDERS).map(id => [id, el(`provider-${id}`).checked])),
-    captureTypes: Object.fromEntries(Object.keys(CAPTURE_TYPES).map(id => [id, el(`capture-${id}`).checked])),
-  }, DEFAULTS);
+  return normalizeSettings(
+    {
+      port: el('port').value,
+      token: el('token').value,
+      account: el('account').value,
+      intervalMinutes: el('interval').value,
+      providers: Object.fromEntries(
+        Object.keys(PROVIDERS).map((id) => [id, el(`provider-${id}`).checked]),
+      ),
+      captureTypes: Object.fromEntries(
+        Object.keys(CAPTURE_TYPES).map((id) => [id, el(`capture-${id}`).checked]),
+      ),
+    },
+    DEFAULTS,
+  );
 }
 
 async function persist() {
@@ -64,7 +90,11 @@ function updateSelection() {
     : 'Ordinary Recents stay out. A project or pinned chat is still included even when it also appears in Recents.';
   const selected = Object.values(types).some(Boolean);
   const enabled = Object.values(currentSettings.providers).some(Boolean);
-  el('gemini-selection-warning').hidden = !(currentSettings.providers.gemini && !types.recents && selected);
+  el('gemini-selection-warning').hidden = !(
+    currentSettings.providers.gemini &&
+    !types.recents &&
+    selected
+  );
   el('sync-now').disabled = !apiConnected || !selected || !enabled || checking;
 }
 
@@ -78,8 +108,11 @@ async function checkConnection() {
   el('connection-dot').className = 'status-dot checking';
   updateSelection();
   let result;
-  try { result = await chrome.runtime.sendMessage({ type: 'checkApi' }); }
-  catch { result = { ok: false, code: 'offline' }; }
+  try {
+    result = await chrome.runtime.sendMessage({ type: 'checkApi' });
+  } catch {
+    result = { ok: false, code: 'offline' };
+  }
   if (generation !== connectionCheck || !sameConnection(requested, currentSettings)) return false;
   const state = connectionPresentation(result);
   apiConnected = result?.ok === true;
@@ -105,7 +138,11 @@ async function renderStatus() {
   rescans.replaceChildren();
   for (const [id, provider] of Object.entries(PROVIDERS)) {
     const entry = status[id];
-    const state = providerState(entry, currentSettings.providers[id], { apiConnected, captureTypes: currentSettings.captureTypes, providerId: id });
+    const state = providerState(entry, currentSettings.providers[id], {
+      apiConnected,
+      captureTypes: currentSettings.captureTypes,
+      providerId: id,
+    });
     const item = document.createElement('div');
     item.className = 'status-item';
     item.innerHTML = `<span class="status-dot ${state.tone}"></span><div class="status-content"><strong>${provider.name} · ${state.label}</strong><p></p></div><span class="status-time"></span>`;
@@ -113,14 +150,20 @@ async function renderStatus() {
     detail.textContent = state.detail;
     if (state.tone === 'error') detail.className = 'error-copy';
     if (state.tone === 'warning') detail.className = 'warning-copy';
-    item.querySelector('.status-time').textContent = formatTime(entry?.lastSuccessMs ?? entry?.lastRunMs);
+    item.querySelector('.status-time').textContent = formatTime(
+      entry?.lastSuccessMs ?? entry?.lastRunMs,
+    );
     list.appendChild(item);
     const row = document.createElement('div');
     row.className = 'resync-row';
     row.innerHTML = `<div><strong>${provider.name}</strong><small>Uses your current checklist</small></div><button class="button-secondary" type="button">Rescan selected chats</button>`;
     const button = row.querySelector('button');
     button.dataset.provider = id;
-    button.disabled = !apiConnected || !Object.values(currentSettings.captureTypes).some(Boolean) || !currentSettings.providers[id] || Boolean(entry?.running);
+    button.disabled =
+      !apiConnected ||
+      !Object.values(currentSettings.captureTypes).some(Boolean) ||
+      !currentSettings.providers[id] ||
+      Boolean(entry?.running);
     button.setAttribute('aria-label', `${provider.name}: rescan selected chats`);
     rescans.appendChild(row);
   }
@@ -130,36 +173,74 @@ async function capture() {
   try {
     await persist();
     if (!(await checkConnection())) return;
-    if (!Object.values(currentSettings.providers).some(Boolean) || !Object.values(currentSettings.captureTypes).some(Boolean)) return;
+    if (
+      !Object.values(currentSettings.providers).some(Boolean) ||
+      !Object.values(currentSettings.captureTypes).some(Boolean)
+    )
+      return;
     const response = await chrome.runtime.sendMessage({ type: 'syncNow' });
-    feedback('saved', response?.ok ? 'Capturing your selected chats. You can close this page.' : 'Capture did not start. Check your connection.', !response?.ok);
+    feedback(
+      'saved',
+      response?.ok
+        ? 'Capturing your selected chats. You can close this page.'
+        : 'Capture did not start. Check your connection.',
+      !response?.ok,
+    );
     await renderStatus();
-  } catch { feedback('saved', 'Could not start capture. Check your connection and try again.', true); }
+  } catch {
+    feedback('saved', 'Could not start capture. Check your connection and try again.', true);
+  }
 }
 
 renderControls();
-for (const id of [...Object.keys(PROVIDERS).map(id => `provider-${id}`), ...Object.keys(CAPTURE_TYPES).map(id => `capture-${id}`), 'account', 'interval']) {
+for (const id of [
+  ...Object.keys(PROVIDERS).map((id) => `provider-${id}`),
+  ...Object.keys(CAPTURE_TYPES).map((id) => `capture-${id}`),
+  'account',
+  'interval',
+]) {
   el(id).addEventListener('change', async () => {
-    try { await persist(); feedback('saved', 'Your selection is saved.'); await renderStatus(); }
-    catch { feedback('saved', 'Could not save. Check your settings and try again.', true); }
+    try {
+      await persist();
+      feedback('saved', 'Your selection is saved.');
+      await renderStatus();
+    } catch {
+      feedback('saved', 'Could not save. Check your settings and try again.', true);
+    }
   });
 }
 el('save').addEventListener('click', async () => {
-  try { await persist(); await checkConnection(); }
-  catch { feedback('import-result', 'Check the port and connection token.', true); }
+  try {
+    await persist();
+    await checkConnection();
+  } catch {
+    feedback('import-result', 'Check the port and connection token.', true);
+  }
 });
 el('test-connection').addEventListener('click', async () => {
-  try { await persist(); await checkConnection(); }
-  catch { feedback('import-result', 'Check your manual connection settings.', true); }
+  try {
+    await persist();
+    await checkConnection();
+  } catch {
+    feedback('import-result', 'Check your manual connection settings.', true);
+  }
 });
 el('sync-now').addEventListener('click', capture);
 el('copy-command').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText('.venv/bin/ai-memory connect'); feedback('import-result', 'Command copied. Run it in your Memory folder.'); }
-  catch { feedback('import-result', 'Select and copy the command above.'); }
+  try {
+    await navigator.clipboard.writeText('.venv/bin/ai-memory connect');
+    feedback('import-result', 'Command copied. Run it in your Memory folder.');
+  } catch {
+    feedback('import-result', 'Select and copy the command above.');
+  }
 });
 el('import-connection').addEventListener('click', () => el('connection-file').click());
-el('change-connection').addEventListener('click', () => { el('connection-guide').hidden = false; el('connection-ready').hidden = true; el('import-connection').focus(); });
-el('connection-file').addEventListener('change', async event => {
+el('change-connection').addEventListener('click', () => {
+  el('connection-guide').hidden = false;
+  el('connection-ready').hidden = true;
+  el('import-connection').focus();
+});
+el('connection-file').addEventListener('change', async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
   try {
@@ -169,60 +250,98 @@ el('connection-file').addEventListener('change', async event => {
     el('token').value = connection.token;
     await persist();
     const connected = await checkConnection();
-    feedback('import-result', connected ? 'Connection file verified. You’re ready.' : 'File imported. Keep the local app running and check the connection again.', !connected);
-  } catch { feedback('import-result', 'Choose extension-connection.json created by AI Memory on this computer.', true); }
-  finally { event.target.value = ''; }
+    feedback(
+      'import-result',
+      connected
+        ? 'Connection file verified. You’re ready.'
+        : 'File imported. Keep the local app running and check the connection again.',
+      !connected,
+    );
+  } catch {
+    feedback(
+      'import-result',
+      'Choose extension-connection.json created by AI Memory on this computer.',
+      true,
+    );
+  } finally {
+    event.target.value = '';
+  }
 });
-el('resync-list').addEventListener('click', async event => {
+el('resync-list').addEventListener('click', async (event) => {
   const button = event.target.closest?.('button[data-provider]');
   if (!button || button.disabled) return;
   button.disabled = true;
   try {
     await persist();
     if (!(await checkConnection())) return;
-    const response = await chrome.runtime.sendMessage({ type: 'fullSyncProvider', provider: button.dataset.provider });
-    feedback('resync-result', response?.ok ? 'Rescanning only your selected chat types.' : 'Rescan did not start. Check the source and try again.', !response?.ok);
-  } catch { feedback('resync-result', 'Could not start the rescan. Try again.', true); }
-  finally { await renderStatus(); }
+    const response = await chrome.runtime.sendMessage({
+      type: 'fullSyncProvider',
+      provider: button.dataset.provider,
+    });
+    feedback(
+      'resync-result',
+      response?.ok
+        ? 'Rescanning only your selected chat types.'
+        : 'Rescan did not start. Check the source and try again.',
+      !response?.ok,
+    );
+  } catch {
+    feedback('resync-result', 'Could not start the rescan. Try again.', true);
+  } finally {
+    await renderStatus();
+  }
 });
-chrome.storage.onChanged.addListener(changes => {
+chrome.storage.onChanged.addListener((changes) => {
   if (changes.settings?.newValue) {
     const values = changes.settings.newValue;
-    const next = normalizeSettings({ ...DEFAULTS, ...values, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...values.providers } }, DEFAULTS);
+    const next = normalizeSettings(
+      { ...DEFAULTS, ...values, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...values.providers } },
+      DEFAULTS,
+    );
     const authChanged = !sameConnection(currentSettings, next);
     currentSettings = next;
     for (const id of ['port', 'token', 'account']) el(id).value = next[id];
     el('interval').value = next.intervalMinutes;
     for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = next.providers[id];
-    for (const id of Object.keys(CAPTURE_TYPES)) el(`capture-${id}`).checked = next.captureTypes[id];
+    for (const id of Object.keys(CAPTURE_TYPES))
+      el(`capture-${id}`).checked = next.captureTypes[id];
     if (authChanged) {
       connectionCheck++;
       apiConnected = false;
       checkConnection();
-    } else { updateSelection(); renderStatus(); }
+    } else {
+      updateSelection();
+      renderStatus();
+    }
   }
   if (changes.status) renderStatus();
 });
-for (const id of ['port', 'token']) el(id).addEventListener('input', () => {
-  connectionCheck++;
-  apiConnected = false;
-  checking = false;
-  el('connection-title').textContent = 'Verify your connection';
-  el('connection-result').textContent = 'Save & verify your updated connection settings.';
-  el('connection-label').textContent = 'Not verified';
-  el('connection-pill').className = 'status-pill idle';
-  el('connection-dot').className = 'status-dot idle';
-  el('test-connection').disabled = false;
-  updateSelection();
-  renderStatus();
-});
+for (const id of ['port', 'token'])
+  el(id).addEventListener('input', () => {
+    connectionCheck++;
+    apiConnected = false;
+    checking = false;
+    el('connection-title').textContent = 'Verify your connection';
+    el('connection-result').textContent = 'Save & verify your updated connection settings.';
+    el('connection-label').textContent = 'Not verified';
+    el('connection-pill').className = 'status-pill idle';
+    el('connection-dot').className = 'status-dot idle';
+    el('test-connection').disabled = false;
+    updateSelection();
+    renderStatus();
+  });
 
 const { settings = {} } = await chrome.storage.local.get('settings');
-currentSettings = normalizeSettings({ ...DEFAULTS, ...settings, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers } }, DEFAULTS);
+currentSettings = normalizeSettings(
+  { ...DEFAULTS, ...settings, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers } },
+  DEFAULTS,
+);
 for (const id of ['port', 'token', 'account']) el(id).value = currentSettings[id];
 el('interval').value = currentSettings.intervalMinutes;
-for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = currentSettings.providers[id];
-for (const id of Object.keys(CAPTURE_TYPES)) el(`capture-${id}`).checked = currentSettings.captureTypes[id];
+for (const id of Object.keys(PROVIDERS))
+  el(`provider-${id}`).checked = currentSettings.providers[id];
+for (const id of Object.keys(CAPTURE_TYPES))
+  el(`capture-${id}`).checked = currentSettings.captureTypes[id];
 el('app-version').textContent = `AI Memory ${chrome.runtime.getManifest?.().version ?? ''}`.trim();
 updateSelection();
 await checkConnection();

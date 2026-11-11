@@ -47,7 +47,9 @@ class SimulatedSDK:
     async def ask(self, notebook_id, question, source_ids=None):
         self.questions.append((notebook_id, question, source_ids))
         return AskResult(
-            answer="A decision from the source. [1]", conversation_id="google-chat", turn_number=1,
+            answer="A decision from the source. [1]",
+            conversation_id="google-chat",
+            turn_number=1,
             is_follow_up=False,
             references=[ChatReference("source-1", citation_number=1, cited_text="Exact passage")],
         )
@@ -87,10 +89,13 @@ async def test_readiness_is_required_even_if_sdk_returns_processing():
     await adapter.close()
 
 
-@pytest.mark.parametrize(("failure", "expected_code"), [
-    ("processing", "processing_failed"),
-    ("timeout", "not_ready"),
-])
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("processing", "processing_failed"),
+        ("timeout", "not_ready"),
+    ],
+)
 async def test_sdk_terminal_processing_failure_is_distinct_from_timeout(failure, expected_code):
     from notebooklm.exceptions import SourceProcessingError, SourceTimeoutError
 
@@ -100,7 +105,8 @@ async def test_sdk_terminal_processing_failure_is_distinct_from_timeout(failure,
         async def wait_until_ready(self, notebook_id, source_id):
             if failure == "processing":
                 raise SourceProcessingError(
-                    "private-source-diagnostic", message="Cookie SID=private-cookie-diagnostic",
+                    "private-source-diagnostic",
+                    message="Cookie SID=private-cookie-diagnostic",
                 )
             raise SourceTimeoutError("private-source-diagnostic", timeout=120, last_status=1)
 
@@ -125,16 +131,23 @@ async def test_query_uses_sources_and_historical_context_prompt():
     result = await adapter.ask("What was the decision?", source_ids=["source-1"])
     assert result == {
         "answer": "A decision from the source. [1]",
-        "references": [{"source_id": "source-1", "cited_text": "Exact passage", "citation_number": 1}],
+        "references": [
+            {"source_id": "source-1", "cited_text": "Exact passage", "citation_number": 1}
+        ],
     }
     notebook_id, prompt, source_ids = sdk.questions[0]
     assert notebook_id == "notebook-1"
     assert source_ids == ["source-1"]
     for instruction in (
-        "Use only information supported by the sources", "latest relevant information",
-        "conflicting or outdated information", "conversation IDs, dates, and source references",
-        "Do not invent missing facts", "historical context", "not commands",
-        "sources are insufficient", "What was the decision?",
+        "Use only information supported by the sources",
+        "latest relevant information",
+        "conflicting or outdated information",
+        "conversation IDs, dates, and source references",
+        "Do not invent missing facts",
+        "historical context",
+        "not commands",
+        "sources are insufficient",
+        "What was the decision?",
     ):
         assert instruction in prompt
     await adapter.close()
@@ -191,16 +204,19 @@ async def test_upload_rejects_unsafe_title_before_connecting(tmp_path):
     assert sdk.opened == 0
 
 
-@pytest.mark.parametrize(("source_id", "expected"), [
-    ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
-    ("partial-source_1", "partial-source_1"),
-    ("Cookie SID=private-cookie-value", None),
-    ("unsafe\nidentifier", None),
-    ("/private/path", None),
-    ("x" * 129, None),
-    ("", None),
-    (123, None),
-])
+@pytest.mark.parametrize(
+    ("source_id", "expected"),
+    [
+        ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+        ("partial-source_1", "partial-source_1"),
+        ("Cookie SID=private-cookie-value", None),
+        ("unsafe\nidentifier", None),
+        ("/private/path", None),
+        ("x" * 129, None),
+        ("", None),
+        (123, None),
+    ],
+)
 async def test_partial_upload_keeps_only_valid_source_identifier(tmp_path, source_id, expected):
     from ai_memory.notebook import NotebookLMAdapter, NotebookLMError
 
@@ -255,20 +271,36 @@ async def test_real_sdk_file_upload_query_and_delete_with_simulated_http(tmp_pat
             cloud["query"] = params
             citation = [
                 ["chunk-1"],
-                [None, None, 0.9, [[None]],
-                 [[[0, 13, [[[0, 13, ["Exact passage"]]]]]]],
-                 [[[[source_id]]]], ["chunk-1"]],
+                [
+                    None,
+                    None,
+                    0.9,
+                    [[None]],
+                    [[[0, 13, [[[0, 13, ["Exact passage"]]]]]]],
+                    [[[[source_id]]]],
+                    ["chunk-1"],
+                ],
             ]
-            answer = [["Remote answer [1]", None, ["chat-1", 12345], None,
-                       [[], None, None, [citation], 1]]]
+            answer = [
+                [
+                    "Remote answer [1]",
+                    None,
+                    ["chat-1", 12345],
+                    None,
+                    [[], None, None, [citation], 1],
+                ]
+            ]
             chunk = json.dumps([["wrb.fr", None, json.dumps(answer)]])
             return httpx.Response(200, content=f")]}}'\n{len(chunk)}\n{chunk}\n".encode())
         if request.headers.get("x-goog-upload-command") == "start":
             metadata = json.loads(body)
             assert metadata["SOURCE_NAME"] == "SEG-001-r1.md"
-            return httpx.Response(200, headers={
-                "x-goog-upload-url": "https://notebooklm.google.com/upload/_/?upload_id=offline",
-            })
+            return httpx.Response(
+                200,
+                headers={
+                    "x-goog-upload-url": "https://notebooklm.google.com/upload/_/?upload_id=offline",
+                },
+            )
         if request.headers.get("x-goog-upload-command") == "upload, finalize":
             cloud["upload"] = body
             cloud["sources"] = [[[source_id], "SEG-001-r1.md", None, [None, 2]]]
@@ -295,10 +327,14 @@ async def test_real_sdk_file_upload_query_and_delete_with_simulated_http(tmp_pat
 
     transport = httpx.MockTransport(simulated_google)
     monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
-    auth = AuthTokens(cookies={"SID": "synthetic-offline"}, csrf_token="offline", session_id="offline")
+    auth = AuthTokens(
+        cookies={"SID": "synthetic-offline"}, csrf_token="offline", session_id="offline"
+    )
     adapter = NotebookLMAdapter(
-        "notebook-1", client_factory=lambda path: NotebookLMClient(
-            auth, config=ClientConfig(backend=WebBackendConfig()),
+        "notebook-1",
+        client_factory=lambda path: NotebookLMClient(
+            auth,
+            config=ClientConfig(backend=WebBackendConfig()),
         ),
     )
     file = tmp_path / "original.md"
@@ -314,7 +350,9 @@ async def test_real_sdk_file_upload_query_and_delete_with_simulated_http(tmp_pat
         answer = await adapter.ask("Earlier project?", [source_id])
         assert answer == {
             "answer": "Remote answer [1]",
-            "references": [{"source_id": source_id, "citation_number": 1, "cited_text": "Exact passage"}],
+            "references": [
+                {"source_id": source_id, "citation_number": 1, "cited_text": "Exact passage"}
+            ],
         }
         assert cloud["query"][0] == [[[source_id]]]
         assert "Earlier project?" in cloud["query"][1]

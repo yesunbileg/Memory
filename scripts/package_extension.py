@@ -9,26 +9,42 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PATTERNS = ("manifest.json", "*.js", "*.html", "*.css", "providers/*.js", "lib/*.js", "icons/icon-*.png")
-JS_IMPORTS = re.compile(r'''(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)["'](\.[^"']+)["']''')
-HTML_ASSETS = re.compile(r'''(?:src|href)\s*=\s*["']([^"'#]+)["']''')
+PATTERNS = (
+    "manifest.json",
+    "*.js",
+    "*.html",
+    "*.css",
+    "providers/*.js",
+    "lib/*.js",
+    "icons/icon-*.png",
+)
+JS_IMPORTS = re.compile(r"""(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)["'](\.[^"']+)["']""")
+HTML_ASSETS = re.compile(r"""(?:src|href)\s*=\s*["']([^"'#]+)["']""")
 
 
 def validate_runtime(manifest: dict, files: dict[str, Path]):
     if manifest.get("manifest_version") != 3:
         raise ValueError("Expected a Manifest V3 extension")
-    references = [("manifest.json", manifest["options_page"]),
-                  ("manifest.json", manifest["background"]["service_worker"]),
-                  ("manifest.json", manifest["action"]["default_popup"])]
+    references = [
+        ("manifest.json", manifest["options_page"]),
+        ("manifest.json", manifest["background"]["service_worker"]),
+        ("manifest.json", manifest["action"]["default_popup"]),
+    ]
     icons = manifest.get("icons", {})
     action_icons = manifest.get("action", {}).get("default_icon", {})
     references.extend(("manifest.json", path) for path in icons.values())
-    references.extend(("manifest.json", path) for path in
-                      (action_icons.values() if isinstance(action_icons, dict) else [action_icons]))
+    references.extend(
+        ("manifest.json", path)
+        for path in (action_icons.values() if isinstance(action_icons, dict) else [action_icons])
+    )
     for name, path in files.items():
-        pattern = JS_IMPORTS if path.suffix == ".js" else HTML_ASSETS if path.suffix == ".html" else None
+        pattern = (
+            JS_IMPORTS if path.suffix == ".js" else HTML_ASSETS if path.suffix == ".html" else None
+        )
         if pattern:
-            references.extend((name, ref) for ref in pattern.findall(path.read_text(encoding="utf-8")))
+            references.extend(
+                (name, ref) for ref in pattern.findall(path.read_text(encoding="utf-8"))
+            )
     for origin, reference in references:
         if reference.startswith(("https://", "http://", "data:")):
             continue
@@ -40,8 +56,12 @@ def validate_runtime(manifest: dict, files: dict[str, Path]):
 
 def build_extension(source: Path, output: Path | None = None) -> dict:
     source = source.expanduser().resolve(strict=True)
-    files = {p.relative_to(source).as_posix(): p
-             for pattern in PATTERNS for p in source.glob(pattern) if p.is_file()}
+    files = {
+        p.relative_to(source).as_posix(): p
+        for pattern in PATTERNS
+        for p in source.glob(pattern)
+        if p.is_file()
+    }
     for name, path in files.items():
         if path.is_symlink() or not path.resolve().is_relative_to(source):
             raise ValueError(f"Runtime files must stay inside the extension: {name}")
@@ -52,7 +72,11 @@ def build_extension(source: Path, output: Path | None = None) -> dict:
     if license_path.is_symlink():
         raise ValueError("The extension license must be a regular file")
     contents["LICENSE"] = license_path.read_bytes()
-    output = (output or ROOT / "dist" / f"ai-memory-extension-{manifest['version']}.zip").expanduser().resolve()
+    output = (
+        (output or ROOT / "dist" / f"ai-memory-extension-{manifest['version']}.zip")
+        .expanduser()
+        .resolve()
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".zip.tmp")
     try:
@@ -65,8 +89,12 @@ def build_extension(source: Path, output: Path | None = None) -> dict:
         temporary.replace(output)
     finally:
         temporary.unlink(missing_ok=True)
-    return {"version": manifest["version"], "files": len(contents), "output": str(output),
-            "sha256": hashlib.sha256(output.read_bytes()).hexdigest()}
+    return {
+        "version": manifest["version"],
+        "files": len(contents),
+        "output": str(output),
+        "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+    }
 
 
 def main():

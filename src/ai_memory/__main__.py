@@ -1,3 +1,3 @@
-from ai_memory.cli import main
+from .cli import main
 
 raise SystemExit(main())

@@ -5,3 +5,10 @@ command = "/ABSOLUTE/PATH/Memory/.venv/bin/ai-memory"
 args = ["--db", "/ABSOLUTE/PATH/archive.sqlite", "mcp"]
 startup_timeout_sec = 30
 tool_timeout_sec = 240
+
+# Permit these retrieval tools in unattended Codex sessions.
+[mcp_servers.ai_memory.tools.memory_status]
+approval_mode = "approve"
+
+[mcp_servers.ai_memory.tools.memory_ask]
+approval_mode = "approve"

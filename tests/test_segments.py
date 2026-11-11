@@ -16,7 +16,7 @@ def test_only_approved_messages_and_exact_markdown_are_packaged(tmp_path):
         text = builder.render(segments[0]["id"])
         assert conversation()["messages"][0]["text"] in text
         assert "timezone: Asia/Ulaanbaatar" in text
-        assert "models: [\"test-model\"]" in text
+        assert 'models: ["test-model"]' in text
         assert f"### {key} · 0001 · User ·" in text
         assert 'external_id: "session-1"' in text
         assert builder.build() == []
@@ -32,7 +32,9 @@ def test_rollover_continuation_and_edit_sealed_segment(tmp_path):
         second = dict(c["messages"][0], native_id="m2", sequence=2, text="second message")
         store.ingest(conversation(messages=[second]))
         builder.build()
-        rows = store.connection.execute("SELECT id,state,revision FROM segments ORDER BY id").fetchall()
+        rows = store.connection.execute(
+            "SELECT id,state,revision FROM segments ORDER BY id"
+        ).fetchall()
         assert [r["state"] for r in rows] == ["sealed", "open"]
         assert "0001" in builder.render(rows[0]["id"])
         assert "0002" not in builder.render(rows[0]["id"])
@@ -57,8 +59,18 @@ def test_overflow_merge_retains_every_message_and_parent_sources(tmp_path):
         rendered = builder.render(merge_id)
         assert "message 0" in rendered and "message 1" in rendered
         assert store.status()["messages"] == 3
-        assert store.connection.execute("SELECT COUNT(*) FROM segment_parents WHERE segment_id=?", (merge_id,)).fetchone()[0] >= 2
-        assert store.connection.execute("SELECT COUNT(*) FROM segments WHERE state != 'retired'").fetchone()[0] == 2
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM segment_parents WHERE segment_id=?", (merge_id,)
+            ).fetchone()[0]
+            >= 2
+        )
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM segments WHERE state != 'retired'"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_oversized_message_never_truncated_and_exhaustion_never_summarizes(tmp_path):
@@ -93,10 +105,21 @@ def test_continuation_does_not_rewrite_sealed_metadata(tmp_path):
         store.ingest(c, consent=True)
         b = SegmentBuilder(store, target_words=2)
         first = b.build()[0]
-        store.ingest(conversation(external_id="other", messages=[dict(c["messages"][0], text="other message")]), consent=True)
+        store.ingest(
+            conversation(
+                external_id="other", messages=[dict(c["messages"][0], text="other message")]
+            ),
+            consent=True,
+        )
         b.build()
         previous = b.render(first["id"])
-        store.ingest(conversation(models=["new-model"], updated_at="2026-11-11T01:00:00Z", messages=[dict(c["messages"][0], native_id="m2", sequence=2, text="continuation")]))
+        store.ingest(
+            conversation(
+                models=["new-model"],
+                updated_at="2026-11-11T01:00:00Z",
+                messages=[dict(c["messages"][0], native_id="m2", sequence=2, text="continuation")],
+            )
+        )
         changed = b.build()
         assert first["id"] not in [s["id"] for s in changed]
         assert b.render(first["id"]) == previous
@@ -111,10 +134,22 @@ def test_merges_find_oldest_feasible_adjacent_window_and_preserve_chronology(tmp
             store.ingest(c, consent=True)
         b.build()
         first = b.merge_oldest()
-        assert [m[0] for m in store.connection.execute("SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position", (first,))] == ["message 0", "message 1", "message 2"]
+        assert [
+            m[0]
+            for m in store.connection.execute(
+                "SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position",
+                (first,),
+            )
+        ] == ["message 0", "message 1", "message 2"]
         # The first source is now at its ceiling; the next adjacent window still fits.
         second = b.merge_oldest()
-        assert [m[0] for m in store.connection.execute("SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position", (second,))] == ["message 3", "message 4", "message 5"]
+        assert [
+            m[0]
+            for m in store.connection.execute(
+                "SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position",
+                (second,),
+            )
+        ] == ["message 3", "message 4", "message 5"]
 
 
 def test_remerged_segments_keep_original_arrival_order(tmp_path):
@@ -132,14 +167,22 @@ def test_remerged_segments_keep_original_arrival_order(tmp_path):
         store.ingest(c, consent=True)
         b.build()
         merged = b.merge_oldest()
-        values = [m[0] for m in store.connection.execute("SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position", (merged,))]
+        values = [
+            m[0]
+            for m in store.connection.execute(
+                "SELECT m.text FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=? ORDER BY sm.position",
+                (merged,),
+            )
+        ]
         assert values == ["message 0", "message 1", "message 2", "message 3"]
 
 
 def test_full_oldest_segment_does_not_block_feasible_later_merge(tmp_path):
     with Store(tmp_path / "db") as store:
         builder = SegmentBuilder(store, target_words=2, max_words=6)
-        for n, text in enumerate(["one two three four five six", "later first", "later second", "open message"]):
+        for n, text in enumerate(
+            ["one two three four five six", "later first", "later second", "open message"]
+        ):
             c = conversation(external_id=str(n))
             c["messages"][0]["text"] = text
             store.ingest(c, consent=True)
@@ -158,24 +201,49 @@ def test_merge_rejects_rendered_snapshot_over_500000_before_retiring_parents(tmp
             c["messages"][0]["text"] = "word " * 250_000 if n < 2 else "tail"
             store.ingest(c, consent=True)
         builder.build()
-        parent_rows = store.connection.execute("SELECT * FROM segments WHERE state='sealed' ORDER BY id").fetchall()
+        parent_rows = store.connection.execute(
+            "SELECT * FROM segments WHERE state='sealed' ORDER BY id"
+        ).fetchall()
         parents = [r["id"] for r in parent_rows]
         assert len(parents) == 2
         with store.connection:
             for i, parent in enumerate(parent_rows):
-                store.connection.execute("INSERT INTO source_map VALUES(?,?,?)", (parent["id"], f"remote-{i}", parent["revision"]))
-            store.connection.execute("""INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id,
+                store.connection.execute(
+                    "INSERT INTO source_map VALUES(?,?,?)",
+                    (parent["id"], f"remote-{i}", parent["revision"]),
+                )
+            store.connection.execute(
+                """INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id,
                 old_source_ids,attempts,next_attempt,error) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (parents[0], parent_rows[0]["revision"], "retry.md", "blocked", "", "[]", 3, 123.0, "NetworkError"))
-        before_maps = [tuple(r) for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")]
+                (
+                    parents[0],
+                    parent_rows[0]["revision"],
+                    "retry.md",
+                    "blocked",
+                    "",
+                    "[]",
+                    3,
+                    123.0,
+                    "NetworkError",
+                ),
+            )
+        before_maps = [
+            tuple(r)
+            for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")
+        ]
         before_jobs = [tuple(r) for r in store.connection.execute("SELECT * FROM sync_jobs")]
         with pytest.raises(CapacityError):
             builder.merge_oldest()
         states = dict(store.connection.execute("SELECT id,state FROM segments"))
         assert [states[sid] for sid in parents] == ["sealed", "sealed"]
         assert store.connection.execute("SELECT COUNT(*) FROM segment_parents").fetchone()[0] == 0
-        assert [tuple(r) for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")] == before_maps
-        assert [tuple(r) for r in store.connection.execute("SELECT * FROM sync_jobs")] == before_jobs
+        assert [
+            tuple(r)
+            for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")
+        ] == before_maps
+        assert [
+            tuple(r) for r in store.connection.execute("SELECT * FROM sync_jobs")
+        ] == before_jobs
 
 
 def test_appending_many_messages_uses_constant_open_segment_count_queries(tmp_path):
@@ -186,11 +254,15 @@ def test_appending_many_messages_uses_constant_open_segment_count_queries(tmp_pa
             store.ingest(c, consent=True)
             builder = SegmentBuilder(store, target_words=100_000)
             builder.build()
-            additions = [dict(c["messages"][0], native_id=f"m{n}", sequence=n + 2, text="next")
-                         for n in range(message_count)]
+            additions = [
+                dict(c["messages"][0], native_id=f"m{n}", sequence=n + 2, text="next")
+                for n in range(message_count)
+            ]
             store.ingest(conversation(messages=additions))
             steps = [0]
-            store.connection.set_progress_handler(lambda: steps.__setitem__(0, steps[0] + 1) or 0, 100)
+            store.connection.set_progress_handler(
+                lambda: steps.__setitem__(0, steps[0] + 1) or 0, 100
+            )
             builder.build()
             store.connection.set_progress_handler(None, 0)
             return steps[0]
@@ -219,15 +291,21 @@ def test_reopened_builder_preserves_multiconversation_order_and_revision(tmp_pat
         changed = reopened.build()
 
         assert [row["id"] for row in changed] == ["SEG-001", "SEG-002"]
-        assert store.connection.execute("SELECT state,revision FROM segments WHERE id='SEG-001'").fetchone()[:] == ("sealed", before["revision"] + 1)
+        assert store.connection.execute(
+            "SELECT state,revision FROM segments WHERE id='SEG-001'"
+        ).fetchone()[:] == ("sealed", before["revision"] + 1)
         rows = store.connection.execute("""SELECT s.id,m.text,sm.position FROM segment_messages sm
             JOIN segments s ON s.id=sm.segment_id JOIN messages m ON m.id=sm.message_id
             WHERE s.state!='retired' ORDER BY s.id,sm.position""").fetchall()
         assert [(r["id"], r["text"], r["position"]) for r in rows] == [
-            ("SEG-001", "first one", 0), ("SEG-001", "second two", 1),
-            ("SEG-002", "third words", 0), ("SEG-002", "fourth", 1),
+            ("SEG-001", "first one", 0),
+            ("SEG-001", "second two", 1),
+            ("SEG-002", "third words", 0),
+            ("SEG-002", "fourth", 1),
         ]
-        for segment in store.connection.execute("SELECT id,revision,content_hash FROM segments WHERE state!='retired'"):
+        for segment in store.connection.execute(
+            "SELECT id,revision,content_hash FROM segments WHERE state!='retired'"
+        ):
             rendered = reopened.render(segment["id"])
             assert segment["content_hash"] == digest(rendered)
             assert len(rendered.split()) <= 500_000

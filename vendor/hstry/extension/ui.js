@@ -1,5 +1,9 @@
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
-import { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES, normalizeCaptureTypes } from './providers/selection.js';
+import {
+  CAPTURE_TYPES,
+  DEFAULT_CAPTURE_TYPES,
+  normalizeCaptureTypes,
+} from './providers/selection.js';
 
 export { DEFAULT_PROVIDER_SETTINGS, PROVIDERS };
 export { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES };
@@ -10,13 +14,14 @@ export function normalizeSettings(values, defaults) {
   return {
     port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : defaults.port,
     token: String(values.token ?? '').trim(),
-    account: String(values.account ?? defaults.account ?? 'browser-local').trim() || 'browser-local',
+    account:
+      String(values.account ?? defaults.account ?? 'browser-local').trim() || 'browser-local',
     intervalMinutes:
       Number.isInteger(intervalMinutes) && intervalMinutes >= 1 && intervalMinutes <= 720
         ? intervalMinutes
         : defaults.intervalMinutes,
     providers: Object.fromEntries(
-      Object.keys(PROVIDERS).map(id => [id, Boolean(values.providers?.[id])])
+      Object.keys(PROVIDERS).map((id) => [id, Boolean(values.providers?.[id])]),
     ),
     captureTypes: normalizeCaptureTypes(values.captureTypes),
   };
@@ -35,20 +40,47 @@ export function formatTime(ms, now = Date.now()) {
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-export function providerState(entry, enabled = true, { apiConnected = false, captureTypes = null, providerId = null } = {}) {
-  if (!enabled) return { tone: 'muted', label: 'Off', detail: 'Turn on to capture selected chat types.' };
+export function providerState(
+  entry,
+  enabled = true,
+  { apiConnected = false, captureTypes = null, providerId = null } = {},
+) {
+  if (!enabled)
+    return { tone: 'muted', label: 'Off', detail: 'Turn on to capture selected chat types.' };
   const types = captureTypes ? normalizeCaptureTypes(captureTypes) : null;
-  if (apiConnected && providerId === 'gemini' && types && !types.recents &&
-      (types.projects || types.pinned || types.agents)) {
-    return { tone: 'warning', label: 'Selection unavailable', detail: 'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.' };
+  if (
+    apiConnected &&
+    providerId === 'gemini' &&
+    types &&
+    !types.recents &&
+    (types.projects || types.pinned || types.agents)
+  ) {
+    return {
+      tone: 'warning',
+      label: 'Selection unavailable',
+      detail:
+        'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.',
+    };
   }
-  if (entry?.lastRunMs && captureTypes && JSON.stringify(entry.capturePolicy) !== JSON.stringify(normalizeCaptureTypes(captureTypes))) {
-    return { tone: 'idle', label: 'Selection updated', detail: 'Capture again to apply your new checklist.' };
+  if (
+    entry?.lastRunMs &&
+    captureTypes &&
+    JSON.stringify(entry.capturePolicy) !== JSON.stringify(normalizeCaptureTypes(captureTypes))
+  ) {
+    return {
+      tone: 'idle',
+      label: 'Selection updated',
+      detail: 'Capture again to apply your new checklist.',
+    };
   }
   if (entry?.running) {
     const progress = entry.progress ?? {};
     if (progress.phase === 'discovering') {
-      return { tone: 'syncing', label: 'Discovering', detail: 'Checking for changed conversations…' };
+      return {
+        tone: 'syncing',
+        label: 'Discovering',
+        detail: 'Checking for changed conversations…',
+      };
     }
     return {
       tone: 'syncing',
@@ -63,12 +95,23 @@ export function providerState(entry, enabled = true, { apiConnected = false, cap
       detail: `${progressDetail(entry.progress ?? {})} · next batch queued`,
     };
   }
-  if (!apiConnected) return { tone: 'muted', label: 'Waiting for connection', detail: 'Connect your computer to start saving chats.' };
-  if (!entry?.lastRunMs) return { tone: 'idle', label: 'Ready to sync', detail: 'Selected chat types will appear here.' };
+  if (!apiConnected)
+    return {
+      tone: 'muted',
+      label: 'Waiting for connection',
+      detail: 'Connect your computer to start saving chats.',
+    };
+  if (!entry?.lastRunMs)
+    return {
+      tone: 'idle',
+      label: 'Ready to sync',
+      detail: 'Selected chat types will appear here.',
+    };
   if (
     apiConnected &&
     entry.lastError &&
-    (entry.lastError.includes('cannot reach hstry-api') || entry.lastError.includes('Failed to fetch'))
+    (entry.lastError.includes('cannot reach hstry-api') ||
+      entry.lastError.includes('Failed to fetch'))
   ) {
     return {
       tone: 'idle',
@@ -76,21 +119,24 @@ export function providerState(entry, enabled = true, { apiConnected = false, cap
       detail: 'The API is connected now. Run sync again.',
     };
   }
-  if (entry.lastError) return { tone: 'error', label: 'Needs attention', detail: friendlyError(entry.lastError) };
-  if (entry.selectionWarning) return { tone: 'warning', label: 'Some chats skipped', detail: entry.selectionWarning };
+  if (entry.lastError)
+    return { tone: 'error', label: 'Needs attention', detail: friendlyError(entry.lastError) };
+  if (entry.selectionWarning)
+    return { tone: 'warning', label: 'Some chats skipped', detail: entry.selectionWarning };
   if (entry.progress?.phase === 'complete') {
     const progress = entry.progress;
     const changed = progress.created + progress.updated;
     return {
       tone: 'success',
       label: 'Up to date',
-      detail: changed > 0
-        ? `${progress.created} new · ${progress.updated} updated · ${progress.detected} detected`
-        : progress.accepted > 0
-          ? `${progress.accepted} accepted · ${progress.detected} detected`
-          : (entry.selection?.skipped ?? 0) > 0
-            ? `No new chats · ${entry.selection.skipped} outside your selection`
-            : `No changes · ${progress.detected} checked`,
+      detail:
+        changed > 0
+          ? `${progress.created} new · ${progress.updated} updated · ${progress.detected} detected`
+          : progress.accepted > 0
+            ? `${progress.accepted} accepted · ${progress.detected} detected`
+            : (entry.selection?.skipped ?? 0) > 0
+              ? `No new chats · ${entry.selection.skipped} outside your selection`
+              : `No changes · ${progress.detected} checked`,
     };
   }
   return {
@@ -111,7 +157,8 @@ export function progressDetail(progress) {
 
 export function friendlyError(error) {
   const text = String(error ?? 'Unknown sync error');
-  if (text.includes('selection changed')) return 'Your selection changed. Capture again with your new checklist.';
+  if (text.includes('selection changed'))
+    return 'Your selection changed. Capture again with your new checklist.';
   if (text.includes('not logged in')) return 'Open this provider and sign in, then sync again.';
   if (text.includes('cannot reach hstry-api') || text.includes('Failed to fetch')) {
     return 'Start AI Memory on this computer, then try again.';

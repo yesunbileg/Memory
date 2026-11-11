@@ -25,7 +25,8 @@ class ConnectionFiles:
 
 def _valid_token(token: object) -> bool:
     return (
-        isinstance(token, str) and 24 <= len(token) <= 512
+        isinstance(token, str)
+        and 24 <= len(token) <= 512
         and all(33 <= ord(char) <= 126 for char in token)
     )
 
@@ -45,12 +46,16 @@ def _read_private(path: Path) -> bytes | None:
         if stat.S_IMODE(details.st_mode) & 0o077:
             raise ValueError(f"Connection secrets need private permissions (0600): {path}")
         if details.st_size > 4096:
-            raise ValueError(f"Existing connection file is not recognized; it was left unchanged: {path}")
+            raise ValueError(
+                f"Existing connection file is not recognized; it was left unchanged: {path}"
+            )
         with os.fdopen(descriptor, "rb") as file:
             descriptor = -1
             content = file.read(4097)
         if len(content) > 4096:
-            raise ValueError(f"Existing connection file is not recognized; it was left unchanged: {path}")
+            raise ValueError(
+                f"Existing connection file is not recognized; it was left unchanged: {path}"
+            )
         return content
     finally:
         if descriptor != -1:
@@ -79,13 +84,19 @@ def _read_connection(path: Path) -> dict | None:
     except (ValueError, UnicodeError):
         data = None
     if (
-        not isinstance(data, dict) or set(data) != _CONNECTION_KEYS
-        or type(data.get("schema")) is not int or data["schema"] != 1
-        or data.get("application") != "ai-memory" or data.get("host") != "127.0.0.1"
-        or type(data.get("port")) is not int or not 1 <= data["port"] <= 65535
+        not isinstance(data, dict)
+        or set(data) != _CONNECTION_KEYS
+        or type(data.get("schema")) is not int
+        or data["schema"] != 1
+        or data.get("application") != "ai-memory"
+        or data.get("host") != "127.0.0.1"
+        or type(data.get("port")) is not int
+        or not 1 <= data["port"] <= 65535
         or not _valid_token(data.get("token"))
     ):
-        raise ValueError(f"Existing connection file is not recognized; it was left unchanged: {path}")
+        raise ValueError(
+            f"Existing connection file is not recognized; it was left unchanged: {path}"
+        )
     return data
 
 
@@ -98,7 +109,9 @@ def _write_new_private(path: Path, content: bytes) -> None:
         os.fsync(file.fileno())
 
 
-def prepare_connection(db_path: Path, port: int = 41770, *, write_config: bool = True) -> ConnectionFiles:
+def prepare_connection(
+    db_path: Path, port: int = 41770, *, write_config: bool = True
+) -> ConnectionFiles:
     """Create or reuse one private connection beside the selected archive."""
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("Choose a local port between 1 and 65535.")
@@ -125,7 +138,9 @@ def prepare_connection(db_path: Path, port: int = 41770, *, write_config: bool =
             token = _read_token(token_file)
         if token is None or (existing and not hmac.compare_digest(existing["token"], token)):
             raise ValueError("Connection setup changed in another process. Run connect again.")
-    files = ConnectionFiles(connection_file=connection_file, token_file=token_file, port=port, token=token)
+    files = ConnectionFiles(
+        connection_file=connection_file, token_file=token_file, port=port, token=token
+    )
     if write_config:
         write_connection_file(files)
     return files
@@ -136,17 +151,27 @@ def write_connection_file(files: ConnectionFiles) -> None:
     token = _read_token(files.token_file)
     if token is None or not hmac.compare_digest(token, files.token):
         raise ValueError("Connection setup changed in another process. Run connect again.")
-    data = {"schema": 1, "application": "ai-memory", "host": "127.0.0.1", "port": files.port, "token": token}
+    data = {
+        "schema": 1,
+        "application": "ai-memory",
+        "host": "127.0.0.1",
+        "port": files.port,
+        "token": token,
+    }
     existing = _read_connection(files.connection_file)
     if existing is not None and existing != data:
         raise ValueError("Existing connection settings differ; the file was left unchanged.")
     if existing is None:
         try:
-            _write_new_private(files.connection_file, (json.dumps(data, indent=2) + "\n").encode("ascii"))
+            _write_new_private(
+                files.connection_file, (json.dumps(data, indent=2) + "\n").encode("ascii")
+            )
         except FileExistsError:
             existing = _read_connection(files.connection_file)
             if existing != data:
-                raise ValueError("Connection setup changed in another process. Run connect again.") from None
+                raise ValueError(
+                    "Connection setup changed in another process. Run connect again."
+                ) from None
 
 
 def archive_identity(db_path: Path) -> str:
@@ -158,22 +183,37 @@ def check_running_receiver(port: int, token: str, db_path: Path) -> str:
     """Classify an occupied loopback port without exposing credentials or replies."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
-        connection.request("POST", "/auth/check", body="{}", headers={
-            "Content-Type": "application/json", "Authorization": "Bearer " + token,
-        })
+        connection.request(
+            "POST",
+            "/auth/check",
+            body="{}",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token,
+            },
+        )
         response = connection.getresponse()
         if response.status in {401, 403}:
             return "unauthorized"
         if response.status != 200:
             return "incompatible"
         data = json.loads(response.read(4096))
-        if not isinstance(data, dict) or any(data.get(k) != v for k, v in {
-            "status": "ok", "service": "ai-memory", "schema": 1,
-        }.items()):
+        if not isinstance(data, dict) or any(
+            data.get(k) != v
+            for k, v in {
+                "status": "ok",
+                "service": "ai-memory",
+                "schema": 1,
+            }.items()
+        ):
             return "incompatible"
         if not isinstance(data.get("archive_id"), str):
             return "incompatible"
-        return "ok" if hmac.compare_digest(data["archive_id"], archive_identity(db_path)) else "different_archive"
+        return (
+            "ok"
+            if hmac.compare_digest(data["archive_id"], archive_identity(db_path))
+            else "different_archive"
+        )
     except (OSError, ValueError, http.client.HTTPException):
         return "incompatible"
     finally:

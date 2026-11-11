@@ -1,3 +1,5 @@
+> Historical development record. Use [development](../../development.md) and [current validation](../../validation.md) for today's workflow.
+
 # Local reliability and extension handoff
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
@@ -8,7 +10,7 @@
 
 **Tech Stack:** Python 3.12+, Node 24+, SQLite, plain JavaScript/HTML/CSS.
 
-**Spec:** `docs/specification.mn.md`, `docs/superpowers/specs/2026-11-11-extension-design.md`, and the two reproduced failures in the 2026-11-11 full audit.
+**Spec:** `docs/specification.mn.md`, `docs/archive/designs/2026-11-11-extension-design.md`, and the two reproduced failures in the 2026-11-11 full audit.
 
 ## Global constraints
 

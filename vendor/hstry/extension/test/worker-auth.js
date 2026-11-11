@@ -24,21 +24,32 @@ assert.equal(calls[0].options.redirect, 'error');
 assert.equal(JSON.stringify(valid).includes(settings.token), false);
 
 for (const status of [401, 403]) {
-  const unauthorized = await checkConnection(settings, { fetchImpl: async () => new Response('', { status }) });
+  const unauthorized = await checkConnection(settings, {
+    fetchImpl: async () => new Response('', { status }),
+  });
   assert.equal(unauthorized.ok, false);
   assert.equal(unauthorized.code, 'unauthorized');
 }
-for (const body of [{ status: 'ok' }, { status: 'ok', service: 'other-app', schema: 1 },
-  { status: 'ok', service: 'ai-memory', schema: 2 }]) {
-  const wrongApp = await checkConnection(settings, { fetchImpl: async () => new Response(JSON.stringify(body)) });
+for (const body of [
+  { status: 'ok' },
+  { status: 'ok', service: 'other-app', schema: 1 },
+  { status: 'ok', service: 'ai-memory', schema: 2 },
+]) {
+  const wrongApp = await checkConnection(settings, {
+    fetchImpl: async () => new Response(JSON.stringify(body)),
+  });
   assert.equal(wrongApp.ok, false);
   assert.equal(wrongApp.code, 'incompatible_server');
 }
-const wrongRoute = await checkConnection(settings, { fetchImpl: async () => new Response('', { status: 404 }) });
+const wrongRoute = await checkConnection(settings, {
+  fetchImpl: async () => new Response('', { status: 404 }),
+});
 assert.equal(wrongRoute.code, 'incompatible_server');
-const offline = await checkConnection(settings, { fetchImpl: async () => {
-  throw new Error(`Unsafe error contains ${settings.token}`);
-} });
+const offline = await checkConnection(settings, {
+  fetchImpl: async () => {
+    throw new Error(`Unsafe error contains ${settings.token}`);
+  },
+});
 assert.equal(offline.code, 'offline');
 assert.equal(JSON.stringify(offline).includes(settings.token), false);
 

@@ -11,7 +11,9 @@ from mcp.client.stdio import stdio_client
 
 
 async def smoke(db: Path):
-    params = StdioServerParameters(command=sys.executable, args=["-m", "ai_memory", "--db", str(db.resolve()), "mcp"])
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "ai_memory", "--db", str(db.resolve()), "mcp"]
+    )
     async with stdio_client(params) as streams:
         async with ClientSession(*streams) as client:
             await client.initialize()

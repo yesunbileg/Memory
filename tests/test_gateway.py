@@ -39,20 +39,43 @@ def seed_archive(db_path, *, map_source=True):
     from ai_memory.store import Store
 
     with Store(db_path) as store:
-        conversation_id = store.ingest({
-            "external_id": "test-session", "platform": "codex", "account": "test",
-            "title": "Gateway test", "project": "Memory", "models": [],
-            "created_at": None, "updated_at": None, "source_url": None,
-            "messages": [
-                {"native_id": "u1", "sequence": 1, "role": "user", "kind": "text",
-                 "text": "Which project?", "timestamp": "2026-11-10T10:00:00Z"},
-                {"native_id": "a1", "sequence": 2, "role": "assistant", "kind": "text",
-                 "text": "Memory.", "timestamp": "2026-11-10T10:01:00Z"},
-            ],
-        }, consent=True)
+        conversation_id = store.ingest(
+            {
+                "external_id": "test-session",
+                "platform": "codex",
+                "account": "test",
+                "title": "Gateway test",
+                "project": "Memory",
+                "models": [],
+                "created_at": None,
+                "updated_at": None,
+                "source_url": None,
+                "messages": [
+                    {
+                        "native_id": "u1",
+                        "sequence": 1,
+                        "role": "user",
+                        "kind": "text",
+                        "text": "Which project?",
+                        "timestamp": "2026-11-10T10:00:00Z",
+                    },
+                    {
+                        "native_id": "a1",
+                        "sequence": 2,
+                        "role": "assistant",
+                        "kind": "text",
+                        "text": "Memory.",
+                        "timestamp": "2026-11-10T10:01:00Z",
+                    },
+                ],
+            },
+            consent=True,
+        )
         segments = SegmentBuilder(store).build()
         segment_id = segments[0]["id"]
-        segment = store.connection.execute("SELECT revision FROM segments WHERE id=?", (segment_id,)).fetchone()
+        segment = store.connection.execute(
+            "SELECT revision FROM segments WHERE id=?", (segment_id,)
+        ).fetchone()
         if map_source:
             store.connection.execute(
                 "INSERT INTO source_map(segment_id, source_id, revision) VALUES (?, ?, ?)",
@@ -70,7 +93,9 @@ async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
     db = tmp_path / "memory.sqlite"
     seed_archive(db)
     notebook = SimulatedNotebook()
-    async with create_connected_server_and_client_session(create_server(db, adapter=notebook)) as client:
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=notebook)
+    ) as client:
         tools = await client.list_tools()
         assert {tool.name for tool in tools.tools} == {"memory_ask", "memory_status"}
         status = decode(await client.call_tool("memory_status", {}))
@@ -88,16 +113,29 @@ async def test_citations_identify_only_exact_verified_headings(tmp_path):
 
     db = tmp_path / "memory.sqlite"
     conversation_id, segment_id, message_ids = seed_archive(db)
-    notebook = SimulatedNotebook([
-        {"source_id": "owned-source", "citation_number": 1,
-         "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\nMemory."},
-        {"source_id": "owned-source", "citation_number": 2, "cited_text": "Which project?"},
-        {"source_id": "unknown-source", "citation_number": 3,
-         "cited_text": f"### {conversation_id} · 0001 · User · 2026-11-10T10:00:00Z"},
-        {"source_id": "owned-source", "citation_number": 4,
-         "cited_text": f"### {conversation_id} · 0001 · Assistant · 2026-11-10T10:00:00Z"},
-    ])
-    async with create_connected_server_and_client_session(create_server(db, adapter=notebook)) as client:
+    notebook = SimulatedNotebook(
+        [
+            {
+                "source_id": "owned-source",
+                "citation_number": 1,
+                "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\nMemory.",
+            },
+            {"source_id": "owned-source", "citation_number": 2, "cited_text": "Which project?"},
+            {
+                "source_id": "unknown-source",
+                "citation_number": 3,
+                "cited_text": f"### {conversation_id} · 0001 · User · 2026-11-10T10:00:00Z",
+            },
+            {
+                "source_id": "owned-source",
+                "citation_number": 4,
+                "cited_text": f"### {conversation_id} · 0001 · Assistant · 2026-11-10T10:00:00Z",
+            },
+        ]
+    )
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=notebook)
+    ) as client:
         answer = decode(await client.call_tool("memory_ask", {"question": "Project?"}))
     sources = answer["sources"]
     assert sources[0]["segment_id"] == segment_id
@@ -117,7 +155,9 @@ async def test_empty_sources_and_question_fail_without_unscoped_retrieval(tmp_pa
     db = tmp_path / "memory.sqlite"
     seed_archive(db, map_source=False)
     notebook = SimulatedNotebook()
-    async with create_connected_server_and_client_session(create_server(db, adapter=notebook)) as client:
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=notebook)
+    ) as client:
         empty = decode(await client.call_tool("memory_ask", {"question": " "}))
         assert empty["error"]["code"] == "invalid_question"
         no_sources = decode(await client.call_tool("memory_ask", {"question": "Earlier?"}))
@@ -125,7 +165,9 @@ async def test_empty_sources_and_question_fail_without_unscoped_retrieval(tmp_pa
     assert notebook.queries == []
 
 
-async def test_missing_configuration_and_auth_are_reported_without_fake_answer(tmp_path, monkeypatch):
+async def test_missing_configuration_and_auth_are_reported_without_fake_answer(
+    tmp_path, monkeypatch
+):
     from ai_memory.gateway import create_server
     from ai_memory.store import Store
 
@@ -159,13 +201,22 @@ async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_p
     db = tmp_path / "stdio.sqlite"
     parameters = StdioServerParameters(
         command=sys.executable,
-        args=["-c", "from pathlib import Path; import sys; from ai_memory.gateway import create_server; "
-              "create_server(Path(sys.argv[1])).run()", str(db)],
+        args=[
+            "-c",
+            "from pathlib import Path; import sys; from ai_memory.gateway import create_server; "
+            "create_server(Path(sys.argv[1])).run()",
+            str(db),
+        ],
     )
     async with stdio_client(parameters) as (reader, writer):
-        async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=15)) as client:
+        async with ClientSession(
+            reader, writer, read_timeout_seconds=timedelta(seconds=15)
+        ) as client:
             await client.initialize()
-            assert {tool.name for tool in (await client.list_tools()).tools} == {"memory_status", "memory_ask"}
+            assert {tool.name for tool in (await client.list_tools()).tools} == {
+                "memory_status",
+                "memory_ask",
+            }
             status = decode(await client.call_tool("memory_status", {}))
             assert status["messages"] == 0
             assert status["notebook"]["configured"] is False
@@ -183,11 +234,18 @@ async def test_edited_archive_does_not_attribute_old_cloud_passage_to_current_me
         edited = store.get_conversation(conversation_id)
         edited["messages"][1]["text"] = "A newer decision."
         store.ingest(edited)
-    notebook = SimulatedNotebook([
-        {"source_id": "owned-source", "citation_number": 1,
-         "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\nMemory."},
-    ])
-    async with create_connected_server_and_client_session(create_server(db, adapter=notebook)) as client:
+    notebook = SimulatedNotebook(
+        [
+            {
+                "source_id": "owned-source",
+                "citation_number": 1,
+                "cited_text": f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z\nMemory.",
+            },
+        ]
+    )
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=notebook)
+    ) as client:
         answer = decode(await client.call_tool("memory_ask", {"question": "Earlier project?"}))
     assert answer["sources"][0]["segment_id"] == segment_id
     assert "message_ids" not in answer["sources"][0]

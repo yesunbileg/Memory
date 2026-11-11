@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import errno
-import hashlib
 import json
 import logging
 import os
@@ -11,15 +10,19 @@ from pathlib import Path
 from time import monotonic as _monotonic
 from time import sleep as _sleep
 
-from ai_memory.diagnostics import failure_code
-from ai_memory.segments import SegmentBuilder
-from ai_memory.store import Store
+from .diagnostics import failure_code
+from .importer import collect_into
+from .segments import SegmentBuilder
+from .store import Store
 
 logger = logging.getLogger(__name__)
 
+
 def parser():
     p = argparse.ArgumentParser(description="Lossless AI archive → NotebookLM → MCP")
-    p.add_argument("--db", type=Path, default=Path(os.environ.get("AI_MEMORY_DB", "data/conversations.sqlite")))
+    p.add_argument(
+        "--db", type=Path, default=Path(os.environ.get("AI_MEMORY_DB", "data/conversations.sqlite"))
+    )
     sub = p.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Create an archive and optionally bind one notebook")
     init.add_argument("--notebook-id")
@@ -28,140 +31,51 @@ def parser():
     collect.add_argument("platform", choices=["codex", "opencode"])
     collect.add_argument("path", type=Path)
     collect.add_argument("--account", default="local")
-    collect.add_argument("--approve-upload", action="store_true", help="Explicitly approve imported text for Google upload")
+    collect.add_argument(
+        "--approve-upload",
+        action="store_true",
+        help="Explicitly approve imported text for Google upload",
+    )
     approve = sub.add_parser("approve", help="Approve specific conversations for cloud upload")
     approve.add_argument("conversation_ids", nargs="+")
     build = sub.add_parser("build", help="Generate approved Markdown segments, without networking")
     build.add_argument("--output", type=Path)
     sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
-    ask = sub.add_parser("ask", help="Retrieve prior context from NotebookLM through the memory gateway")
+    ask = sub.add_parser(
+        "ask", help="Retrieve prior context from NotebookLM through the memory gateway"
+    )
     ask.add_argument("question")
     sub.add_parser("status", help="Local archive and sync counts (no network)")
     sub.add_parser("check", help="Check NotebookLM connectivity via memory_status")
     show = sub.add_parser("show", help="Read the original conversation by archive ID")
     show.add_argument("conversation_id")
-    serve = sub.add_parser("serve", help="Authenticated loopback ingest for the hstry browser extension")
+    serve = sub.add_parser(
+        "serve", help="Authenticated loopback ingest for the hstry browser extension"
+    )
     serve.add_argument("--port", type=int, default=41770)
     serve.add_argument("--token-file", type=Path)
-    connect = sub.add_parser("connect", help="Create a private extension connection file and start AI Memory")
+    connect = sub.add_parser(
+        "connect", help="Create a private extension connection file and start AI Memory"
+    )
     connect.add_argument("--port", type=int, default=41770)
     sub.add_parser("mcp", help="Serve memory_ask and memory_status over stdio")
-    watch = sub.add_parser("watch", help="Incrementally scan selected sources; sync only approved text")
+    watch = sub.add_parser(
+        "watch", help="Incrementally scan selected sources; sync only approved text"
+    )
     watch.add_argument("--codex-path", type=Path)
     watch.add_argument("--opencode-path", type=Path)
     watch.add_argument("--account", default="local")
     watch.add_argument("--interval", type=float, default=30)
     watch.add_argument("--sync-interval", type=float, default=43200)
-    demo = sub.add_parser("demo", help="Run repeatable synthetic Codex/OpenCode → SQLite → Markdown demo")
+    demo = sub.add_parser(
+        "demo", help="Run repeatable synthetic Codex/OpenCode → SQLite → Markdown demo"
+    )
     demo.add_argument("--output", type=Path, default=Path("data/demo"))
     return p
 
 
-def collect_into(store, platform, path, account="local", consent=False):
-    from ai_memory.collectors import collect
-
-    path = Path(path).expanduser().resolve(strict=True)
-    key = f"{platform}:{account}:{path}"
-    opencode_json = False
-    # An explicit session file references message/part files beyond its own mtime.
-    explicit_session = platform.lower() == "opencode" and path.is_file() and path.suffix == ".json"
-    if path.is_dir() and platform.lower() == "codex":
-        files = sorted(f for f in path.rglob("*") if f.is_file() and
-                       (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst")))
-        independent_files = True
-    elif path.is_dir() and platform.lower() == "opencode" and not (path / "opencode.db").exists():
-        current = sorted(f for f in path.glob("storage/session/*/ses_*.json") if f.is_file())
-        current_ids = {f.name for f in current}
-        legacy = sorted(f for f in path.glob("project/*/storage/session/info/ses_*.json")
-                        if f.is_file() and f.name not in current_ids)
-        files = current + legacy
-        opencode_json = independent_files = bool(files)
-        if not files:
-            files = [path]
-    else:
-        files = [path]
-        independent_files = False
-    ids = []
-    failures = []
-    scanned = 0
-    inventory = None
-    tree_fingerprint = None
-    for file in files:
-        relative = str(file.relative_to(path)) if independent_files else file.name
-        try:
-            if path.is_dir() and (opencode_json or not independent_files):
-                if inventory is None:
-                    inventory = []
-                    for item in sorted(p for p in path.rglob("*") if p.is_file()):
-                        stat = item.stat()
-                        inventory.append((str(item.relative_to(path)), stat.st_size, stat.st_mtime_ns))
-                if opencode_json:
-                    # Message/part edits need not touch session JSON. Hash the tree
-                    # once, then checkpoint successful sessions independently.
-                    if tree_fingerprint is None:
-                        tree_fingerprint = hashlib.sha256(json.dumps(inventory).encode()).hexdigest()
-                    fingerprint_input = [relative, tree_fingerprint]
-                else:
-                    fingerprint_input = inventory
-            else:
-                stat = file.stat()
-                fingerprint_input = [relative, stat.st_size, stat.st_mtime_ns]
-            fingerprint = hashlib.sha256(json.dumps(fingerprint_input).encode()).hexdigest()
-        except OSError:
-            failures.append({"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
-                             "category": "read"})
-            continue
-        file_key = f"{key}:{relative}" if independent_files else key
-        checkpoint = store.connection.execute(
-            "SELECT value FROM checkpoints WHERE key=?", (file_key,)
-        ).fetchone()
-        if checkpoint and checkpoint[0] == fingerprint and not consent and not explicit_session:
-            scanned += 1
-            continue
-        try:
-            conversations = collect(platform, file if independent_files else path, account=account)
-            for c in conversations:
-                # Keep known native IDs at their archived positions and append new turns.
-                existing = store.connection.execute(
-                    "SELECT id FROM conversations WHERE platform=? AND account=? AND external_id=?",
-                    (c["platform"], c["account"], c["external_id"]),
-                ).fetchone()
-                if existing:
-                    previous = {m["native_id"]: m["sequence"] for m in
-                                store.get_conversation(existing[0])["messages"]}
-                    last = max(previous.values(), default=0)
-                    for m in c["messages"]:
-                        if m["native_id"] in previous:
-                            m["sequence"] = previous[m["native_id"]]
-                        else:
-                            last += 1
-                            m["sequence"] = last
-                ids.append(store.ingest(c, consent=consent))
-            with store.connection:
-                store.connection.execute(
-                    "INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (file_key, fingerprint)
-                )
-            scanned += 1
-        except (OSError, RuntimeError, ValueError, UnicodeError):
-            failures.append({"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
-                             "category": "parse"})
-    source_id = hashlib.sha256(key.encode()).hexdigest()[:16]
-    prior_failures = store.get_setting("import_failures", [])
-    prior_failures = [failure for failure in prior_failures if failure.get("source_id") != source_id]
-    if failures:
-        prior_failures.append({
-            "source_id": source_id,
-            "failed_files": len(failures),
-            "categories": sorted({failure["category"] for failure in failures}),
-        })
-    store.set_setting("import_failures", prior_failures)
-    return {"imported_conversations": len(ids), "conversation_ids": ids,
-            "unchanged": bool(scanned and not ids and not failures),
-            "failed_files": len(failures), "file_failures": failures}
-
-
 async def _gateway_call(db_path, name, arguments):
-    from ai_memory.gateway import create_server
+    from .gateway import create_server
 
     server = create_server(db_path)
     # FastMCP's lifecycle also closes the lazy notebook client for CLI use.
@@ -175,8 +89,8 @@ async def _gateway_call(db_path, name, arguments):
 
 
 async def sync_archive(store):
-    from ai_memory.notebook import NotebookLMAdapter
-    from ai_memory.sync import SyncEngine
+    from .notebook import NotebookLMAdapter
+    from .sync import SyncEngine
 
     notebook_id = store.get_setting("notebook_id")
     if not notebook_id:
@@ -184,7 +98,9 @@ async def sync_archive(store):
     storage = store.get_setting("storage_path")
     adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
     try:
-        return await SyncEngine(store, SegmentBuilder(store), adapter, store.path.parent / "sync").run_once()
+        return await SyncEngine(
+            store, SegmentBuilder(store), adapter, store.path.parent / "sync"
+        ).run_once()
     finally:
         await adapter.close()
 
@@ -192,7 +108,11 @@ async def sync_archive(store):
 def _watch(args):
     if args.interval < 5 or args.sync_interval < 300:
         raise ValueError("watch requires interval >= 5 seconds and sync-interval >= 300 seconds")
-    sources = [(p, path) for p, path in (("codex", args.codex_path), ("opencode", args.opencode_path)) if path]
+    sources = [
+        (p, path)
+        for p, path in (("codex", args.codex_path), ("opencode", args.opencode_path))
+        if path
+    ]
     if not sources:
         raise ValueError("watch requires at least one explicit source path")
     next_sync = 0
@@ -224,7 +144,11 @@ def _watch(args):
                         # job and therefore do not pass through the queue logger.
                         for blocker in result.get("blocked", []):
                             code = blocker.get("reason")
-                            if not blocker.get("segment_id") and code in {"CapacityError", "SnapshotError", "SourceQuota"}:
+                            if not blocker.get("segment_id") and code in {
+                                "CapacityError",
+                                "SnapshotError",
+                                "SourceQuota",
+                            }:
                                 report(("sync", code), code)
                     except Exception as error:
                         code = failure_code(error)
@@ -232,28 +156,34 @@ def _watch(args):
                         result = {"status": {"sync_status": "pending"}}
                     # Pending jobs retain their own backoff deadline in SQLite;
                     # revisit them during scans instead of waiting the full batch period.
-                    delay = args.interval if result["status"]["sync_status"] == "pending" else args.sync_interval
+                    delay = (
+                        args.interval
+                        if result["status"]["sync_status"] == "pending"
+                        else args.sync_interval
+                    )
                     next_sync = _monotonic() + delay
         _sleep(args.interval)
 
 
 def execute(args):
     if args.command == "demo":
-        from ai_memory.demo import run_demo
+        from .demo import run_demo
+
         return run_demo(args.output)
     if args.command == "mcp":
-        from ai_memory.gateway import create_server
+        from .gateway import create_server
+
         create_server(args.db).run(transport="stdio")
         return None
     if args.command == "watch":
         return _watch(args)
     if args.command == "connect":
-        from ai_memory.connection import (
+        from .connection import (
             check_running_receiver,
             prepare_connection,
             write_connection_file,
         )
-        from ai_memory.ingest import make_server
+        from .ingest import make_server
 
         files = prepare_connection(args.db, args.port, write_config=False)
         try:
@@ -300,10 +230,17 @@ def execute(args):
             server.server_close()
         return None
     if args.command == "serve":
-        from ai_memory.ingest import make_server
-        token = args.token_file.read_text().strip() if args.token_file else os.environ.get("AI_MEMORY_INGEST_TOKEN", "")
+        from .ingest import make_server
+
+        token = (
+            args.token_file.read_text().strip()
+            if args.token_file
+            else os.environ.get("AI_MEMORY_INGEST_TOKEN", "")
+        )
         if len(token) < 24:
-            raise ValueError("Provide a private token of at least 24 characters via --token-file or AI_MEMORY_INGEST_TOKEN")
+            raise ValueError(
+                "Provide a private token of at least 24 characters via --token-file or AI_MEMORY_INGEST_TOKEN"
+            )
         server = make_server(args.db, token, port=args.port)
         try:
             server.serve_forever()
@@ -333,7 +270,9 @@ def execute(args):
             output = args.output or store.path.parent / "segments"
             output.mkdir(parents=True, exist_ok=True, mode=0o700)
             ids = []
-            for r in store.connection.execute("SELECT id FROM segments WHERE state!='retired' ORDER BY rowid"):
+            for r in store.connection.execute(
+                "SELECT id FROM segments WHERE state!='retired' ORDER BY rowid"
+            ):
                 path = output / f"{r[0]}.md"
                 path.write_text(builder.render(r[0]), encoding="utf-8", newline="")
                 path.chmod(0o600)
@@ -353,9 +292,14 @@ def main(argv=None):
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        from ai_memory.notebook import NotebookLMError
+        from .notebook import NotebookLMError
+
         if args.command == "connect":
-            message = str(exc) if isinstance(exc, ValueError) else "Connection setup failed. Check the archive directory and try again."
+            message = (
+                str(exc)
+                if isinstance(exc, ValueError)
+                else "Connection setup failed. Check the archive directory and try again."
+            )
             print(f"AI Memory could not connect. {message}", flush=True)
             return 1
         if isinstance(exc, NotebookLMError):
@@ -363,11 +307,22 @@ def main(argv=None):
         elif isinstance(exc, ValueError):
             result = {"error": {"code": "invalid_configuration", "message": str(exc)}}
         else:
-            result = {"error": {"code": type(exc).__name__, "message": "Operation failed; archive retained. Check configuration and retry."}}
+            result = {
+                "error": {
+                    "code": type(exc).__name__,
+                    "message": "Operation failed; archive retained. Check configuration and retry.",
+                }
+            }
         print(json.dumps(result, ensure_ascii=False))
         return 1
     if result is not None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        if "error" in result or result.get("blocked") or result.get("failed_files") or result.get("status", {}).get("sync_status") == "pending" and args.command == "sync":
+        if (
+            "error" in result
+            or result.get("blocked")
+            or result.get("failed_files")
+            or result.get("status", {}).get("sync_status") == "pending"
+            and args.command == "sync"
+        ):
             return 1
     return 0

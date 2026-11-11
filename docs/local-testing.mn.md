@@ -27,7 +27,7 @@ Google ашиглахгүй үндсэн шалгалт:
 1. Brave дээр `brave://extensions/` нээнэ (`chrome://extensions/` мөн болно).
 2. **Developer mode** асаана.
 3. **Load unpacked** → repository доторх `vendor/hstry/extension` хавтсыг сонгоно.
-4. Өмнө суулгасан бол **Reload** дарна. Settings дээр **0.5.2** харагдана.
+4. Өмнө суулгасан бол **Reload** дарна. Settings дээр **0.5.3** харагдана.
 
 ZIP хэрэгтэй бол:
 
@@ -35,7 +35,7 @@ ZIP хэрэгтэй бол:
 .venv/bin/python scripts/package_extension.py
 ```
 
-`dist/ai-memory-extension-0.5.2.zip` үүснэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон license орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
+`dist/ai-memory-extension-0.5.3.zip` үүснэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон license орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
 
 ## 3. Компьютертэй холбох
 
@@ -140,13 +140,13 @@ journalctl --user -u ai-memory.service -u ai-memory-receiver.service -f
 
 ## 7. MCP болон хөгжүүлэлтийн тест
 
-Байгаа MCP тохиргоондоо [Codex](../config/codex.toml.example) эсвэл [OpenCode](../config/opencode.json.example) жишээний зөвхөн memory server entry-г нэгтгэнэ. Executable/DB замыг солиод MCP холболтоо restart хийнэ. Agent-д `memory_status` болон өмнөх ярианы талаар `memory_ask` дуудаж шалгуулна. [Agent ашиглах заавар](agent-instructions.md)-ыг нэмнэ.
+Байгаа MCP тохиргоондоо [Codex](../config/codex.toml.example), [OpenCode 2](../config/opencode-v2.json.example), эсвэл [хуучин OpenCode](../config/opencode.json.example) жишээний зөвхөн memory server entry-г нэгтгэнэ. OpenCode 2 нь `mcp.servers`, хуучин client нь `mcp` map ашиглана. Executable/DB замыг солиод MCP холболтоо restart хийнэ. Agent-д `memory_status` болон өмнөх ярианы талаар `memory_ask` дуудаж шалгуулна. [Agent ашиглах заавар](agent-instructions.md)-ыг нэмнэ.
 
 ```bash
-.venv/bin/pytest -q
-for test_file in vendor/hstry/extension/test/*.js; do node "$test_file"; done
-.venv/bin/ruff check src tests scripts
+.venv/bin/python scripts/check.py
 ```
+
+Энэ нэг команд Python lint/format, бүх Python тест, extension-ийн бүх Node тестийг ажиллуулна. Код засах үед хэрэгтэй formatter болон project-ийн файлуудын үүргийг [development](development.md)-д тайлбарласан. Prettier нь зөвхөн хөгжүүлэлтийн npm dependency; app ажиллуулахад npm install шаардлагагүй.
 
 Optional browser UI шалгалт нь Playwright library болон таны суулгасан Brave/Chrome-ийг ашиглана; Google login хийхгүй, хувийн profile нээхгүй:
 

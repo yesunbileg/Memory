@@ -6,7 +6,9 @@ from mcp.client.stdio import stdio_client
 
 
 async def test_official_mcp_client_uses_actual_cli_entrypoint(tmp_path):
-    parameters = StdioServerParameters(command=sys.executable, args=["-m", "ai_memory", "--db", str(tmp_path / "db"), "mcp"])
+    parameters = StdioServerParameters(
+        command=sys.executable, args=["-m", "ai_memory", "--db", str(tmp_path / "db"), "mcp"]
+    )
     async with stdio_client(parameters) as streams:
         async with ClientSession(*streams) as client:
             await client.initialize()

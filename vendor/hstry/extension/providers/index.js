@@ -32,9 +32,8 @@ export const PROVIDERS = {
     adapter: 'gemini',
     sync: syncGemini,
   },
-
 };
 
 export const DEFAULT_PROVIDER_SETTINGS = Object.fromEntries(
-  Object.entries(PROVIDERS).map(([id, provider]) => [id, provider.defaultEnabled])
+  Object.entries(PROVIDERS).map(([id, provider]) => [id, provider.defaultEnabled]),
 );

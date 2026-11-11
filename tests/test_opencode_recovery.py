@@ -22,11 +22,21 @@ def session_files(root: Path, layout: str, session_id: str, text: str):
         message = storage / f"message/{session_id}/{message_id}.json"
         part = storage / f"part/{session_id}/{message_id}/prt_text.json"
     values = [
-        {"id": session_id, "title": "Visible session", "directory": "/synthetic/project",
-         "projectID": "project-demo", "time": {"created": 1000, "updated": 2000}},
+        {
+            "id": session_id,
+            "title": "Visible session",
+            "directory": "/synthetic/project",
+            "projectID": "project-demo",
+            "time": {"created": 1000, "updated": 2000},
+        },
         {"id": message_id, "sessionID": session_id, "role": "user", "time": {"created": 1000}},
-        {"id": "prt_text", "messageID": message_id, "sessionID": session_id,
-         "type": "text", "text": text},
+        {
+            "id": "prt_text",
+            "messageID": message_id,
+            "sessionID": session_id,
+            "type": "text",
+            "text": text,
+        },
     ]
     for path, value in zip((info, message, part), values, strict=True):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +56,9 @@ def test_explicit_opencode_session_preserves_exact_visible_text(tmp_path, layout
 
 @pytest.mark.parametrize("layout", ["new", "old"])
 @pytest.mark.parametrize("broken_index", [0, 1, 2], ids=["session", "message", "part"])
-def test_corrupt_opencode_session_is_isolated_and_retried_after_repair(tmp_path, layout, broken_index):
+def test_corrupt_opencode_session_is_isolated_and_retried_after_repair(
+    tmp_path, layout, broken_index
+):
     source = tmp_path / "source"
     session_files(source, layout, "ses_healthy", "Healthy visible text")
     damaged = session_files(source, layout, "ses_broken", "Repaired visible text")[broken_index]
@@ -122,8 +134,12 @@ def test_mixed_json_layouts_keep_old_only_sessions_and_prefer_new_duplicates(tmp
         result = collect_into(store, "opencode", source)
         assert result["failed_files"] == 0
         assert store.status()["conversations"] == 2
-        archived = {store.get_conversation(key)["external_id"]:
-                    store.get_conversation(key)["messages"][0]["text"] for key in result["conversation_ids"]}
+        archived = {
+            store.get_conversation(key)["external_id"]: store.get_conversation(key)["messages"][0][
+                "text"
+            ]
+            for key in result["conversation_ids"]
+        }
         assert archived == {"ses_shared": "Current text", "ses_legacy": "Legacy-only visible text"}
 
 
@@ -142,11 +158,21 @@ def test_sqlite_still_takes_priority_over_broken_legacy_json(tmp_path):
             INSERT INTO project VALUES('p', '/synthetic');
             INSERT INTO session VALUES('ses_database','p',NULL,'','/synthetic','Database','1',NULL,NULL,NULL,1000,2000);
         """)
-        database.execute("INSERT INTO message VALUES(?,?,?,?,?)",
-                         ("msg_db", "ses_database", 1000, 2000, json.dumps({"role": "user"})))
-        database.execute("INSERT INTO part VALUES(?,?,?,?,?,?)",
-                         ("prt_db", "msg_db", "ses_database", 1000, 2000,
-                          json.dumps({"type": "text", "text": "Current SQLite text"})))
+        database.execute(
+            "INSERT INTO message VALUES(?,?,?,?,?)",
+            ("msg_db", "ses_database", 1000, 2000, json.dumps({"role": "user"})),
+        )
+        database.execute(
+            "INSERT INTO part VALUES(?,?,?,?,?,?)",
+            (
+                "prt_db",
+                "msg_db",
+                "ses_database",
+                1000,
+                2000,
+                json.dumps({"type": "text", "text": "Current SQLite text"}),
+            ),
+        )
     with Store(tmp_path / "archive.sqlite") as store:
         result = collect_into(store, "opencode", source)
         assert result["failed_files"] == 0

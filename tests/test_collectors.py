@@ -103,6 +103,7 @@ def test_derived_message_ids_do_not_depend_on_message_order():
         {"role": "user", "content": "question", "createdAt": 1000},
         {"role": "assistant", "content": "answer", "createdAt": 2000},
     ]
+
     def normalized(items):
         return normalize_conversation({"externalId": "stable", "messages": items}, "codex", "local")
 
@@ -110,16 +111,30 @@ def test_derived_message_ids_do_not_depend_on_message_order():
     reverse = {m["text"]: m["native_id"] for m in normalized(list(reversed(messages)))["messages"]}
     assert forward == reverse
 
-    with_part_ids = {"externalId": "stable", "messages": [{
-        "role": "assistant", "createdAt": 2000,
-        "parts": [{"id": "counter-1", "type": "text", "text": "answer"}],
-    }]}
-    with_different_part_ids = {"externalId": "stable", "messages": [{
-        "role": "assistant", "createdAt": 2000,
-        "parts": [{"id": "counter-99", "type": "text", "text": "answer"}],
-    }]}
+    with_part_ids = {
+        "externalId": "stable",
+        "messages": [
+            {
+                "role": "assistant",
+                "createdAt": 2000,
+                "parts": [{"id": "counter-1", "type": "text", "text": "answer"}],
+            }
+        ],
+    }
+    with_different_part_ids = {
+        "externalId": "stable",
+        "messages": [
+            {
+                "role": "assistant",
+                "createdAt": 2000,
+                "parts": [{"id": "counter-99", "type": "text", "text": "answer"}],
+            }
+        ],
+    }
     first = normalize_conversation(with_part_ids, "codex", "local")["messages"][0]["native_id"]
-    second = normalize_conversation(with_different_part_ids, "codex", "local")["messages"][0]["native_id"]
+    second = normalize_conversation(with_different_part_ids, "codex", "local")["messages"][0][
+        "native_id"
+    ]
     assert first == second
 
 

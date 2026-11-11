@@ -161,7 +161,9 @@ async def test_no_consent_or_secret_text_never_uploaded(tmp_path):
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
         assert remote.operations == []
-        secret = conversation(external_id="synthetic-secret", title="password = secret" + "123456789")
+        secret = conversation(
+            external_id="synthetic-secret", title="password = secret" + "123456789"
+        )
         store.ingest(secret, consent=True)
         result = await engine.run_once()
         assert remote.operations == []
@@ -205,14 +207,19 @@ async def test_edit_during_failed_merge_invalidates_retired_parent_citation(tmp_
             store.ingest(c, consent=True)
         engine = SyncEngine(store, builder, remote, tmp_path / "md")
         await engine.run_once()
-        parent = store.connection.execute("SELECT source_id FROM source_map WHERE segment_id='SEG-001'").fetchone()[0]
+        parent = store.connection.execute(
+            "SELECT source_id FROM source_map WHERE segment_id='SEG-001'"
+        ).fetchone()[0]
         cited = remote.sources[parent]["text"]
         c = conversation(external_id="c3")
         c["messages"][0]["text"] = "message 3"
         store.ingest(c, consent=True)
         remote.fail_ready = True
         await engine.run_once()
-        assert store.connection.execute("SELECT state FROM segments WHERE id='SEG-001'").fetchone()[0] == "retired"
+        assert (
+            store.connection.execute("SELECT state FROM segments WHERE id='SEG-001'").fetchone()[0]
+            == "retired"
+        )
         c = conversation(external_id="c0")
         c["messages"][0]["text"] = "edited zero"
         store.ingest(c)
@@ -243,6 +250,7 @@ async def test_terminal_partial_upload_can_recover_without_deleting_old_source(t
 
     class PartialRemote(Remote):
         partial_id = None
+
         async def upload(self, path, title):
             sid = await super().upload(path, title)
             if self.partial_id is None:
@@ -308,10 +316,22 @@ async def test_tampered_pending_snapshot_is_never_uploaded(tmp_path):
 async def test_privacy_blocked_job_does_not_starve_safe_jobs_or_leak(tmp_path, caplog):
     secret = "password = 'SyntheticPass987654!'"
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(external_id="secret", title="Secret", messages=[
-            dict(conversation()["messages"][0], text=secret)]), consent=True)
-        store.ingest(conversation(external_id="safe", title="Safe", messages=[
-            dict(conversation()["messages"][0], text="safe message")]), consent=True)
+        store.ingest(
+            conversation(
+                external_id="secret",
+                title="Secret",
+                messages=[dict(conversation()["messages"][0], text=secret)],
+            ),
+            consent=True,
+        )
+        store.ingest(
+            conversation(
+                external_id="safe",
+                title="Safe",
+                messages=[dict(conversation()["messages"][0], text="safe message")],
+            ),
+            consent=True,
+        )
         remote = Remote()
         engine = SyncEngine(store, SegmentBuilder(store, target_words=1), remote, tmp_path / "md")
         result = await engine.run_once()
@@ -319,11 +339,19 @@ async def test_privacy_blocked_job_does_not_starve_safe_jobs_or_leak(tmp_path, c
         assert result["completed"] == 1
         assert len(remote.sources) == 1
         assert "safe message" in next(iter(remote.sources.values()))["text"]
-        job = store.connection.execute("SELECT * FROM sync_jobs WHERE error='SensitiveData'").fetchone()
+        job = store.connection.execute(
+            "SELECT * FROM sync_jobs WHERE error='SensitiveData'"
+        ).fetchone()
         assert job["stage"] == "blocked"
         assert job["next_attempt"] > time.time()
-        assert store.get_conversation(store.connection.execute(
-            "SELECT id FROM conversations WHERE external_id='secret'").fetchone()[0])["messages"][0]["text"] == secret
+        assert (
+            store.get_conversation(
+                store.connection.execute(
+                    "SELECT id FROM conversations WHERE external_id='secret'"
+                ).fetchone()[0]
+            )["messages"][0]["text"]
+            == secret
+        )
         await engine.run_once()
         assert len(caplog.records) == 1
         assert "SensitiveData" in caplog.text

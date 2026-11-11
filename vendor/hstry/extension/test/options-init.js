@@ -54,12 +54,12 @@ const html = await readFile(new URL('../options.html', import.meta.url), 'utf8')
 for (const match of html.matchAll(/id="([^"]+)"/g)) new FakeElement(match[1]);
 
 globalThis.document = {
-  getElementById: id => elements.get(id) ?? null,
+  getElementById: (id) => elements.get(id) ?? null,
   createElement: () => new FakeElement(),
 };
 globalThis.chrome = {
   runtime: {
-    sendMessage: async message =>
+    sendMessage: async (message) =>
       message.type === 'checkApi' ? { ok: false, code: 'missing_token' } : { ok: true },
   },
   storage: {
@@ -67,7 +67,7 @@ globalThis.chrome = {
       get: async () => ({ settings: undefined, status: {} }),
       set: async () => {},
     },
-    onChanged: { addListener: listener => storageListeners.push(listener) },
+    onChanged: { addListener: (listener) => storageListeners.push(listener) },
   },
 };
 
@@ -89,4 +89,6 @@ assert.equal(elements.get('connection-label').textContent, 'Not connected');
 assert.equal(elements.get('sync-now').disabled, true);
 assert.equal(elements.get('connection-guide').hidden, false);
 assert.ok(elements.get('import-connection').listeners.has('click'));
-console.log('PASS guided options initializes providers, category checklist, connection import and honest missing-token state');
+console.log(
+  'PASS guided options initializes providers, category checklist, connection import and honest missing-token state',
+);

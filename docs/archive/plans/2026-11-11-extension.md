@@ -1,3 +1,5 @@
+> Historical development record. Use [development](../../development.md) and [current validation](../../validation.md) for today's workflow.
+
 # Friendly extension and selective capture implementation plan
 
 > Execute tasks with test-first changes and an independent final review. Use the existing isolated cloud checkout; no extra worktree is needed.

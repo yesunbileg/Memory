@@ -33,7 +33,7 @@
     },
     "extension/lib/common.js": {
       "upstream_sha256": "5349b3b266b6bb134852c070041e0263e4a53174d2ec957078f5a728bede149e",
-      "modified": false
+      "modified": true
     },
     "extension/manifest.json": {
       "upstream_sha256": "160c40d18775b3b3c5072529a607f63e6f305d549cbdca2bea539eda0a322bb7",
@@ -49,11 +49,11 @@
     },
     "extension/popup.html": {
       "upstream_sha256": "fd4edad3841f92fdfada33ef6e7264c84c3371d9e392b9d5006a4a186650979c",
-      "modified": false
+      "modified": true
     },
     "extension/popup.js": {
       "upstream_sha256": "0002a989198a791bc9117878cf3fba25454fe0e3942a191badad9a9b09cb464e",
-      "modified": false
+      "modified": true
     },
     "extension/providers/chatgpt.js": {
       "upstream_sha256": "8e30ecf6fb855572169aeca56c9b2f6a829f962e616246cc55b621037e40d530",
@@ -73,19 +73,19 @@
     },
     "extension/styles.css": {
       "upstream_sha256": "392d7bf54d35c7b1ea06f67a4c2846020b8bdce9d72bb949893938bcacea2e73",
-      "modified": false
+      "modified": true
     },
     "extension/test/backoff.js": {
       "upstream_sha256": "a6bf2fffb97e1c33252d920dcfcb7f5fca2fa69248f3c8eb839e53041eb11626",
-      "modified": false
+      "modified": true
     },
     "extension/test/claude-organizations.js": {
       "upstream_sha256": "4ad325232ca4d935b05dfa051dd9a7d3077234df8f74d216f32908bf4cc91e3e",
-      "modified": false
+      "modified": true
     },
     "extension/test/gemini-resume.js": {
       "upstream_sha256": "e4a1b85edd5ed0da3d3cc05bb75a65f1bc6fd24adc61c8955f7538f9ec4f87c7",
-      "modified": false
+      "modified": true
     },
     "extension/test/options-init.js": {
       "upstream_sha256": "d63c031152d7da1b4cf798b94cad4d73f9c5a08ae053450442b14a1448ad3486",

@@ -7,12 +7,13 @@ import os
 import time
 from pathlib import Path
 
-from ai_memory.diagnostics import failure_code
-from ai_memory.privacy import find_sensitive
-from ai_memory.segments import CapacityError, SegmentBuilder, SourceBudgetError
-from ai_memory.store import Store, digest
+from .diagnostics import failure_code
+from .privacy import find_sensitive
+from .segments import CapacityError, SegmentBuilder, SourceBudgetError
+from .store import Store, digest
 
 logger = logging.getLogger(__name__)
+
 
 class SensitiveData(RuntimeError):
     pass
@@ -40,14 +41,20 @@ class SyncEngine:
         with db:
             for row in db.execute("""SELECT s.* FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
                 WHERE s.state!='retired' AND s.content_hash!='' AND (sm.source_id IS NULL OR sm.revision!=s.revision) ORDER BY s.rowid""").fetchall():
-                existing = db.execute("SELECT 1 FROM sync_jobs WHERE segment_id=? AND revision=?", (row["id"], row["revision"])).fetchone()
+                existing = db.execute(
+                    "SELECT 1 FROM sync_jobs WHERE segment_id=? AND revision=?",
+                    (row["id"], row["revision"]),
+                ).fetchone()
                 if existing:
                     continue
                 text = self.builder.render(row["id"])
                 if digest(text) != row["content_hash"] or len(text.split()) > 500_000:
                     raise SnapshotError("Segment changed before its snapshot was validated")
                 title = f"{row['id']}-r{row['revision']}-{row['content_hash'][:16]}.md"
-                db.execute("INSERT INTO sync_jobs(segment_id,revision,title) VALUES(?,?,?)", (row["id"], row["revision"], title))
+                db.execute(
+                    "INSERT INTO sync_jobs(segment_id,revision,title) VALUES(?,?,?)",
+                    (row["id"], row["revision"], title),
+                )
                 # Keep immutable snapshots only while a revision needs sync/reconciliation.
                 self.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
                 path = self.output_dir / title
@@ -60,17 +67,27 @@ class SyncEngine:
                 temporary.replace(path)
 
     def _old_sources(self, segment_id):
-        return [r[0] for r in self.store.connection.execute("""WITH RECURSIVE ancestors(id) AS (
+        return [
+            r[0]
+            for r in self.store.connection.execute(
+                """WITH RECURSIVE ancestors(id) AS (
             SELECT ? UNION SELECT sp.parent_id FROM segment_parents sp JOIN ancestors a ON sp.segment_id=a.id)
-            SELECT sm.source_id FROM source_map sm JOIN ancestors a ON a.id=sm.segment_id""", (segment_id,))]
+            SELECT sm.source_id FROM source_map sm JOIN ancestors a ON a.id=sm.segment_id""",
+                (segment_id,),
+            )
+        ]
 
     async def _process(self, job):
         db = self.store.connection
         job = dict(job)
         path = self.output_dir / job["title"]
-        current = db.execute("SELECT revision,state FROM segments WHERE id=?", (job["segment_id"],)).fetchone()
-        if job["stage"] in ("pending", "blocked") and not job["new_source_id"] and (
-            current["revision"] != job["revision"] or current["state"] == "retired"
+        current = db.execute(
+            "SELECT revision,state FROM segments WHERE id=?", (job["segment_id"],)
+        ).fetchone()
+        if (
+            job["stage"] in ("pending", "blocked")
+            and not job["new_source_id"]
+            and (current["revision"] != job["revision"] or current["state"] == "retired")
         ):
             with db:
                 db.execute("UPDATE sync_jobs SET stage='superseded' WHERE id=?", (job["id"],))
@@ -82,7 +99,9 @@ class SyncEngine:
                 if current["revision"] != job["revision"]:
                     raise RuntimeError("Pending revision snapshot missing; archive retained")
                 path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                path.write_text(self.builder.render(job["segment_id"]), encoding="utf-8", newline="")
+                path.write_text(
+                    self.builder.render(job["segment_id"]), encoding="utf-8", newline=""
+                )
                 path.chmod(0o600)
             text = path.read_text(encoding="utf-8")
             expected = f"{job['segment_id']}-r{job['revision']}-{digest(text)[:16]}.md"
@@ -94,7 +113,9 @@ class SyncEngine:
                 sources = await self.adapter.list_sources()
                 candidates = [s["id"] for s in sources if s["title"] == job["title"]]
                 if len(candidates) > 1:
-                    raise RuntimeError("Multiple sources have this revision title; reconcile manually")
+                    raise RuntimeError(
+                        "Multiple sources have this revision title; reconcile manually"
+                    )
                 old = self._old_sources(job["segment_id"])
                 if candidates:
                     new_id = candidates[0]
@@ -103,9 +124,14 @@ class SyncEngine:
                     if len(sources) >= 50:
                         raise SourceQuota("No free upload slot; existing remote sources preserved")
                     if not old and len(sources) >= 49:
-                        raise SpareSlotNeeded("Merge archive sources before growing into the spare slot")
+                        raise SpareSlotNeeded(
+                            "Merge archive sources before growing into the spare slot"
+                        )
                     with db:
-                        db.execute("UPDATE sync_jobs SET stage='uploading',old_source_ids=? WHERE id=?", (json.dumps(old), job["id"]))
+                        db.execute(
+                            "UPDATE sync_jobs SET stage='uploading',old_source_ids=? WHERE id=?",
+                            (json.dumps(old), job["id"]),
+                        )
                     try:
                         new_id = await self.adapter.upload(path, job["title"])
                     except Exception as exc:
@@ -113,16 +139,27 @@ class SyncEngine:
                         partial = getattr(exc, "source_id", None)
                         if isinstance(partial, str) and partial:
                             with db:
-                                db.execute("UPDATE sync_jobs SET new_source_id=?,stage='processing' WHERE id=?", (partial, job["id"]))
+                                db.execute(
+                                    "UPDATE sync_jobs SET new_source_id=?,stage='processing' WHERE id=?",
+                                    (partial, job["id"]),
+                                )
                         raise
                 job["new_source_id"], job["old_source_ids"] = new_id, json.dumps(old)
                 with db:
-                    db.execute("UPDATE sync_jobs SET stage='processing',new_source_id=?,old_source_ids=? WHERE id=?", (new_id, json.dumps(old), job["id"]))
+                    db.execute(
+                        "UPDATE sync_jobs SET stage='processing',new_source_id=?,old_source_ids=? WHERE id=?",
+                        (new_id, json.dumps(old), job["id"]),
+                    )
             await self.adapter.wait_ready(job["new_source_id"])
             # This transaction makes restart pick cleanup, never a second upload.
             with db:
-                db.execute("INSERT OR REPLACE INTO source_map(segment_id,source_id,revision) VALUES(?,?,?)", (job["segment_id"], job["new_source_id"], job["revision"]))
-                db.execute("UPDATE sync_jobs SET stage='cleanup',error=NULL WHERE id=?", (job["id"],))
+                db.execute(
+                    "INSERT OR REPLACE INTO source_map(segment_id,source_id,revision) VALUES(?,?,?)",
+                    (job["segment_id"], job["new_source_id"], job["revision"]),
+                )
+                db.execute(
+                    "UPDATE sync_jobs SET stage='cleanup',error=NULL WHERE id=?", (job["id"],)
+                )
         old_ids = json.loads(job["old_source_ids"])
         if old_ids:
             present = {s["id"] for s in await self.adapter.list_sources()}
@@ -134,7 +171,10 @@ class SyncEngine:
                 with db:
                     db.execute("DELETE FROM source_map WHERE source_id=?", (old_id,))
         with db:
-            db.execute("UPDATE sync_jobs SET stage='done',error=NULL,next_attempt=0 WHERE id=?", (job["id"],))
+            db.execute(
+                "UPDATE sync_jobs SET stage='done',error=NULL,next_attempt=0 WHERE id=?",
+                (job["id"],),
+            )
         path.unlink(missing_ok=True)
 
     async def _drain(self, result):
@@ -158,31 +198,49 @@ class SyncEngine:
             except Exception as exc:
                 kind = failure_code(exc)
                 if kind == "processing_failed":
-                    latest = db.execute("SELECT new_source_id,stage FROM sync_jobs WHERE id=?", (job["id"],)).fetchone()
+                    latest = db.execute(
+                        "SELECT new_source_id,stage FROM sync_jobs WHERE id=?", (job["id"],)
+                    ).fetchone()
                     failed = latest["new_source_id"]
-                    mapped = db.execute("SELECT 1 FROM source_map WHERE source_id=?", (failed,)).fetchone()
+                    mapped = db.execute(
+                        "SELECT 1 FROM source_map WHERE source_id=?", (failed,)
+                    ).fetchone()
                     if failed and not mapped and latest["stage"] == "processing":
                         try:
                             present = {s["id"] for s in await self.adapter.list_sources()}
                             if failed in present:
                                 await self.adapter.delete(failed)
                             with db:
-                                db.execute("UPDATE sync_jobs SET stage='pending',new_source_id=NULL WHERE id=?", (job["id"],))
+                                db.execute(
+                                    "UPDATE sync_jobs SET stage='pending',new_source_id=NULL WHERE id=?",
+                                    (job["id"],),
+                                )
                         except Exception:
                             # Retry deletion next time; never discard a committed source.
                             kind = "failed_source_cleanup"
                 next_attempt = time.time() + min(3600, 30 * 2 ** min(job["attempts"], 7))
                 with db:
-                    db.execute("""UPDATE sync_jobs SET attempts=attempts+1,next_attempt=?,error=? WHERE id=?""",
-                               (next_attempt, kind, job["id"]))
+                    db.execute(
+                        """UPDATE sync_jobs SET attempts=attempts+1,next_attempt=?,error=? WHERE id=?""",
+                        (next_attempt, kind, job["id"]),
+                    )
                     if isinstance(exc, SensitiveData):
                         db.execute("UPDATE sync_jobs SET stage='blocked' WHERE id=?", (job["id"],))
-                failure = {"segment_id": job["segment_id"], "reason": kind,
-                           "attempts": job["attempts"] + 1, "next_attempt": next_attempt}
+                failure = {
+                    "segment_id": job["segment_id"],
+                    "reason": kind,
+                    "attempts": job["attempts"] + 1,
+                    "next_attempt": next_attempt,
+                }
                 result["blocked"].append(failure)
                 # The persisted deadline suppresses repeated scan messages, including restarts.
-                logger.warning("Sync %s: %s; retry at %.0f (attempt %s)",
-                               job["segment_id"], kind, next_attempt, failure["attempts"])
+                logger.warning(
+                    "Sync %s: %s; retry at %.0f (attempt %s)",
+                    job["segment_id"],
+                    kind,
+                    next_attempt,
+                    failure["attempts"],
+                )
                 if isinstance(exc, SensitiveData) and not job["new_source_id"]:
                     continue
                 return "blocked"
@@ -215,7 +273,11 @@ class SyncEngine:
             if drained in {"complete", "merge"}:
                 # One merge per invocation bounds network work; a daemon can continue next cycle.
                 status = self.store.status()
-                if drained == "merge" or status["unassigned_messages"] and status["segments"] >= self.builder.max_active:
+                if (
+                    drained == "merge"
+                    or status["unassigned_messages"]
+                    and status["segments"] >= self.builder.max_active
+                ):
                     try:
                         self.builder.merge_oldest()
                         self._enqueue()
@@ -223,7 +285,12 @@ class SyncEngine:
                             self.builder.build()
                             self._enqueue()
                             if await self._drain(result) == "merge":
-                                result["blocked"].append({"reason": "SourceQuota", "detail": "Another merge is needed; retry sync"})
+                                result["blocked"].append(
+                                    {
+                                        "reason": "SourceQuota",
+                                        "detail": "Another merge is needed; retry sync",
+                                    }
+                                )
                     except CapacityError as exc:
                         result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
             result["status"] = self.store.status()

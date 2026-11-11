@@ -78,7 +78,9 @@ def _safe_error(error: Exception, *, loading_auth: bool = False) -> NotebookLMEr
     if isinstance(error, (TimeoutError, httpx.TimeoutException)):
         return NotebookLMError("NotebookLM request timed out. Retry later.", "timeout")
     if isinstance(error, (NetworkError, httpx.RequestError)):
-        return NotebookLMError("NotebookLM connection failed. Check connectivity and retry.", "network_error")
+        return NotebookLMError(
+            "NotebookLM connection failed. Check connectivity and retry.", "network_error"
+        )
     return NotebookLMError("NotebookLM request failed. Check login and retry.")
 
 
@@ -95,9 +97,8 @@ class NotebookLMAdapter:
         notebook_id: str,
         storage_path: Path | None = None,
         *,
-        client_factory: Callable[
-            [Path | None], AbstractAsyncContextManager[NotebookLMClient]
-        ] | None = None,
+        client_factory: Callable[[Path | None], AbstractAsyncContextManager[NotebookLMClient]]
+        | None = None,
     ):
         if not isinstance(notebook_id, str) or not notebook_id.strip():
             raise ValueError("A NotebookLM notebook ID is required")
@@ -130,9 +131,13 @@ class NotebookLMAdapter:
     async def upload(self, path: Path, title: str) -> str:
         path = Path(path)
         if (
-            not isinstance(title, str) or not title.endswith(".md")
-            or Path(title).name != title or "/" in title or "\\" in title
-            or any(ord(char) < 32 for char in title) or title.strip() != title
+            not isinstance(title, str)
+            or not title.endswith(".md")
+            or Path(title).name != title
+            or "/" in title
+            or "\\" in title
+            or any(ord(char) < 32 for char in title)
+            or title.strip() != title
         ):
             raise ValueError("Upload title must be a safe Markdown filename ending in .md")
         if not path.is_file():
@@ -146,7 +151,10 @@ class NotebookLMAdapter:
                 shutil.copyfile(path, upload_path)
                 upload_path.chmod(0o600)
                 source = await client.sources.add_file(
-                    self.notebook_id, upload_path, title=title, wait=False,
+                    self.notebook_id,
+                    upload_path,
+                    title=title,
+                    wait=False,
                 )
             return source.id
         except Exception as error:
@@ -155,7 +163,9 @@ class NotebookLMAdapter:
             # Registration can succeed before the upload body fails. Retain
             # only its bounded identifier so sync can recover that source;
             # SDK stage values and diagnostics stay private.
-            if isinstance(source_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", source_id):
+            if isinstance(source_id, str) and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", source_id
+            ):
                 sanitized.source_id = source_id
             raise sanitized from None
 
@@ -187,15 +197,20 @@ class NotebookLMAdapter:
         client = await self._connect()
         try:
             result = await client.chat.ask(
-                self.notebook_id, MEMORY_PROMPT.format(question=question), source_ids=source_ids,
+                self.notebook_id,
+                MEMORY_PROMPT.format(question=question),
+                source_ids=source_ids,
             )
             return {
                 "answer": result.answer,
-                "references": [{
-                    "source_id": reference.source_id,
-                    "cited_text": reference.cited_text,
-                    "citation_number": reference.citation_number,
-                } for reference in result.references],
+                "references": [
+                    {
+                        "source_id": reference.source_id,
+                        "cited_text": reference.cited_text,
+                        "citation_number": reference.citation_number,
+                    }
+                    for reference in result.references
+                ],
             }
         except Exception as error:
             raise _safe_error(error) from None

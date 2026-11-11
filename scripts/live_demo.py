@@ -18,12 +18,15 @@ async def live_demo(output: Path):
     with Store(db) as store:
         if not store.get_setting("notebook_id"):
             from notebooklm import NotebookLMClient
+
             try:
                 async with NotebookLMClient.from_storage() as client:
                     title = "AI Memory — synthetic integration demo"
                     existing = [n for n in await client.notebooks.list() if n.title == title]
                     if len(existing) > 1:
-                        raise ValueError("Multiple demo notebooks exist; configure the chosen ID with ai-memory init")
+                        raise ValueError(
+                            "Multiple demo notebooks exist; configure the chosen ID with ai-memory init"
+                        )
                     notebook = existing[0] if existing else await client.notebooks.create(title)
                     store.set_setting("notebook_id", notebook.id)
             except (FileNotFoundError, PermissionError):
@@ -31,7 +34,9 @@ async def live_demo(output: Path):
             except (ValueError, NotebookLMError):
                 raise
             except Exception:
-                raise NotebookLMError("Live notebook creation failed. Check browser login and allowed Google domains.") from None
+                raise NotebookLMError(
+                    "Live notebook creation failed. Check browser login and allowed Google domains."
+                ) from None
         sync = await sync_archive(store)
         result["sync"] = sync
         if sync["blocked"] or sync["status"]["sync_status"] != "up_to_date":
@@ -39,7 +44,9 @@ async def live_demo(output: Path):
             return result
     question = "What decisions did the synthetic Codex and OpenCode conversations make about SQLite, NotebookLM, and source replacement? Include conversation IDs."
     result["answer"] = await _gateway_call(db, "memory_ask", {"question": question})
-    result["live_notebooklm_test"] = "failed" if "error" in result["answer"] else "executed_review_answer"
+    result["live_notebooklm_test"] = (
+        "failed" if "error" in result["answer"] else "executed_review_answer"
+    )
     return result
 
 
@@ -50,9 +57,18 @@ def main():
     try:
         result = asyncio.run(live_demo(args.output))
     except NotebookLMError as exc:
-        result = {"live_notebooklm_test": "blocked", "error": {"code": exc.code, "message": str(exc)}}
+        result = {
+            "live_notebooklm_test": "blocked",
+            "error": {"code": exc.code, "message": str(exc)},
+        }
     except Exception:
-        result = {"live_notebooklm_test": "blocked", "error": {"code": "configuration_error", "message": "Check output directory, login, and notebook configuration."}}
+        result = {
+            "live_notebooklm_test": "blocked",
+            "error": {
+                "code": "configuration_error",
+                "message": "Check output directory, login, and notebook configuration.",
+            },
+        }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("live_notebooklm_test") == "executed_review_answer" else 1
 

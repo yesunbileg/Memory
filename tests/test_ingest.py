@@ -324,8 +324,13 @@ def test_authenticated_connection_probe_does_not_create_or_write_archive(running
     status, headers, body = request(server, path="/auth/check", data={}, headers={"Origin": ORIGIN})
     assert status == 200
     from ai_memory.connection import archive_identity
-    assert json.loads(body) == {"status": "ok", "service": "ai-memory", "schema": 1,
-                                "archive_id": archive_identity(database)}
+
+    assert json.loads(body) == {
+        "status": "ok",
+        "service": "ai-memory",
+        "schema": 1,
+        "archive_id": archive_identity(database),
+    }
     assert headers["Access-Control-Allow-Origin"] == ORIGIN
     assert not database.exists()
     assert request(server)[0] == 200
@@ -337,7 +342,10 @@ def test_authenticated_connection_probe_does_not_create_or_write_archive(running
 @pytest.mark.parametrize("authorization", ["", "Bearer wrong", "Basic synthetic-ingest-token"])
 def test_connection_probe_requires_the_same_bearer_token(running_server, authorization):
     server, database = running_server
-    assert request(server, path="/auth/check", data={}, headers={"Authorization": authorization})[0] == 401
+    assert (
+        request(server, path="/auth/check", data={}, headers={"Authorization": authorization})[0]
+        == 401
+    )
     assert not database.exists()
 
 
@@ -352,8 +360,11 @@ def test_connection_probe_rejects_untrusted_host_or_origin(running_server, heade
 
 def test_connection_preflight_is_only_allowed_on_recognized_routes(running_server):
     server, _ = running_server
-    headers = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST",
-               "Access-Control-Request-Headers": "authorization, content-type"}
+    headers = {
+        "Origin": ORIGIN,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization, content-type",
+    }
     for path in ("/auth/check", "/ingest"):
         assert request(server, method="OPTIONS", path=path, headers=headers)[0] == 204
     for path in ("/auth/check?query=1", "/unknown", "/health"):
@@ -378,7 +389,11 @@ process.stdout.write(JSON.stringify({accepted, rejected}));
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script, str(server.server_port)],
-        cwd=Path(__file__).parents[1], capture_output=True, text=True, check=True, timeout=10,
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
     )
     data = json.loads(result.stdout)
     assert data["accepted"]["ok"] is True

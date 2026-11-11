@@ -1,5 +1,4 @@
-// hstry sync service worker: polls AI chat platforms on an alarm and pushes
-// new/updated conversations to a local hstry-api instance (POST /ingest).
+// Poll selected AI conversations and save them to the local AI Memory receiver.
 
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
@@ -24,8 +23,17 @@ let captureEpoch = 0;
 let captureKey = null;
 
 function observeSettings(settings) {
-  const key = JSON.stringify([settings.port, settings.token, settings.account, settings.providers, settings.captureTypes]);
-  if (key !== captureKey) { captureKey = key; captureEpoch++; }
+  const key = JSON.stringify([
+    settings.port,
+    settings.token,
+    settings.account,
+    settings.providers,
+    settings.captureTypes,
+  ]);
+  if (key !== captureKey) {
+    captureKey = key;
+    captureEpoch++;
+  }
   return captureEpoch;
 }
 
@@ -36,11 +44,14 @@ async function assertCurrentCapture(settings, epoch) {
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  const normalized = normalizeSettings({
-    ...DEFAULT_SETTINGS,
-    ...settings,
-    providers: { ...DEFAULT_SETTINGS.providers, ...settings?.providers },
-  }, DEFAULT_SETTINGS);
+  const normalized = normalizeSettings(
+    {
+      ...DEFAULT_SETTINGS,
+      ...settings,
+      providers: { ...DEFAULT_SETTINGS.providers, ...settings?.providers },
+    },
+    DEFAULT_SETTINGS,
+  );
   return { ...normalized, captureTypes: normalizeCaptureTypes(settings?.captureTypes) };
 }
 
@@ -92,7 +103,12 @@ function makePush(settings, onResult = async () => {}, beforePush = async () => 
         },
         redirect: 'error',
         credentials: 'omit',
-        body: JSON.stringify({ source: sourceId, adapter, account: settings.account, conversations }),
+        body: JSON.stringify({
+          source: sourceId,
+          adapter,
+          account: settings.account,
+          conversations,
+        }),
       });
     } catch {
       throw localError('offline');
@@ -151,10 +167,19 @@ function localError(code) {
 }
 
 function safeSyncFailure(error) {
-  if (Object.hasOwn(LOCAL_ERRORS, error?.code)) return { code: error.code, error: LOCAL_ERRORS[error.code] };
-  if (error instanceof NotLoggedInError) return { code: 'not_logged_in', error: 'Open this provider and sign in, then sync again.' };
-  if (error instanceof RateLimitedError) return { code: 'rate_limited', error: 'This provider is busy. Wait a few minutes and try again.' };
-  return { code: 'provider_error', error: 'This provider could not finish syncing. Try again in a moment.' };
+  if (Object.hasOwn(LOCAL_ERRORS, error?.code))
+    return { code: error.code, error: LOCAL_ERRORS[error.code] };
+  if (error instanceof NotLoggedInError)
+    return { code: 'not_logged_in', error: 'Open this provider and sign in, then sync again.' };
+  if (error instanceof RateLimitedError)
+    return {
+      code: 'rate_limited',
+      error: 'This provider is busy. Wait a few minutes and try again.',
+    };
+  return {
+    code: 'provider_error',
+    error: 'This provider could not finish syncing. Try again in a moment.',
+  };
 }
 
 async function ensureAlarm() {
@@ -176,26 +201,30 @@ async function scheduleContinuation(providerName) {
 
 async function runSync(
   trigger,
-  { onlyProvider = null, full = false, onStarted = async () => {} } = {}
+  { onlyProvider = null, full = false, onStarted = async () => {} } = {},
 ) {
   await startupReady;
   const settings = await getSettings();
   const epoch = observeSettings(settings);
-  if (!Object.values(settings.captureTypes).some(Boolean)) return {
-    ok: false, code: 'no_capture_types', error: 'Choose at least one chat type before capturing.',
-  };
+  if (!Object.values(settings.captureTypes).some(Boolean))
+    return {
+      ok: false,
+      code: 'no_capture_types',
+      error: 'Choose at least one chat type before capturing.',
+    };
   const status = await getStatus();
   const eligible = Object.entries(PROVIDERS).filter(
-    ([name]) =>
-      settings.providers[name] &&
-      (!onlyProvider || name === onlyProvider)
+    ([name]) => settings.providers[name] && (!onlyProvider || name === onlyProvider),
   );
   const selected = eligible.filter(([name]) => !activeProviders.has(name));
-  if (selected.length === 0) return {
-    ok: false,
-    code: eligible.length ? 'already_syncing' : 'no_enabled_providers',
-    error: eligible.length ? 'This provider is already syncing.' : 'Choose a provider in settings before syncing.',
-  };
+  if (selected.length === 0)
+    return {
+      ok: false,
+      code: eligible.length ? 'already_syncing' : 'no_enabled_providers',
+      error: eligible.length
+        ? 'This provider is already syncing.'
+        : 'Choose a provider in settings before syncing.',
+    };
   for (const [name] of selected) activeProviders.add(name);
   await chrome.action.setBadgeText({ text: '…' });
 
@@ -204,9 +233,21 @@ async function runSync(
   if (!connection.ok) {
     for (const [name] of selected) {
       await setStatusEntry(name, {
-        ...(status[name] ?? {}), lastRunMs: Date.now(), trigger, running: false,
-        continuationPending: false, lastError: connection.error, lastErrorCode: connection.code,
-        progress: { phase: 'failed', detected: 0, processed: 0, accepted: 0, created: 0, updated: 0 },
+        ...(status[name] ?? {}),
+        lastRunMs: Date.now(),
+        trigger,
+        running: false,
+        continuationPending: false,
+        lastError: connection.error,
+        lastErrorCode: connection.code,
+        progress: {
+          phase: 'failed',
+          detected: 0,
+          processed: 0,
+          accepted: 0,
+          created: 0,
+          updated: 0,
+        },
       });
       activeProviders.delete(name);
     }
@@ -219,12 +260,15 @@ async function runSync(
   let startedReported = false;
   await Promise.all(
     selected.map(async ([name, provider]) => {
-      const policyChanged = !status[name]?.capturePolicy ||
+      const policyChanged =
+        !status[name]?.capturePolicy ||
         JSON.stringify(status[name].capturePolicy) !== JSON.stringify(settings.captureTypes);
       const entry = {
         ...(status[name] ?? {}),
         ...((full && name === onlyProvider) || policyChanged ? { state: {} } : {}),
-        ...(policyChanged ? { lastSuccessMs: null, lastCount: null, selection: null, selectionWarning: null } : {}),
+        ...(policyChanged
+          ? { lastSuccessMs: null, lastCount: null, selection: null, selectionWarning: null }
+          : {}),
         capturePolicy: { ...settings.captureTypes },
         continuationPending: false,
         lastRunMs: Date.now(),
@@ -244,19 +288,24 @@ async function runSync(
         startedReported = true;
         await onStarted();
       }
-      const report = async progress => {
+      const report = async (progress) => {
         entry.progress = { ...entry.progress, ...progress };
         if (Object.hasOwn(progress, 'selection')) entry.selection = progress.selection;
-        if (Object.hasOwn(progress, 'selectionWarning')) entry.selectionWarning = progress.selectionWarning;
+        if (Object.hasOwn(progress, 'selectionWarning'))
+          entry.selectionWarning = progress.selectionWarning;
         await setStatusEntry(name, entry);
       };
-      const push = makePush(settings, async result => {
-        await report({
-          accepted: entry.progress.accepted + result.accepted,
-          created: entry.progress.created + result.created,
-          updated: entry.progress.updated + result.updated,
-        });
-      }, () => assertCurrentCapture(settings, epoch));
+      const push = makePush(
+        settings,
+        async (result) => {
+          await report({
+            accepted: entry.progress.accepted + result.accepted,
+            created: entry.progress.created + result.created,
+            updated: entry.progress.updated + result.updated,
+          });
+        },
+        () => assertCurrentCapture(settings, epoch),
+      );
       const register = makeRegister(settings);
       try {
         await assertCurrentCapture(settings, epoch);
@@ -271,8 +320,12 @@ async function runSync(
         });
         await assertCurrentCapture(settings, epoch);
         entry.state = result.state;
-        entry.selection = Object.hasOwn(result, 'selection') ? result.selection : entry.progress.selection ?? null;
-        entry.selectionWarning = Object.hasOwn(result, 'selectionWarning') ? result.selectionWarning : entry.progress.selectionWarning ?? null;
+        entry.selection = Object.hasOwn(result, 'selection')
+          ? result.selection
+          : (entry.progress.selection ?? null);
+        entry.selectionWarning = Object.hasOwn(result, 'selectionWarning')
+          ? result.selectionWarning
+          : (entry.progress.selectionWarning ?? null);
         if (!entry.selectionWarning) entry.lastSuccessMs = Date.now();
         else anyError = true;
         entry.lastCount = result.conversations;
@@ -294,12 +347,15 @@ async function runSync(
         entry.lastErrorCode = failure.code;
         entry.running = false;
         entry.continuationPending = false;
-        entry.progress = { ...entry.progress, phase: failure.code === 'selection_changed' ? 'cancelled' : 'failed' };
+        entry.progress = {
+          ...entry.progress,
+          phase: failure.code === 'selection_changed' ? 'cancelled' : 'failed',
+        };
       } finally {
         activeProviders.delete(name);
         await setStatusEntry(name, entry);
       }
-    })
+    }),
   );
 
   await chrome.action.setBadgeText({ text: anyError ? '!' : activeProviders.size > 0 ? '…' : '' });
@@ -318,7 +374,7 @@ chrome.runtime.onStartup.addListener(() => {
   registerEnabledSources();
 });
 
-chrome.alarms.onAlarm.addListener(alarm => {
+chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
     runSync('alarm');
     return;
@@ -326,7 +382,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name.startsWith(CONTINUE_ALARM_PREFIX)) {
     const providerName = alarm.name.slice(CONTINUE_ALARM_PREFIX.length);
     if (Object.hasOwn(PROVIDERS, providerName)) {
-      runSync('continuation', { onlyProvider: providerName }).then(result => {
+      runSync('continuation', { onlyProvider: providerName }).then((result) => {
         if (result.code === 'already_syncing') scheduleContinuation(providerName);
       });
     }
@@ -341,7 +397,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // provider requests that can outlive the channel or this worker.
   const start = (trigger, options = {}) => {
     let responded = false;
-    const respond = result => {
+    const respond = (result) => {
       if (responded) return;
       responded = true;
       sendResponse(result);
@@ -365,7 +421,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     getSettings()
-      .then(settings => {
+      .then((settings) => {
         if (!settings.providers[providerName]) {
           sendResponse({ ok: false, error: 'Enable this provider before syncing' });
           return;
@@ -379,16 +435,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           full: true,
         });
       })
-      .catch(() => sendResponse({ ok: false, error: 'AI Memory could not start syncing. Try again.' }));
+      .catch(() =>
+        sendResponse({ ok: false, error: 'AI Memory could not start syncing. Try again.' }),
+      );
     return true;
   }
   if (message?.type === 'settingsChanged') {
-    getSettings().then(settings => {
-      observeSettings(settings);
-      return Promise.all([ensureAlarm(), registerEnabledSources(settings)]);
-    }).then(([, sources]) => {
-      sendResponse({ ok: true, sources });
-    });
+    getSettings()
+      .then((settings) => {
+        observeSettings(settings);
+        return Promise.all([ensureAlarm(), registerEnabledSources(settings)]);
+      })
+      .then(([, sources]) => {
+        sendResponse({ ok: true, sources });
+      });
     return true;
   }
   if (message?.type === 'checkApi') {

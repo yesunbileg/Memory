@@ -1,12 +1,54 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="light dark"/><title>AI Memory</title><link rel="stylesheet" href="styles.css"/></head>
-<body class="popup-page"><main class="popup-shell">
-<header class="popup-header"><a class="brand" href="options.html" target="_blank"><img src="icons/icon-48.png" width="32" height="32" alt=""/><span>AI Memory</span></a><button id="settings" class="icon-button" aria-label="Open AI Memory settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.6 2.2-2 .9-2-.6-2 3.5 1.6 1.6v2.8L2.4 15l2 3.5 2-.6 2 .9L9 21h4l.6-2.2 2-.9 2 .6 2-3.5-1.6-1.6v-2.8L19.6 9l-2-3.5-2 .6-2-.9L13 3z"/><circle cx="11" cy="12" r="3"/></svg></button></header>
-<div class="popup-intro"><h1>A little less lost.</h1><p>Your important conversations, kept together.</p></div>
-<section class="popup-connection" aria-live="polite"><span id="api-dot" class="status-dot checking"></span><div class="popup-connection-copy"><strong id="api-title">Checking connection…</strong><p id="api-detail">Your conversations stay local.</p></div><button id="retry" class="button-quiet" aria-label="Check connection">↻</button></section>
-<div class="popup-selection"><span id="selection-summary">Projects · Pinned · GPTs & agents</span><button id="edit-selection" class="button-quiet">Edit selection</button></div>
-<div id="providers" class="popup-providers"></div>
-<div class="popup-actions"><button id="sync" class="button-primary" disabled>Connect your computer <span aria-hidden="true">↗</span></button></div>
-<p id="notice" class="inline-feedback" role="status" aria-live="polite"></p>
-<footer class="popup-footer"><span id="recents-note">Ordinary Recents stay out</span><span id="schedule">Checks every 15 min</span></footer>
-</main><script src="popup.js" type="module"></script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>AI Memory</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="popup-page">
+    <main class="popup-shell">
+      <header class="popup-header">
+        <a class="brand" href="options.html" target="_blank"
+          ><img src="icons/icon-48.png" width="32" height="32" alt="" /><span>AI Memory</span></a
+        ><button id="settings" class="icon-button" aria-label="Open AI Memory settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m9 3-.6 2.2-2 .9-2-.6-2 3.5 1.6 1.6v2.8L2.4 15l2 3.5 2-.6 2 .9L9 21h4l.6-2.2 2-.9 2 .6 2-3.5-1.6-1.6v-2.8L19.6 9l-2-3.5-2 .6-2-.9L13 3z"
+            />
+            <circle cx="11" cy="12" r="3" />
+          </svg>
+        </button>
+      </header>
+      <div class="popup-intro">
+        <h1>A little less lost.</h1>
+        <p>Your important conversations, kept together.</p>
+      </div>
+      <section class="popup-connection" aria-live="polite">
+        <span id="api-dot" class="status-dot checking"></span>
+        <div class="popup-connection-copy">
+          <strong id="api-title">Checking connection…</strong>
+          <p id="api-detail">Your conversations stay local.</p>
+        </div>
+        <button id="retry" class="button-quiet" aria-label="Check connection">↻</button>
+      </section>
+      <div class="popup-selection">
+        <span id="selection-summary">Projects · Pinned · GPTs & agents</span
+        ><button id="edit-selection" class="button-quiet">Edit selection</button>
+      </div>
+      <div id="providers" class="popup-providers"></div>
+      <div class="popup-actions">
+        <button id="sync" class="button-primary" disabled>
+          Connect your computer <span aria-hidden="true">↗</span>
+        </button>
+      </div>
+      <p id="notice" class="inline-feedback" role="status" aria-live="polite"></p>
+      <footer class="popup-footer">
+        <span id="recents-note">Ordinary Recents stay out</span
+        ><span id="schedule">Checks every 15 min</span>
+      </footer>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

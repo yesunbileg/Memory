@@ -16,7 +16,9 @@ def test_watch_does_not_patch_shared_sleep(monkeypatch):
     assert time.sleep is original
 
 
-def test_worker_survives_import_and_auth_failures_with_safe_limited_logs(tmp_path, monkeypatch, caplog):
+def test_worker_survives_import_and_auth_failures_with_safe_limited_logs(
+    tmp_path, monkeypatch, caplog
+):
     from ai_memory.notebook import NotebookLMAuthError
 
     db = tmp_path / "db"
@@ -46,8 +48,17 @@ def test_worker_survives_import_and_auth_failures_with_safe_limited_logs(tmp_pat
     monkeypatch.setattr(cli, "_monotonic", lambda: clock[0], raising=False)
     monkeypatch.setattr(cli, "_sleep", advance, raising=False)
     monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
-    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(tmp_path / "broken"),
-                                  "--opencode-path", str(tmp_path / "healthy")])
+    args = cli.parser().parse_args(
+        [
+            "--db",
+            str(db),
+            "watch",
+            "--codex-path",
+            str(tmp_path / "broken"),
+            "--opencode-path",
+            str(tmp_path / "healthy"),
+        ]
+    )
     with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
         cli._watch(args)
     assert len(scans) == 6 and len(syncs) == 3
@@ -58,16 +69,23 @@ def test_worker_survives_import_and_auth_failures_with_safe_limited_logs(tmp_pat
 
 
 def test_collect_partial_failure_returns_unsuccessful_cli_status(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "collect_into", lambda *a, **kw: {
-        "imported_conversations": 1, "failed_files": 1,
-        "file_failures": [{"file_id": "opaque-id", "category": "parse"}],
-    })
+    monkeypatch.setattr(
+        cli,
+        "collect_into",
+        lambda *a, **kw: {
+            "imported_conversations": 1,
+            "failed_files": 1,
+            "file_failures": [{"file_id": "opaque-id", "category": "parse"}],
+        },
+    )
     assert cli.main(["--db", str(tmp_path / "db"), "collect", "codex", str(tmp_path)]) == 1
     assert '"failed_files": 1' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("reason", ["CapacityError", "SnapshotError", "SourceQuota"])
-def test_worker_reports_preflight_blockers_without_private_details_or_log_spam(tmp_path, monkeypatch, caplog, reason):
+def test_worker_reports_preflight_blockers_without_private_details_or_log_spam(
+    tmp_path, monkeypatch, caplog, reason
+):
     db = tmp_path / "archive.sqlite"
     source = tmp_path / "sessions"
     source.mkdir()
@@ -77,8 +95,10 @@ def test_worker_reports_preflight_blockers_without_private_details_or_log_spam(t
 
     async def blocked_sync(store):
         syncs.append(clock[0])
-        return {"blocked": [{"reason": reason, "detail": "PRIVATE-ARCHIVE-VALUE"}],
-                "status": {"sync_status": "pending"}}
+        return {
+            "blocked": [{"reason": reason, "detail": "PRIVATE-ARCHIVE-VALUE"}],
+            "status": {"sync_status": "pending"},
+        }
 
     def advance(seconds):
         clock[0] += seconds

@@ -32,3 +32,8 @@ Patch groups:
 8. Extension 0.5.2 explains unsupported Gemini organized selection before the
    first capture without enabling Recents. A stdlib build script packages public
    runtime assets plus this license, excluding tests and connection/auth data.
+9. Extension 0.5.3 cleanup standardizes JS/HTML/CSS/JSON with Prettier,
+   preserving capture behavior. Original TypeScript adapter formatting is kept.
+   `UPSTREAM.json` modified flags now reflect actual file hashes, including
+   earlier local UI edits. Wheels ship adapters/license/provenance only; the
+   extension has its own runtime ZIP.

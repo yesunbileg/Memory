@@ -1,0 +1,16 @@
+{
+  "name": "ai-memory-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test vendor/hstry/extension/test/*.js",
+    "format": "prettier --write package.json package-lock.json .prettierrc.json vendor/hstry",
+    "format:check": "prettier --check package.json package-lock.json .prettierrc.json vendor/hstry"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

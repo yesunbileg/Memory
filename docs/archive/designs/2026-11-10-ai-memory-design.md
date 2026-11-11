@@ -1,3 +1,5 @@
+> Historical development record. Use [development](../../development.md) and [current validation](../../validation.md) for today's workflow.
+
 # AI Memory implementation design
 
 Authority: [the supplied architecture](../../specification.mn.md). The user asked to implement and demo it in the empty Memory repository.
