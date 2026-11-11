@@ -2,7 +2,7 @@ import pytest
 from test_store import conversation
 
 from ai_memory.segments import CapacityError, SegmentBuilder
-from ai_memory.store import Store
+from ai_memory.store import Store, digest
 
 
 def test_only_approved_messages_and_exact_markdown_are_packaged(tmp_path):
@@ -148,3 +148,97 @@ def test_full_oldest_segment_does_not_block_feasible_later_merge(tmp_path):
         text = builder.render(merged)
         assert "later first" in text and "later second" in text
         assert "one two three four five six" not in text
+
+
+def test_merge_rejects_rendered_snapshot_over_500000_before_retiring_parents(tmp_path):
+    with Store(tmp_path / "db") as store:
+        builder = SegmentBuilder(store, target_words=250_000, max_words=500_000)
+        for n in range(3):
+            c = conversation(external_id=f"large-{n}")
+            c["messages"][0]["text"] = "word " * 250_000 if n < 2 else "tail"
+            store.ingest(c, consent=True)
+        builder.build()
+        parent_rows = store.connection.execute("SELECT * FROM segments WHERE state='sealed' ORDER BY id").fetchall()
+        parents = [r["id"] for r in parent_rows]
+        assert len(parents) == 2
+        with store.connection:
+            for i, parent in enumerate(parent_rows):
+                store.connection.execute("INSERT INTO source_map VALUES(?,?,?)", (parent["id"], f"remote-{i}", parent["revision"]))
+            store.connection.execute("""INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id,
+                old_source_ids,attempts,next_attempt,error) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (parents[0], parent_rows[0]["revision"], "retry.md", "blocked", "", "[]", 3, 123.0, "NetworkError"))
+        before_maps = [tuple(r) for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")]
+        before_jobs = [tuple(r) for r in store.connection.execute("SELECT * FROM sync_jobs")]
+        with pytest.raises(CapacityError):
+            builder.merge_oldest()
+        states = dict(store.connection.execute("SELECT id,state FROM segments"))
+        assert [states[sid] for sid in parents] == ["sealed", "sealed"]
+        assert store.connection.execute("SELECT COUNT(*) FROM segment_parents").fetchone()[0] == 0
+        assert [tuple(r) for r in store.connection.execute("SELECT * FROM source_map ORDER BY segment_id")] == before_maps
+        assert [tuple(r) for r in store.connection.execute("SELECT * FROM sync_jobs")] == before_jobs
+
+
+def test_appending_many_messages_uses_constant_open_segment_count_queries(tmp_path):
+    def sqlite_work(message_count):
+        with Store(tmp_path / f"db-{message_count}") as store:
+            c = conversation()
+            c["messages"][0]["text"] = "seed"
+            store.ingest(c, consent=True)
+            builder = SegmentBuilder(store, target_words=100_000)
+            builder.build()
+            additions = [dict(c["messages"][0], native_id=f"m{n}", sequence=n + 2, text="next")
+                         for n in range(message_count)]
+            store.ingest(conversation(messages=additions))
+            steps = [0]
+            store.connection.set_progress_handler(lambda: steps.__setitem__(0, steps[0] + 1) or 0, 100)
+            builder.build()
+            store.connection.set_progress_handler(None, 0)
+            return steps[0]
+
+    # Doubling the batch should stay close to linear SQLite work. Per-message
+    # rescans of the growing open segment make this ratio approach four.
+    assert sqlite_work(64) < 3 * sqlite_work(32)
+
+
+def test_reopened_builder_preserves_multiconversation_order_and_revision(tmp_path):
+    with Store(tmp_path / "db") as store:
+        first = conversation(external_id="first")
+        first["messages"][0]["text"] = "first one"
+        second = conversation(external_id="second")
+        second["messages"][0]["text"] = "second two"
+        store.ingest(first, consent=True)
+        store.ingest(second, consent=True)
+        builder = SegmentBuilder(store, target_words=5)
+        before = builder.build()[0]
+
+        first_next = dict(first["messages"][0], native_id="first-2", sequence=2, text="third words")
+        second_next = dict(second["messages"][0], native_id="second-2", sequence=2, text="fourth")
+        store.ingest(conversation(external_id="first", messages=[first_next]))
+        store.ingest(conversation(external_id="second", messages=[second_next]))
+        reopened = SegmentBuilder(store, target_words=5)
+        changed = reopened.build()
+
+        assert [row["id"] for row in changed] == ["SEG-001", "SEG-002"]
+        assert store.connection.execute("SELECT state,revision FROM segments WHERE id='SEG-001'").fetchone()[:] == ("sealed", before["revision"] + 1)
+        rows = store.connection.execute("""SELECT s.id,m.text,sm.position FROM segment_messages sm
+            JOIN segments s ON s.id=sm.segment_id JOIN messages m ON m.id=sm.message_id
+            WHERE s.state!='retired' ORDER BY s.id,sm.position""").fetchall()
+        assert [(r["id"], r["text"], r["position"]) for r in rows] == [
+            ("SEG-001", "first one", 0), ("SEG-001", "second two", 1),
+            ("SEG-002", "third words", 0), ("SEG-002", "fourth", 1),
+        ]
+        for segment in store.connection.execute("SELECT id,revision,content_hash FROM segments WHERE state!='retired'"):
+            rendered = reopened.render(segment["id"])
+            assert segment["content_hash"] == digest(rendered)
+            assert len(rendered.split()) <= 500_000
+
+
+def test_active_segment_rejects_rendered_snapshot_over_500000(tmp_path):
+    with Store(tmp_path / "db") as store:
+        c = conversation()
+        c["messages"][0]["text"] = "word " * 500_000
+        store.ingest(c, consent=True)
+        builder = SegmentBuilder(store, target_words=500_000, max_words=500_000)
+        with pytest.raises(CapacityError):
+            builder.build()
+        assert store.connection.execute("SELECT COUNT(*) FROM segment_messages").fetchone()[0] == 0

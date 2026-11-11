@@ -96,6 +96,33 @@ def test_codex_fallback_ids_survive_appended_records_and_unknown_metadata(tmp_pa
     assert after["messages"][1]["native_id"] == "answer"
 
 
+def test_derived_message_ids_do_not_depend_on_message_order():
+    from ai_memory.collectors import normalize_conversation
+
+    messages = [
+        {"role": "user", "content": "question", "createdAt": 1000},
+        {"role": "assistant", "content": "answer", "createdAt": 2000},
+    ]
+    def normalized(items):
+        return normalize_conversation({"externalId": "stable", "messages": items}, "codex", "local")
+
+    forward = {m["text"]: m["native_id"] for m in normalized(messages)["messages"]}
+    reverse = {m["text"]: m["native_id"] for m in normalized(list(reversed(messages)))["messages"]}
+    assert forward == reverse
+
+    with_part_ids = {"externalId": "stable", "messages": [{
+        "role": "assistant", "createdAt": 2000,
+        "parts": [{"id": "counter-1", "type": "text", "text": "answer"}],
+    }]}
+    with_different_part_ids = {"externalId": "stable", "messages": [{
+        "role": "assistant", "createdAt": 2000,
+        "parts": [{"id": "counter-99", "type": "text", "text": "answer"}],
+    }]}
+    first = normalize_conversation(with_part_ids, "codex", "local")["messages"][0]["native_id"]
+    second = normalize_conversation(with_different_part_ids, "codex", "local")["messages"][0]["native_id"]
+    assert first == second
+
+
 def test_codex_mirror_counts_do_not_drop_repeated_real_events(tmp_path):
     source = tmp_path / "rollout-mirrors.jsonl"
     records = [{"type": "session_meta", "payload": {"id": "mirrors"}}]

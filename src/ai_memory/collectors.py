@@ -7,6 +7,7 @@ small, lossless input contract. No personal paths are inspected implicitly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -61,7 +62,8 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     messages: list[dict] = []
     models: list[str] = []
-    for index, message in enumerate(raw["messages"], 1):
+    fallback_counts: dict[str, int] = {}
+    for message in raw["messages"]:
         if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
             continue
         meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
@@ -79,7 +81,20 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
             or _string(message.get("id"))
         )
         if not native_id:
-            native_id = f"record:{meta.get('record', index)}"
+            parts = message.get("parts")
+            stable_parts = [
+                {key: part.get(key) for key in ("type", "text", "visibility", "synthetic", "ignored")
+                 if key in part}
+                for part in parts if isinstance(part, dict)
+            ] if isinstance(parts, list) else None
+            signature = hashlib.sha256(json.dumps(
+                [message["role"], message.get("createdAt"), message.get("model"),
+                 message.get("content"), stable_parts],
+                ensure_ascii=False, sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            occurrence = fallback_counts.get(signature, 0)
+            fallback_counts[signature] = occurrence + 1
+            native_id = f"derived:{signature[:32]}:{occurrence}"
 
         groups: list[tuple[str, str, int]] = []
         parts = message.get("parts")

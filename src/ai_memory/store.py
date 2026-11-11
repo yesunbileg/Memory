@@ -3,11 +3,29 @@
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+
+from .diagnostics import SAFE_FAILURES
 
 
 def digest(value) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _time_order(left: str | None, right: str | None) -> int | None:
+    if not left or not right:
+        return None
+    try:
+        a = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        b = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    except ValueError:
+        return (left > right) - (left < right)
+    if a.tzinfo is None and b.tzinfo is not None:
+        a = a.replace(tzinfo=b.tzinfo)
+    elif b.tzinfo is None and a.tzinfo is not None:
+        b = b.replace(tzinfo=a.tzinfo)
+    return (a > b) - (a < b)
 
 
 SCHEMA = """
@@ -70,10 +88,15 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
-        if self.connection.execute("PRAGMA user_version").fetchone()[0] > 1:
+        version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > 1:
             self.close()
             raise ValueError("Archive schema is newer than this application")
-        self.connection.executescript(SCHEMA)
+        if version == 0:
+            self.connection.executescript(SCHEMA)
+        elif version != 1:
+            self.close()
+            raise ValueError("Unsupported archive schema")
 
     def close(self):
         self.connection.close()
@@ -108,7 +131,7 @@ class Store:
             seq = m.get("sequence")
             if type(seq) is not int or seq < 1 or seq in seen_sequences or m["native_id"] in seen_ids:
                 raise ValueError("Message identities and positive sequence numbers must be unique")
-            for field in ("timestamp", "model"):
+            for field in ("timestamp", "updated_at", "model"):
                 if m.get(field) is not None and not isinstance(m[field], str):
                     raise ValueError(f"message {field} must be source text or null")
             seen_ids.add(m["native_id"])
@@ -118,9 +141,17 @@ class Store:
         db = self.connection
         with db:
             old = db.execute("SELECT * FROM conversations WHERE id=?", (key,)).fetchone()
+            incoming_update = c.get("updated_at")
+            old_update = old["updated_at"] if old else None
+            metadata_stale = bool(old and old_update and (
+                not incoming_update or _time_order(incoming_update, old_update) == -1
+            ))
             models = list(dict.fromkeys((json.loads(old["models"]) if old else []) + c.get("models", [])))
-            fields = [c.get(f) if c.get(f) is not None else (old[f] if old else None)
-                      for f in ("title", "project", "created_at", "updated_at", "source_url")]
+            fields = [
+                old[f] if old and (metadata_stale or (f == "updated_at" and not c.get(f)))
+                else c.get(f) if c.get(f) is not None else (old[f] if old else None)
+                for f in ("title", "project", "created_at", "updated_at", "source_url")
+            ]
             metadata = [*fields, json.dumps(models, ensure_ascii=False)]
             changed = old is None or metadata != [old[f] for f in ("title", "project", "created_at", "updated_at", "source_url")] + [old["models"]]
             db.execute("""INSERT INTO conversations(id,external_id,platform,account,title,project,
@@ -133,7 +164,17 @@ class Store:
                 mid = digest([key, m["native_id"]])
                 values = [m["sequence"], m["role"], m.get("kind", "text"), m["text"], m.get("timestamp"), m.get("model")]
                 content_hash = digest(values)
-                previous = db.execute("SELECT content_hash FROM messages WHERE id=?", (mid,)).fetchone()
+                previous = db.execute("SELECT content_hash,timestamp FROM messages WHERE id=?", (mid,)).fetchone()
+                version_key = f"message-version:{mid}"
+                saved_version = db.execute("SELECT value FROM checkpoints WHERE key=?", (version_key,)).fetchone()
+                incoming_version = m.get("updated_at") or c.get("updated_at") or m.get("timestamp")
+                existing_version = saved_version[0] if saved_version else (
+                    old["updated_at"] if old and old["updated_at"] else
+                    previous["timestamp"] if previous else None
+                )
+                if previous is not None and existing_version and (
+                        not incoming_version or _time_order(incoming_version, existing_version) == -1):
+                    continue
                 if previous is None or previous[0] != content_hash:
                     changed = True
                     db.execute("""INSERT INTO messages(id,conversation_id,native_id,sequence,role,kind,
@@ -145,6 +186,10 @@ class Store:
                     if previous is not None:
                         db.execute("""UPDATE segments SET content_hash='' WHERE id IN (
                             SELECT segment_id FROM segment_messages WHERE message_id=?)""", (mid,))
+                if incoming_version and (previous is None or not existing_version or
+                                         _time_order(incoming_version, existing_version) != -1):
+                    db.execute("INSERT OR REPLACE INTO checkpoints(key,value) VALUES(?,?)",
+                               (version_key, incoming_version))
             if changed and old:
                 db.execute("UPDATE conversations SET revision=revision+1 WHERE id=?", (key,))
                 db.execute("""UPDATE segments SET content_hash='' WHERE state='open' AND id IN (
@@ -192,6 +237,16 @@ class Store:
             WHERE c.consent=1 AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
             WHERE sm.message_id=m.id AND s.state!='retired')""")
         cleanup = count("SELECT COUNT(*) FROM sync_jobs WHERE stage NOT IN ('done','superseded')")
+        sync_errors = [
+            {"segment_id": row["segment_id"],
+             "reason": row["error"] if row["error"] in SAFE_FAILURES else "operation_failed",
+             "attempts": row["attempts"], "next_attempt": row["next_attempt"],
+             "stage": row["stage"]}
+            for row in db.execute("""SELECT segment_id,error,attempts,next_attempt,stage
+                FROM sync_jobs WHERE error IS NOT NULL AND stage NOT IN ('done','superseded')
+                ORDER BY next_attempt,segment_id""")
+        ]
+        import_failures = self.get_setting("import_failures", [])
         return {"conversations": count("SELECT COUNT(*) FROM conversations"),
                 "messages": count("SELECT COUNT(*) FROM messages"),
                 "unapproved_conversations": count("SELECT COUNT(*) FROM conversations WHERE consent=0"),
@@ -199,5 +254,7 @@ class Store:
                 "sources": count("SELECT COUNT(*) FROM source_map"),
                 "pending_segments": pending, "unassigned_messages": unassigned,
                 "pending_jobs": cleanup,
+                "sync_errors": sync_errors,
+                "import_failures": import_failures,
                 "sync_status": "pending" if pending or unassigned or cleanup else "up_to_date",
                 "notebook_configured": bool(self.get_setting("notebook_id"))}

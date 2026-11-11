@@ -5,13 +5,17 @@ import asyncio
 import errno
 import hashlib
 import json
+import logging
 import os
-import time
 from pathlib import Path
+from time import monotonic as _monotonic
+from time import sleep as _sleep
 
+from ai_memory.diagnostics import failure_code
 from ai_memory.segments import SegmentBuilder
 from ai_memory.store import Store
 
+logger = logging.getLogger(__name__)
 
 def parser():
     p = argparse.ArgumentParser(description="Lossless AI archive → NotebookLM → MCP")
@@ -57,31 +61,81 @@ def collect_into(store, platform, path, account="local", consent=False):
     from ai_memory.collectors import collect
 
     path = Path(path).expanduser().resolve(strict=True)
-    files = sorted(f for f in (path.rglob("*") if path.is_dir() else [path]) if f.is_file())
-    inventory = [(str(f.relative_to(path) if path.is_dir() else f.name), f.stat().st_size, f.stat().st_mtime_ns) for f in files]
-    fingerprint = hashlib.sha256(json.dumps(inventory).encode()).hexdigest()
     key = f"{platform}:{account}:{path}"
-    checkpoint = store.connection.execute("SELECT value FROM checkpoints WHERE key=?", (key,)).fetchone()
-    if checkpoint and checkpoint[0] == fingerprint and not consent:
-        return {"imported_conversations": 0, "conversation_ids": [], "unchanged": True}
+    if path.is_dir() and platform.lower() == "codex":
+        files = sorted(f for f in path.rglob("*") if f.is_file() and
+                       (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst")))
+        independent_files = True
+    else:
+        files = [path]
+        independent_files = False
     ids = []
-    for c in collect(platform, path, account=account):
-        # Use native identities for already archived parts, append newly exposed
-        # parts after existing sequence numbers on partial/reordered snapshots.
-        existing = store.connection.execute("SELECT id FROM conversations WHERE platform=? AND account=? AND external_id=?", (c["platform"], c["account"], c["external_id"])).fetchone()
-        if existing:
-            previous = {m["native_id"]: m["sequence"] for m in store.get_conversation(existing[0])["messages"]}
-            last = max(previous.values(), default=0)
-            for m in c["messages"]:
-                if m["native_id"] in previous:
-                    m["sequence"] = previous[m["native_id"]]
-                else:
-                    last += 1
-                    m["sequence"] = last
-        ids.append(store.ingest(c, consent=consent))
-    with store.connection:
-        store.connection.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (key, fingerprint))
-    return {"imported_conversations": len(ids), "conversation_ids": ids, "unchanged": False}
+    failures = []
+    scanned = 0
+    for file in files:
+        relative = str(file.relative_to(path)) if independent_files else file.name
+        try:
+            if not independent_files and path.is_dir():
+                inventory = []
+                for item in sorted(p for p in path.rglob("*") if p.is_file()):
+                    stat = item.stat()
+                    inventory.append((str(item.relative_to(path)), stat.st_size, stat.st_mtime_ns))
+                fingerprint_input = inventory
+            else:
+                stat = file.stat()
+                fingerprint_input = [relative, stat.st_size, stat.st_mtime_ns]
+            fingerprint = hashlib.sha256(json.dumps(fingerprint_input).encode()).hexdigest()
+        except OSError:
+            failures.append({"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
+                             "category": "read"})
+            continue
+        file_key = f"{key}:{relative}" if independent_files else key
+        checkpoint = store.connection.execute(
+            "SELECT value FROM checkpoints WHERE key=?", (file_key,)
+        ).fetchone()
+        if checkpoint and checkpoint[0] == fingerprint and not consent:
+            scanned += 1
+            continue
+        try:
+            conversations = collect(platform, file if independent_files else path, account=account)
+            for c in conversations:
+                # Keep known native IDs at their archived positions and append new turns.
+                existing = store.connection.execute(
+                    "SELECT id FROM conversations WHERE platform=? AND account=? AND external_id=?",
+                    (c["platform"], c["account"], c["external_id"]),
+                ).fetchone()
+                if existing:
+                    previous = {m["native_id"]: m["sequence"] for m in
+                                store.get_conversation(existing[0])["messages"]}
+                    last = max(previous.values(), default=0)
+                    for m in c["messages"]:
+                        if m["native_id"] in previous:
+                            m["sequence"] = previous[m["native_id"]]
+                        else:
+                            last += 1
+                            m["sequence"] = last
+                ids.append(store.ingest(c, consent=consent))
+            with store.connection:
+                store.connection.execute(
+                    "INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (file_key, fingerprint)
+                )
+            scanned += 1
+        except (OSError, RuntimeError, ValueError, UnicodeError):
+            failures.append({"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
+                             "category": "parse"})
+    source_id = hashlib.sha256(key.encode()).hexdigest()[:16]
+    prior_failures = store.get_setting("import_failures", [])
+    prior_failures = [failure for failure in prior_failures if failure.get("source_id") != source_id]
+    if failures:
+        prior_failures.append({
+            "source_id": source_id,
+            "failed_files": len(failures),
+            "categories": sorted({failure["category"] for failure in failures}),
+        })
+    store.set_setting("import_failures", prior_failures)
+    return {"imported_conversations": len(ids), "conversation_ids": ids,
+            "unchanged": bool(scanned and not ids and not failures),
+            "failed_files": len(failures), "file_failures": failures}
 
 
 async def _gateway_call(db_path, name, arguments):
@@ -120,19 +174,39 @@ def _watch(args):
     if not sources:
         raise ValueError("watch requires at least one explicit source path")
     next_sync = 0
+    reported = {}
+
+    def report(key, code):
+        now = _monotonic()
+        if now >= reported.get(key, -float("inf")):
+            logger.warning("Worker %s; retry in %.0f seconds", code, args.interval)
+            reported[key] = now + 300
+
     while True:
         with Store(args.db) as store:
             for platform, path in sources:
-                collect_into(store, platform, path, account=args.account)
-            if time.monotonic() >= next_sync and store.get_setting("notebook_id"):
+                try:
+                    imported = collect_into(store, platform, path, account=args.account)
+                    if imported.get("failed_files"):
+                        report(("import", platform), "import_failed")
+                    else:
+                        reported.pop(("import", platform), None)
+                except Exception:
+                    report(("import", platform), "import_failed")
+            if _monotonic() >= next_sync and store.get_setting("notebook_id"):
                 # Postpone optional remote work if local CPU load is high.
                 if not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1):
-                    result = asyncio.run(sync_archive(store))
+                    try:
+                        result = asyncio.run(sync_archive(store))
+                    except Exception as error:
+                        code = failure_code(error)
+                        report(("sync", code), code)
+                        result = {"status": {"sync_status": "pending"}}
                     # Pending jobs retain their own backoff deadline in SQLite;
                     # revisit them during scans instead of waiting the full batch period.
                     delay = args.interval if result["status"]["sync_status"] == "pending" else args.sync_interval
-                    next_sync = time.monotonic() + delay
-        time.sleep(args.interval)
+                    next_sync = _monotonic() + delay
+        _sleep(args.interval)
 
 
 def execute(args):
@@ -266,6 +340,6 @@ def main(argv=None):
         return 1
     if result is not None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        if "error" in result or result.get("blocked") or result.get("status", {}).get("sync_status") == "pending" and args.command == "sync":
+        if "error" in result or result.get("blocked") or result.get("failed_files") or result.get("status", {}).get("sync_status") == "pending" and args.command == "sync":
             return 1
     return 0

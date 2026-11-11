@@ -51,6 +51,67 @@ def test_partial_incremental_snapshot_never_deletes_archive(tmp_path):
         assert store.status()["messages"] == 2
 
 
+@pytest.mark.parametrize("order", [("new", "old"), ("old", "new")])
+def test_later_snapshot_wins_independent_of_import_order_and_keeps_partial_history(tmp_path, order):
+    with Store(tmp_path / "archive.sqlite") as store:
+        base = conversation()
+        second = dict(base["messages"][0], native_id="m2", sequence=2, text="history")
+        newer = conversation(title="new title", updated_at="2026-11-10T16:00:00Z", messages=[dict(
+            base["messages"][0], text="newer edit", timestamp="2026-11-10T15:00:00Z"
+        )])
+        older = conversation(title="stale title", updated_at="2026-11-10T15:00:00Z", messages=[dict(
+            base["messages"][0], text="stale edit", timestamp="2026-11-10T15:00:00Z"
+        ), second])
+        versions = {"new": newer, "old": older}
+        key = store.ingest(versions[order[0]])
+        store.ingest(versions[order[1]])
+        archived = store.get_conversation(key)
+        assert len(archived["messages"]) == 2
+        assert archived["messages"][0]["text"] == "newer edit"
+        assert archived["messages"][0]["timestamp"] == "2026-11-10T15:00:00Z"
+        assert archived["updated_at"] == "2026-11-10T16:00:00Z"
+        assert archived["title"] == "new title"
+
+
+def test_open_current_schema_does_not_attempt_ddl(tmp_path, monkeypatch):
+    path = tmp_path / "archive.sqlite"
+    with Store(path):
+        pass
+    statements = []
+    original_connect = sqlite3.connect
+
+    def deny_ddl(action, arg1, arg2, database, trigger):
+        if action in {sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+                      sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_INDEX,
+                      sqlite3.SQLITE_ALTER_TABLE}:
+            statements.append((action, arg1, arg2))
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def connect_with_ddl_denied(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_authorizer(deny_ddl)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect_with_ddl_denied)
+    with Store(path):
+        pass
+    assert statements == []
+
+
+def test_wal_reader_can_read_during_uncommitted_writer_transaction(tmp_path):
+    path = tmp_path / "archive.sqlite"
+    with Store(path) as setup:
+        setup.ingest(conversation())
+    with Store(path) as writer:
+        writer.connection.execute("BEGIN IMMEDIATE")
+        writer.connection.execute("UPDATE conversations SET title='uncommitted' WHERE external_id='session-1'")
+        with Store(path) as reader:
+            assert reader.connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 1
+            assert reader.connection.execute("SELECT title FROM conversations").fetchone()[0] == "Монгол demo"
+        writer.connection.rollback()
+
+
 def test_invalid_event_or_conflicting_sequence_rolls_back(tmp_path):
     with Store(tmp_path / "archive.sqlite") as store:
         c = conversation()
