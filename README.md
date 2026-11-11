@@ -41,16 +41,16 @@ Incremental scans checkpoint the selected path's file inventory. Unchanged histo
 
 ## Connect NotebookLM
 
-Authenticate with **your Google browser session**, using notebooklm-py's supported login flow. A service-account credential does not authenticate NotebookLM. Keep the browser state private and outside version control.
+Sign in to NotebookLM in **the Brave, Chrome or Firefox profile you already use**, then import that session with notebooklm-py's supported cookie reader. This does not launch another browser or require a separate Chromium/Playwright installation. A service-account credential does not authenticate NotebookLM. Keep the saved session private and outside version control.
+
+Keep your existing auth location when reauthenticating. For a new setup on a cloud host with a read-only home, first set a writable location with `export NOTEBOOKLM_HOME="$PWD/data/notebooklm"`.
 
 ```bash
-# Only needed to log in; no browser stays running during normal sync or MCP use.
-uv pip install --python .venv/bin/python 'notebooklm-py[browser]==0.8.6'
-.venv/bin/playwright install chromium
+# Install the optional cookie reader; no browser download is needed.
+uv pip install --python .venv/bin/python 'notebooklm-py[cookies]==0.8.6'
 
-# Cloud home is read-only, so use this writable application directory.
-export NOTEBOOKLM_HOME=/workspace/Memory/data/notebooklm
-.venv/bin/notebooklm login
+# Use the same auth directory or --storage path as your worker/MCP server.
+.venv/bin/notebooklm login --browser-cookies brave
 .venv/bin/notebooklm create 'AI Memory'
 # Copy the notebook ID printed by the command:
 .venv/bin/ai-memory init --notebook-id YOUR_NOTEBOOK_ID
@@ -59,15 +59,17 @@ export NOTEBOOKLM_HOME=/workspace/Memory/data/notebooklm
 .venv/bin/ai-memory ask 'Өмнө ямар шийдвэр гаргасан бэ?'
 ```
 
-If your authentication state lives elsewhere, use `init --storage /private/path/storage_state.json`. To test against Google using **only synthetic data** in a dedicated demo notebook:
+Replace `brave` with `chrome` or `firefox` for those browsers. For a specific Brave profile, use `--browser-cookies 'brave::Profile 1'`; for multiple signed-in Google accounts, add `--account YOUR_EMAIL`. Run this on the same computer and as the same operating-system user as the signed-in browser; a cloud host cannot read your laptop's browser profile. If cookie extraction fails, check the selected profile and desktop keyring access before retrying.
+
+Use the same `NOTEBOOKLM_HOME` for login, the worker, MCP and the demo. If your archive already uses an explicit storage file, pass that file to login with `--storage /private/path/storage_state.json`; configure the archive with `init --storage` only when changing its auth location. Reauthentication does not require a new notebook. To test against Google using **only synthetic data** in a dedicated demo notebook:
 
 ```bash
-NOTEBOOKLM_HOME=/workspace/Memory/data/notebooklm .venv/bin/python scripts/live_demo.py
+.venv/bin/python scripts/live_demo.py
 ```
 
 This live demo creates or reuses `AI Memory — synthetic integration demo`, syncs its generated Markdown and asks a real source-filtered question. It retains the demo notebook so you can inspect it. Errors exit nonzero. A successful request still needs answer-quality review; offline tests cannot establish Google's retrieval quality.
 
-In restricted cloud networking, allow `notebooklm.google.com` and `accounts.google.com` for API/auth traffic. Browser login may also require the specific Google static/redirect hosts it reports. Existing package-registry rules must remain. This environment's initial live attempt was blocked by missing browser auth and an HTTP CONNECT 403 for NotebookLM; see [validation](docs/validation.md).
+In restricted cloud networking, allow `notebooklm.google.com` and `accounts.google.com` for API/auth traffic. Signing in through your usual browser may also require the specific Google static/redirect hosts it reports. Existing package-registry rules must remain. This environment's initial live attempt was blocked by missing browser auth and an HTTP CONNECT 403 for NotebookLM; see [validation](docs/validation.md).
 
 ## MCP with Codex and OpenCode
 

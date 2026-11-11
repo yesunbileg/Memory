@@ -48,3 +48,5 @@ Project/pinned чат Recents жагсаалтад давхар харагдса
 Gemini-ийн project/pinned төрлийг одоогоор найдвартай ялгах боломжгүй тул сонголт дутуу гэсэн анхааруулгатай алгасана. ChatGPT/Claude-ийн pin болон agent мэдээлэл API-д байгаа үед л ашиглагдана. Website-ийн private API өөрчлөгдөж болно. Бодит нэвтэрсэн account дээр бүрэн шалгасан гэсэн баталгаа байхгүй.
 
 Энэ холболт яриаг локал SQLite-д хадгална. NotebookLM рүү дамжуулахад тусдаа approve, Google browser нэвтрэлт болон sync шаардлагатай.
+
+NotebookLM-ийн нэвтрэлтийг одоо ашиглаж буй Brave-аасаа `notebooklm login --browser-cookies brave` командаар авна (`chrome`, `firefox` мөн дэмжинэ). Chromium тусад нь суулгах шаардлагагүй. Нэг удаа `notebooklm-py[cookies]` нэмэлтийг суулгасан байх ёстой; [дэлгэрэнгүй заавар](../README.md#connect-notebooklm). Worker-тэй ижил auth хавтас/файл ашиглана.

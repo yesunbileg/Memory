@@ -43,8 +43,10 @@ class NotebookLMError(RuntimeError):
 class NotebookLMAuthError(NotebookLMError):
     def __init__(self):
         super().__init__(
-            "NotebookLM browser authentication is missing or expired. Run `notebooklm login` "
-            "as this user, or configure storage_path with its saved browser storage state. "
+            "NotebookLM browser authentication is missing or expired. Sign in to NotebookLM "
+            "in your usual browser, then run `notebooklm login --browser-cookies brave` "
+            "as the same user (use chrome/firefox for those browsers; requires notebooklm-py[cookies]). "
+            "Use the worker's existing NOTEBOOKLM_HOME or --storage path. "
             "Google service-account credentials do not authenticate this browser client.",
             "auth_required",
         )
