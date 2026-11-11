@@ -138,7 +138,6 @@ class SegmentBuilder:
             candidates = db.execute("""SELECT s.*,MIN(m.rowid) AS first_position FROM segments s
                 JOIN segment_messages sm ON s.id=sm.segment_id JOIN messages m ON m.id=sm.message_id
                 WHERE s.state='sealed' GROUP BY s.id ORDER BY first_position""").fetchall()
-            chosen = []
             for start in range(len(candidates)):
                 window, total = [], 0
                 for c in candidates[start:start+3]:
@@ -146,20 +145,27 @@ class SegmentBuilder:
                         break
                     window.append(c)
                     total += c["word_count"]
-                if len(window) >= 2:
-                    chosen = window
-                    break
-            if len(chosen) < 2:
-                raise CapacityError("No adjacent sealed segments fit the merge ceiling; archive retained; summarization disabled")
-            sid = self._new("sealed")
-            position = 0
-            for parent in chosen:
-                db.execute("INSERT INTO segment_parents VALUES(?,?)", (sid, parent["id"]))
-                for m in db.execute("SELECT message_id FROM segment_messages WHERE segment_id=? ORDER BY position", (parent["id"],)).fetchall():
-                    db.execute("INSERT INTO segment_messages VALUES(?,?,?)", (sid, m[0], position))
-                    position += 1
-            # _refresh renders and validates the full snapshot before parents are retired.
-            self._refresh(sid)
-            for parent in chosen:
-                db.execute("UPDATE segments SET state='retired' WHERE id=?", (parent["id"],))
-        return sid
+                for size in range(len(window), 1, -1):
+                    chosen = window[:size]
+                    # Rendered metadata can exceed the source ceiling even when
+                    # body words fit. Discard that candidate before trying a pair
+                    # or a later adjacent window, preserving all parent state.
+                    db.execute("SAVEPOINT merge_candidate")
+                    try:
+                        sid = self._new("sealed")
+                        position = 0
+                        for parent in chosen:
+                            db.execute("INSERT INTO segment_parents VALUES(?,?)", (sid, parent["id"]))
+                            for m in db.execute("SELECT message_id FROM segment_messages WHERE segment_id=? ORDER BY position", (parent["id"],)).fetchall():
+                                db.execute("INSERT INTO segment_messages VALUES(?,?,?)", (sid, m[0], position))
+                                position += 1
+                        self._refresh(sid)
+                    except CapacityError:
+                        db.execute("ROLLBACK TO merge_candidate")
+                        db.execute("RELEASE merge_candidate")
+                        continue
+                    for parent in chosen:
+                        db.execute("UPDATE segments SET state='retired' WHERE id=?", (parent["id"],))
+                    db.execute("RELEASE merge_candidate")
+                    return sid
+            raise CapacityError("No adjacent sealed segments fit the body and rendered source ceilings; archive retained; summarization disabled")

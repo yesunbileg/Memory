@@ -43,10 +43,10 @@
 
 **Interfaces:** Preserve `SegmentBuilder.merge_oldest() -> str`. Try the existing oldest adjacent window, then its smaller candidates, then later windows. Use a savepoint per candidate; retire parents only after full rendering and body validation pass.
 
-- [ ] Add a failing real 49-source regression with a three-parent oversized render and a feasible pair; assert convergence, readiness/deletion ordering, spare-slot budget and exact retained messages.
-- [ ] Add a later-window regression and preserve the existing all-unmergeable rollback regression.
-- [ ] Implement fallback without catching unexpected exceptions as capacity failures.
-- [ ] Run merge/sync tests and the Python suite; commit the fix.
+- [x] Add a failing real 49-source regression with a three-parent oversized render and a feasible pair; assert convergence, readiness/deletion ordering, spare-slot budget and exact retained messages.
+- [x] Add a later-window regression and preserve the existing all-unmergeable rollback regression.
+- [x] Implement fallback without catching unexpected exceptions as capacity failures.
+- [x] Run merge/sync tests and the Python suite; commit the fix.
 
 ## Task 3: Extension local handoff
 
