@@ -102,3 +102,23 @@ def test_conflicting_connection_config_is_preserved_and_rejected(tmp_path):
         prepare_connection(tmp_path / "archive.sqlite", 43210)
     configuration_unchanged = files.connection_file.read_bytes() == original
     assert configuration_unchanged
+
+
+def test_running_receiver_identity_distinguishes_archives_without_exposing_paths(tmp_path):
+    import threading
+
+    from ai_memory.connection import check_running_receiver
+    from ai_memory.ingest import make_server
+
+    first, second = tmp_path / 'first.sqlite', tmp_path / 'second.sqlite'
+    server = make_server(first, SYNTHETIC_TOKEN, port=0)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        assert check_running_receiver(server.server_port, SYNTHETIC_TOKEN, first) == 'ok'
+        assert check_running_receiver(server.server_port, SYNTHETIC_TOKEN, second) == 'different_archive'
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+    assert not first.exists() and not second.exists()

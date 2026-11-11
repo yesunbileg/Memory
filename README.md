@@ -82,16 +82,19 @@ Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` ask
 
 ## Web capture and background collection
 
-Load `vendor/hstry/extension` as an unpacked Chromium extension. It supports ChatGPT, Claude and Gemini, with all providers disabled initially. In extension options, choose the desired providers, set the local ingest token, and give each browser profile a stable account namespace (default `browser-local`). ChatGPT/Claude native account or organization IDs override that namespace when available. The extension reads conversations using your signed-in browser; enable it only for chats you intend to archive. Web captures arrive without Google upload consent.
+Load `vendor/hstry/extension` as an unpacked Chrome/Brave extension. From the project folder, run:
 
 ```bash
-# Create a private token file without displaying its contents.
-mkdir -p data
-.venv/bin/python -c 'import os,secrets; p="data/ingest.token"; fd=os.open(p, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600); os.write(fd,secrets.token_urlsafe(32).encode()); os.close(fd)'
-.venv/bin/ai-memory serve --token-file data/ingest.token
+.venv/bin/ai-memory connect
 ```
 
-The ingest server binds `127.0.0.1:41770`, requires bearer authentication, validates browser origins/Host, bounds request bodies, and exposes `/health` and `/ingest`. Enter the same private token directly into the extension options; never paste it into chat or commit it.
+Keep the terminal open. The command creates/reuses private connection files and starts the local receiver. Open extension Settings → **Choose connection file**, then select `data/extension-connection.json` (or the path printed for your selected archive). Connection status verifies the bearer token and application identity; public health alone cannot show Connected. When reusing an occupied port, the CLI also verifies the exact archive identity and refuses another database.
+
+Enable the desired ChatGPT, Claude or Gemini providers. All are off initially. The category checklist defaults to **Projects & folders**, **Pinned & favorites**, and **GPTs & agents** on, with **Ordinary Recents** off. Organized chats can appear in Recents and still match their selected category; Recents-only does not override unchecked organized categories. Unknown membership stays out unless Recents is explicitly enabled. Existing archived history is retained. Codex/OpenCode local collection is independent of these browser filters.
+
+ChatGPT/Claude project discovery and native pin/agent metadata are supported where their private APIs expose them. Gemini's verified schema has no dependable organized-membership fields: it skips with a warning unless ordinary Recents are enabled. Selected detail failures produce an incomplete-capture warning and preserve retry cursors. Changing capture selection, provider enablement or connection settings invalidates active runs before subsequent batches are sent; already accepted batches remain in the archive. No-category runs are rejected. These guarantees are tested with synthetic service fixtures, not live signed-in accounts.
+
+Advanced settings retain manual port/token entry, interval and a browser-profile namespace (`browser-local` by default). Use a distinct namespace for each profile; native ChatGPT/Claude account IDs take precedence. Existing `serve --token-file` remains available. The server binds loopback, checks Host/Origin and bearer credentials, bounds bodies, and exposes public `/health`, authenticated `/auth/check`, and `/ingest`. Web capture does not grant NotebookLM upload consent. See the [Mongolian setup guide](docs/extension-setup.mn.md) and [current handoff status](docs/extension-handoff.md).
 
 ```bash
 .venv/bin/ai-memory watch --codex-path ~/.codex/sessions \

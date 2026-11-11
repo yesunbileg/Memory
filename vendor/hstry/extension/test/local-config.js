@@ -176,6 +176,32 @@ assert.equal((await send({ type: 'syncNow' })).ok, true);
 await finished();
 assert.equal(status.chatgpt.lastError.includes(settings.token), false);
 assert.equal(warnings.join('\n').includes(settings.token), false);
+
+// A pending provider must not post a batch after the user revokes capture.
+let releaseBatch;
+let batchHeld;
+const held = new Promise(resolve => { batchHeld = resolve; });
+PROVIDERS.chatgpt.sync = async ({push}) => {
+  await new Promise(resolve => { releaseBatch = resolve; batchHeld(); });
+  await push('chatgpt-web', 'chatgpt-web', [{externalId:'revoked',messages:[]}]);
+  return {state:{cursor:'revoked'},conversations:1};
+};
+const beforeRevocation = archiveRequests.length;
+assert.equal((await send({type:'syncNow'})).ok,true);
+await held;
+settings = {...settings,providers:{chatgpt:false},captureTypes:{projects:false,pinned:false,agents:false,recents:false}};
+await send({type:'settingsChanged'});
+releaseBatch();
+await finished();
+assert.equal(archiveRequests.length,beforeRevocation,'revoked batches must never reach ingest');
+assert.notEqual(status.chatgpt.progress.phase,'complete');
+assert.notEqual(status.chatgpt.state?.cursor,'revoked');
+
+settings = {...settings,providers:{chatgpt:true}};
+const noTypes = await send({type:'syncNow'});
+assert.equal(noTypes.ok,false);
+assert.equal(noTypes.code,'no_capture_types');
+assert.equal((await send({type:'fullSyncProvider',provider:'chatgpt'})).code,'no_capture_types');
 PROVIDERS.chatgpt.sync = originalSync;
 console.warn = realWarn;
 console.log('PASS local-only settings, authenticated worker startup, capture-policy resets, and safe partial status');

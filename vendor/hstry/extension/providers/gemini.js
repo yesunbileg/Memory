@@ -158,7 +158,7 @@ export async function syncGemini({ state = {}, captureTypes, push, register = as
     await report({ phase: 'complete', detected: 0, processed: 0, selection, selectionWarning: null });
     return { state, conversations: 0, selection, selectionWarning: null, hasMore: false };
   }
-  const selectionWarning = policy.projects || policy.pinned || policy.agents
+  let selectionWarning = policy.projects || policy.pinned || policy.agents
     ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
     : null;
   await report({ phase: 'discovering', selection, selectionWarning });
@@ -203,6 +203,9 @@ export async function syncGemini({ state = {}, captureTypes, push, register = as
   if (batch.length) total += await push('gemini-web', 'gemini', batch);
   const hasMore = endIndex < summaries.length;
   const hadFailures = Boolean(pending?.hadFailures) || failures > 0;
+  if (hadFailures) selectionWarning = [selectionWarning,
+    'Some selected Gemini conversations could not be read. Capture is incomplete; retry after checking your sign-in.',
+  ].filter(Boolean).join(' ');
   await report({ phase: hasMore ? 'queued' : 'complete', processed, selection, selectionWarning });
   return {
     state: hasMore

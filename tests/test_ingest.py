@@ -323,7 +323,9 @@ def test_authenticated_connection_probe_does_not_create_or_write_archive(running
     server, database = running_server
     status, headers, body = request(server, path="/auth/check", data={}, headers={"Origin": ORIGIN})
     assert status == 200
-    assert json.loads(body) == {"status": "ok", "service": "ai-memory", "schema": 1}
+    from ai_memory.connection import archive_identity
+    assert json.loads(body) == {"status": "ok", "service": "ai-memory", "schema": 1,
+                                "archive_id": archive_identity(database)}
     assert headers["Access-Control-Allow-Origin"] == ORIGIN
     assert not database.exists()
     assert request(server)[0] == 200

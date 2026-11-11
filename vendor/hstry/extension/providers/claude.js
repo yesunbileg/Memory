@@ -218,6 +218,7 @@ export async function syncClaude({ state = {}, captureTypes, push, register = as
         if (conv) batch.push(conv);
       } catch (error) {
         failures++;
+        warnings.add('Some selected Claude conversations could not be read. Capture is incomplete; retry after checking your sign-in.');
         log(`claude: skipping conversation ${item.uuid}: ${error.message}`);
       }
       processed++;

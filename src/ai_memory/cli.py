@@ -159,7 +159,7 @@ def execute(args):
         except OSError as error:
             if error.errno != errno.EADDRINUSE:
                 raise
-            status = check_running_receiver(files.port, files.token)
+            status = check_running_receiver(files.port, files.token, args.db)
             if status == "ok":
                 write_connection_file(files)
                 print(
@@ -170,6 +170,11 @@ def execute(args):
                     flush=True,
                 )
                 return None
+            if status == "different_archive":
+                raise ValueError(
+                    f"Port {files.port} is serving a different archive. "
+                    "Stop that receiver before selecting this archive, or use a separate data directory and port."
+                ) from None
             if status == "unauthorized":
                 raise ValueError(
                     f"Port {files.port} is using a different connection token. "

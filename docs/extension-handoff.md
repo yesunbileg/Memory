@@ -1,19 +1,28 @@
-# Extension handoff — 2026-11-11
+# Extension status — version 0.5.1
 
-Work stopped at the user’s request to conserve usage. This is an implementation snapshot, not a production-readiness claim.
+Development resumed after the earlier 0.5.0 snapshot. The four recorded follow-up defects are now covered by regressions and fixed.
 
-Implemented: version0.5.0 Apple-inspired light/dark responsive options and popup; original logo and manifest PNGs; guided connection-file import and manual fallback; ai-memory connect with private token/config and server startup; authenticated POST /auth/check instead of health-only Connected; provider/category checklists; ordinary Recents excluded by default; ChatGPT/Claude project discovery and native pinned/GPT metadata filtering; policy reset and skipped/unknown warnings; unchanged local Codex collector. Existing archives are not deleted.
+## Fixed after resuming
 
-Verified during implementation: 117 Python tests and 11 Node scripts passed before the last UI regression additions; real Chromium HTTP UI harness passed file import, real local auth, invalid token/file handling, checklist persistence, light/dark/mobile rendering, popup and no horizontal overflow. New options auth-race regression passed. This harness is not an installed-extension/live-account test.
+1. The authenticated receiver probe now returns an opaque archive identity. `connect --db` refuses to reuse a receiver serving a different SQLite file, even with the same directory/token. Filesystem paths are not returned by the HTTP probe.
+2. Active capture snapshots are invalidated when relevant settings change. Before each subsequent archive batch and before committing a successful run/cursor, the worker rereads current settings. Revoked runs are cancelled and cannot record an old-policy success. Batches already accepted by the receiver remain archived.
+3. Selected detail-request failures in ChatGPT, Claude and Gemini produce safe incomplete-capture warnings and preserve retry watermarks. Gemini keeps failure status across continuation chunks.
+4. Both manual capture and provider rescan reject an empty category checklist before authentication/provider reads. The UI already disables those actions.
 
-Known important follow-up findings still outstanding when stopped:
-1. Reusing a running receiver checks service/token but does not distinguish two database files in the same directory. Use a separate data directory per archive until fixed.
-2. Deselecting a provider/category during an active capture may allow its already-running batches to continue under the previous selection. Finish/stop capture before changing selection until guards are added.
-3. Selected detail-request failures can preserve retry cursors yet still omit a partial-failure warning. Do not infer completeness from Up to date alone.
-4. Empty-category rescan controls are disabled in UI, but worker-level rejection still needs verification.
+The 0.5.0 improvements remain: responsive light/dark settings and popup; original logo/icons; guided private connection-file import; automatic local receiver startup with `ai-memory connect`; token-authenticated connection state; provider/category checklists; ordinary Recents off by default; verified-metadata project/pin/agent capture; local Codex collection unchanged.
 
-Gemini organized metadata is unsupported in the evidenced private schema: it skips with a warning unless Ordinary Recents is explicitly enabled. Pin capture depends on native metadata being exposed. Real website API/account testing and installed-extension validation remain outstanding. Google NotebookLM auth/network blockers documented in validation.md still apply.
+## Verification
 
-Update locally: git pull --ff-only; uv sync --frozen. Stop the old serve process, run .venv/bin/ai-memory connect, keep terminal open. Reload the unpacked extension at brave://extensions or chrome://extensions. Open its settings and choose data/extension-connection.json. Enable providers and select projects/pinned/agents; leave Ordinary Recents unchecked.
+- Full Python suite: **119 passed**.
+- All **13 Node extension test scripts** passed, including revocation, empty checklist, partial provider failure, settings migration and UI auth-race regressions.
+- Real Chromium UI harness passed file import, incorrect token/host handling, checklist persistence, actual local HTTP authentication, light/dark and mobile rendering, popup and no horizontal overflow. This is an HTTP UI harness, not an installed-extension/live-account test.
+- Frozen dependency sync, wheel build/resource inspection, Ruff and whitespace checks passed.
+- Independent focused review found no Important issues in the four fixes; additional synthetic unchanged-settings and Gemini cross-chunk failure checks passed.
 
-Tests: .venv/bin/pytest -q; run every vendor/hstry/extension/test/*.js with Node. Optional browser harness: UV_CACHE_DIR=/workspace/.cache/uv uv run --with playwright python scripts/extension_ui_check.py.
+## Remaining external/coverage limits
+
+Gemini organized metadata remains unsupported in the evidenced private schema: it skips with a warning unless Ordinary Recents is explicitly enabled. Pin/agent capture requires native metadata. Real signed-in provider APIs and installed-extension behavior still need verification; this cloud Chromium blocks unpacked extensions by administrator policy. Google NotebookLM browser authentication/network prerequisites described in validation.md remain unresolved.
+
+## Update and connect
+
+From the project folder: `git pull --ff-only`, then `uv sync --frozen`. Stop the old receiver with Ctrl+C and run `.venv/bin/ai-memory connect`. Keep its terminal open. Reload AI Memory at `brave://extensions` or `chrome://extensions`. Open Settings → Choose connection file → select `data/extension-connection.json` or the private file path printed by the command. Enable providers and select projects/pinned/agents; leave Ordinary Recents unchecked. See [the Mongolian setup guide](extension-setup.mn.md). Existing transcripts and approval settings are retained.

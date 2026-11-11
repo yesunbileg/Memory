@@ -20,6 +20,19 @@ const ALARM_NAME = 'hstry-sync';
 const CONTINUE_ALARM_PREFIX = 'hstry-sync-continue-';
 const activeProviders = new Set();
 let statusWriteQueue = Promise.resolve();
+let captureEpoch = 0;
+let captureKey = null;
+
+function observeSettings(settings) {
+  const key = JSON.stringify([settings.port, settings.token, settings.account, settings.providers, settings.captureTypes]);
+  if (key !== captureKey) { captureKey = key; captureEpoch++; }
+  return captureEpoch;
+}
+
+async function assertCurrentCapture(settings, epoch) {
+  observeSettings(await getSettings());
+  if (epoch !== captureEpoch) throw localError('selection_changed');
+}
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
@@ -64,9 +77,10 @@ async function clearInterruptedRuns() {
 
 const startupReady = clearInterruptedRuns();
 
-function makePush(settings, onResult = async () => {}) {
+function makePush(settings, onResult = async () => {}, beforePush = async () => {}) {
   const url = `http://127.0.0.1:${settings.port}/ingest`;
   return async function push(sourceId, adapter, conversations) {
+    await beforePush();
     if (!settings.token) throw localError('missing_token');
     let res;
     try {
@@ -129,6 +143,7 @@ const LOCAL_ERRORS = {
   unauthorized: 'This connection file does not match the running AI Memory receiver.',
   offline: 'AI Memory is offline. Run ai-memory connect and keep its terminal open.',
   archive_unavailable: 'AI Memory could not save this batch. Check its terminal and retry.',
+  selection_changed: 'Your selection changed. Capture again to use the updated settings.',
 };
 
 function localError(code) {
@@ -165,6 +180,10 @@ async function runSync(
 ) {
   await startupReady;
   const settings = await getSettings();
+  const epoch = observeSettings(settings);
+  if (!Object.values(settings.captureTypes).some(Boolean)) return {
+    ok: false, code: 'no_capture_types', error: 'Choose at least one chat type before capturing.',
+  };
   const status = await getStatus();
   const eligible = Object.entries(PROVIDERS).filter(
     ([name]) =>
@@ -237,9 +256,10 @@ async function runSync(
           created: entry.progress.created + result.created,
           updated: entry.progress.updated + result.updated,
         });
-      });
+      }, () => assertCurrentCapture(settings, epoch));
       const register = makeRegister(settings);
       try {
+        await assertCurrentCapture(settings, epoch);
         const result = await provider.sync({
           state: entry.state ?? {},
           captureTypes: { ...settings.captureTypes },
@@ -249,6 +269,7 @@ async function runSync(
           // Provider diagnostics can contain account or conversation text.
           log: () => {},
         });
+        await assertCurrentCapture(settings, epoch);
         entry.state = result.state;
         entry.selection = Object.hasOwn(result, 'selection') ? result.selection : entry.progress.selection ?? null;
         entry.selectionWarning = Object.hasOwn(result, 'selectionWarning') ? result.selectionWarning : entry.progress.selectionWarning ?? null;
@@ -272,7 +293,8 @@ async function runSync(
         entry.lastError = failure.error;
         entry.lastErrorCode = failure.code;
         entry.running = false;
-        entry.progress = { ...entry.progress, phase: 'failed' };
+        entry.continuationPending = false;
+        entry.progress = { ...entry.progress, phase: failure.code === 'selection_changed' ? 'cancelled' : 'failed' };
       } finally {
         activeProviders.delete(name);
         await setStatusEntry(name, entry);
@@ -361,7 +383,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'settingsChanged') {
-    Promise.all([ensureAlarm(), registerEnabledSources()]).then(([, sources]) => {
+    getSettings().then(settings => {
+      observeSettings(settings);
+      return Promise.all([ensureAlarm(), registerEnabledSources(settings)]);
+    }).then(([, sources]) => {
       sendResponse({ ok: true, sources });
     });
     return true;

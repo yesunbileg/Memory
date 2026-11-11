@@ -372,6 +372,7 @@ export async function syncChatGPT({ state = {}, captureTypes, push, register = a
         if (conv) batch.push(conv);
       } catch (error) {
         failures++;
+        warnings.add('Some selected ChatGPT conversations could not be read. Capture is incomplete; retry after checking your sign-in.');
         log(`chatgpt: skipping conversation ${item.id}: ${error.message}`);
       }
       processed++;

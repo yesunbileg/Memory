@@ -106,6 +106,7 @@ export function progressDetail(progress) {
 
 export function friendlyError(error) {
   const text = String(error ?? 'Unknown sync error');
+  if (text.includes('selection changed')) return 'Your selection changed. Capture again with your new checklist.';
   if (text.includes('not logged in')) return 'Open this provider and sign in, then sync again.';
   if (text.includes('cannot reach hstry-api') || text.includes('Failed to fetch')) {
     return 'Start AI Memory on this computer, then try again.';

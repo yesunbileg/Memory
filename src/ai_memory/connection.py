@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import http.client
 import json
@@ -148,7 +149,12 @@ def write_connection_file(files: ConnectionFiles) -> None:
                 raise ValueError("Connection setup changed in another process. Run connect again.") from None
 
 
-def check_running_receiver(port: int, token: str) -> str:
+def archive_identity(db_path: Path) -> str:
+    """Compare canonical archive locations without returning local filesystem paths."""
+    return hashlib.sha256(str(Path(db_path).expanduser().resolve()).encode()).hexdigest()
+
+
+def check_running_receiver(port: int, token: str, db_path: Path) -> str:
     """Classify an occupied loopback port without exposing credentials or replies."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
@@ -161,7 +167,13 @@ def check_running_receiver(port: int, token: str) -> str:
         if response.status != 200:
             return "incompatible"
         data = json.loads(response.read(4096))
-        return "ok" if data == {"status": "ok", "service": "ai-memory", "schema": 1} else "incompatible"
+        if not isinstance(data, dict) or any(data.get(k) != v for k, v in {
+            "status": "ok", "service": "ai-memory", "schema": 1,
+        }.items()):
+            return "incompatible"
+        if not isinstance(data.get("archive_id"), str):
+            return "incompatible"
+        return "ok" if hmac.compare_digest(data["archive_id"], archive_identity(db_path)) else "different_archive"
     except (OSError, ValueError, http.client.HTTPException):
         return "incompatible"
     finally:

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Memory",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Keep selected project, pinned and agent chats in your local archive. Ordinary Recents are off by default.",
   "permissions": [
     "alarms",

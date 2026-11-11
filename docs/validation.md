@@ -77,3 +77,7 @@ Live ChatGPT/Claude/Gemini history coverage, transient UI progress completeness,
 | CPU/RAM measurement | Tiny synthetic import measured above; large-source benchmarking remains open. |
 
 The local implementation and offline demo are validated. The complete live V1 acceptance list and reusable cloud configuration are **not** certified ready until their stated external blockers are resolved and affected checks rerun.
+
+## Extension 0.5.1 follow-up — 2026-11-11
+
+After resuming development, all four handoff defects were fixed with failing-then-passing regressions: wrong-archive receiver reuse, active-capture revocation, selected-detail partial failures, and empty-checklist worker startup. Full verification:119 Python tests,13 Node scripts, real Chromium UI with real local auth through an isolated test bridge, frozen dependency sync, wheel build/resources, Ruff and application whitespace checks passed. This does not establish live Google/provider-account behavior or installed-extension readiness under the administrator block. Current details and local steps are in extension-handoff.md and extension-setup.mn.md.

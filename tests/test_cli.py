@@ -203,3 +203,24 @@ def test_connect_explains_occupied_receiver_with_different_token(tmp_path):
     assert "other-synthetic-private-token" not in result.stdout + result.stderr
     assert "Traceback" not in result.stderr
     assert not (tmp_path / "extension-connection.json").exists()
+
+
+def test_connect_rejects_running_receiver_for_other_database_in_same_directory(tmp_path):
+    from ai_memory.connection import prepare_connection
+    from ai_memory.ingest import make_server
+
+    first, second = tmp_path / 'first.sqlite', tmp_path / 'second.sqlite'
+    files = prepare_connection(first, 41770, write_config=False)
+    server = make_server(first, files.token, port=0)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        result = run_cli('--db', second, 'connect', '--port', server.server_port)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+    assert result.returncode == 1
+    assert 'different archive' in result.stdout.lower()
+    assert not (tmp_path / 'extension-connection.json').exists()
+    assert not first.exists() and not second.exists()
