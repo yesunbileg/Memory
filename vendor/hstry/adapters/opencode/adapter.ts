@@ -19,9 +19,9 @@
  *   project/<project-name>/storage/session/part/<session-id>/<msg-id>/<part-id>.json
  */
 
-import { readdir, readFile, stat } from 'fs/promises';
+import { readdir, stat } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, basename } from 'path';
+import { join, basename, dirname } from 'path';
 import { homedir } from 'os';
 import type { 
   Adapter, 
@@ -263,6 +263,27 @@ const adapter: Adapter = {
   },
 
   async parse(path: string, opts?: ParseOptions): Promise<Conversation[]> {
+    if (basename(path).startsWith('ses_') && path.endsWith('.json')) {
+      const directory = dirname(path);
+      const sessionDir = dirname(directory);
+      const storageDir = dirname(sessionDir);
+      const projectDir = dirname(storageDir);
+      const projectsDir = dirname(projectDir);
+      let basePath: string;
+      let ref: SessionRef;
+      if (basename(directory) === 'info' && basename(sessionDir) === 'session' &&
+          basename(storageDir) === 'storage' && basename(projectsDir) === 'project') {
+        basePath = dirname(projectsDir);
+        ref = { path, layout: 'old', projectName: basename(projectDir) };
+      } else if (basename(sessionDir) === 'session' && basename(storageDir) === 'storage') {
+        basePath = projectDir;
+        ref = { path, layout: 'new' };
+      } else {
+        throw new Error('Unsupported OpenCode session JSON path');
+      }
+      const conversation = await parseSingleSession(basePath, ref, opts);
+      return conversation ? [conversation] : [];
+    }
     const layout = await detectLayout(path);
     
     if (layout === 'sqlite') {
@@ -966,7 +987,7 @@ async function parseSingleSession(
   ref: SessionRef,
   opts?: ParseOptions,
 ): Promise<Conversation | null> {
-  const sessionContent = await readFile(ref.path, 'utf-8');
+  const sessionContent = await readUtf8(ref.path);
   const session: SessionInfo = JSON.parse(sessionContent);
 
   // Apply time filter

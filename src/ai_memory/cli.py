@@ -62,25 +62,47 @@ def collect_into(store, platform, path, account="local", consent=False):
 
     path = Path(path).expanduser().resolve(strict=True)
     key = f"{platform}:{account}:{path}"
+    opencode_json = False
+    # An explicit session file references message/part files beyond its own mtime.
+    explicit_session = platform.lower() == "opencode" and path.is_file() and path.suffix == ".json"
     if path.is_dir() and platform.lower() == "codex":
         files = sorted(f for f in path.rglob("*") if f.is_file() and
                        (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst")))
         independent_files = True
+    elif path.is_dir() and platform.lower() == "opencode" and not (path / "opencode.db").exists():
+        current = sorted(f for f in path.glob("storage/session/*/ses_*.json") if f.is_file())
+        current_ids = {f.name for f in current}
+        legacy = sorted(f for f in path.glob("project/*/storage/session/info/ses_*.json")
+                        if f.is_file() and f.name not in current_ids)
+        files = current + legacy
+        opencode_json = independent_files = bool(files)
+        if not files:
+            files = [path]
     else:
         files = [path]
         independent_files = False
     ids = []
     failures = []
     scanned = 0
+    inventory = None
+    tree_fingerprint = None
     for file in files:
         relative = str(file.relative_to(path)) if independent_files else file.name
         try:
-            if not independent_files and path.is_dir():
-                inventory = []
-                for item in sorted(p for p in path.rglob("*") if p.is_file()):
-                    stat = item.stat()
-                    inventory.append((str(item.relative_to(path)), stat.st_size, stat.st_mtime_ns))
-                fingerprint_input = inventory
+            if path.is_dir() and (opencode_json or not independent_files):
+                if inventory is None:
+                    inventory = []
+                    for item in sorted(p for p in path.rglob("*") if p.is_file()):
+                        stat = item.stat()
+                        inventory.append((str(item.relative_to(path)), stat.st_size, stat.st_mtime_ns))
+                if opencode_json:
+                    # Message/part edits need not touch session JSON. Hash the tree
+                    # once, then checkpoint successful sessions independently.
+                    if tree_fingerprint is None:
+                        tree_fingerprint = hashlib.sha256(json.dumps(inventory).encode()).hexdigest()
+                    fingerprint_input = [relative, tree_fingerprint]
+                else:
+                    fingerprint_input = inventory
             else:
                 stat = file.stat()
                 fingerprint_input = [relative, stat.st_size, stat.st_mtime_ns]
@@ -93,7 +115,7 @@ def collect_into(store, platform, path, account="local", consent=False):
         checkpoint = store.connection.execute(
             "SELECT value FROM checkpoints WHERE key=?", (file_key,)
         ).fetchone()
-        if checkpoint and checkpoint[0] == fingerprint and not consent:
+        if checkpoint and checkpoint[0] == fingerprint and not consent and not explicit_session:
             scanned += 1
             continue
         try:
