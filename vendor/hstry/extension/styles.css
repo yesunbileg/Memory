@@ -1317,7 +1317,9 @@ input::placeholder {
 /* ---------- Popup Page ---------- */
 
 .popup-page {
-  width: 380px;
+  /* Toolbar popups need an intrinsic width before Chrome sizes their viewport. */
+  width: 440px;
+  min-width: 440px;
   min-height: 440px;
   background: var(--bg);
 }
@@ -1739,10 +1741,6 @@ input::placeholder {
 
   .manual-fields button {
     margin-top: 0;
-  }
-
-  .popup-page {
-    width: 100%;
   }
 }
 
