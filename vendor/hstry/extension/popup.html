@@ -10,43 +10,77 @@
   <body class="popup-page">
     <main class="popup-shell">
       <header class="popup-header">
-        <a class="brand" href="options.html" target="_blank"
-          ><img src="icons/icon-48.png" width="32" height="32" alt="" /><span>AI Memory</span></a
-        ><button id="settings" class="icon-button" aria-label="Open AI Memory settings">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="m9 3-.6 2.2-2 .9-2-.6-2 3.5 1.6 1.6v2.8L2.4 15l2 3.5 2-.6 2 .9L9 21h4l.6-2.2 2-.9 2 .6 2-3.5-1.6-1.6v-2.8L19.6 9l-2-3.5-2 .6-2-.9L13 3z"
-            />
-            <circle cx="11" cy="12" r="3" />
-          </svg>
-        </button>
+        <a class="brand" href="options.html" target="_blank">
+          <img src="icons/icon-48.png" width="30" height="30" alt="" />
+          <div class="brand-text">
+            <span>AI Memory</span>
+            <small class="brand-sub">Local Web Sync</small>
+          </div>
+        </a>
+        <div class="popup-header-actions">
+          <button
+            id="retry"
+            class="icon-button"
+            aria-label="Check connection"
+            title="Check connection"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 11a8 8 0 0 0-14.3-4.7M4 4v3.5h3.5M4 13a8 8 0 0 0 14.3 4.7M20 20v-3.5h-3.5"
+              />
+            </svg>
+          </button>
+          <button
+            id="settings"
+            class="icon-button"
+            aria-label="Open AI Memory settings"
+            title="Open settings"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m9 3-.6 2.2-2 .9-2-.6-2 3.5 1.6 1.6v2.8L2.4 15l2 3.5 2-.6 2 .9L9 21h4l.6-2.2 2-.9 2 .6 2-3.5-1.6-1.6v-2.8L19.6 9l-2-3.5-2 .6-2-.9L13 3z"
+              />
+              <circle cx="11" cy="12" r="3" />
+            </svg>
+          </button>
+        </div>
       </header>
-      <div class="popup-intro">
-        <h1>A little less lost.</h1>
-        <p>Your important conversations, kept together.</p>
-      </div>
-      <section class="popup-connection" aria-live="polite">
+
+      <section id="connection-banner" class="popup-connection" aria-live="polite">
         <span id="api-dot" class="status-dot checking"></span>
         <div class="popup-connection-copy">
           <strong id="api-title">Checking connection…</strong>
-          <p id="api-detail">Your conversations stay local.</p>
+          <p id="api-detail">Verifying local AI Memory receiver.</p>
         </div>
-        <button id="retry" class="button-quiet" aria-label="Check connection">↻</button>
+        <button id="open-setup" class="button-chip" hidden>Setup</button>
       </section>
-      <div class="popup-selection">
-        <span id="selection-summary">Projects · Pinned · GPTs & agents</span
-        ><button id="edit-selection" class="button-quiet">Edit selection</button>
-      </div>
-      <div id="providers" class="popup-providers"></div>
+
+      <section class="popup-section">
+        <div class="popup-section-head">
+          <span class="popup-section-title">Web Sources</span>
+          <span id="schedule" class="popup-meta">Checks every 15m</span>
+        </div>
+        <div id="providers" class="popup-providers"></div>
+      </section>
+
+      <section class="popup-section">
+        <div class="popup-section-head">
+          <span id="selection-summary" class="popup-section-title"
+            >Projects · Pinned · GPTs & agents</span
+          >
+          <button id="edit-selection" class="button-quiet">All settings</button>
+        </div>
+        <div id="quick-filters" class="quick-filters" aria-label="Capture categories"></div>
+      </section>
+
       <div class="popup-actions">
-        <button id="sync" class="button-primary" disabled>
-          Connect your computer <span aria-hidden="true">↗</span>
-        </button>
+        <button id="sync" class="button-primary" disabled>Connect your computer</button>
       </div>
       <p id="notice" class="inline-feedback" role="status" aria-live="polite"></p>
+
       <footer class="popup-footer">
-        <span id="recents-note">Ordinary Recents stay out</span
-        ><span id="schedule">Checks every 15 min</span>
+        <span id="recents-note">Ordinary Recents stay out</span>
+        <span>Local SQLite · NotebookLM via CLI</span>
       </footer>
     </main>
     <script src="popup.js" type="module"></script>

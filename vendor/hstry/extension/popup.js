@@ -2,24 +2,81 @@ import {
   DEFAULT_CAPTURE_TYPES,
   DEFAULT_PROVIDER_SETTINGS,
   PROVIDERS,
+  PROVIDER_CAPABILITIES,
+  formatSyncBreakdown,
+  formatTime,
   normalizeSettings,
   providerState,
 } from './ui.js';
 import { connectionPresentation } from './connection-file.js';
+import { PROVIDER_ICONS, UI_ICONS } from './icons.js';
 
 const DEFAULTS = {
   port: 41770,
   token: '',
+  account: 'browser-local',
   intervalMinutes: 15,
   providers: DEFAULT_PROVIDER_SETTINGS,
   captureTypes: DEFAULT_CAPTURE_TYPES,
 };
 const el = (id) => document.getElementById(id);
-const marks = { chatgpt: '◎', claude: '✳︎', gemini: '✦' };
+const filterLabels = {
+  projects: 'Projects',
+  pinned: 'Pinned',
+  agents: 'GPTs & agents',
+  recents: 'Recents',
+};
+
 let apiConnected = false;
 let current = DEFAULTS;
 let busy = false;
 let connectionCheck = 0;
+
+async function saveSettingsPatch(patch) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const next = normalizeSettings(
+    {
+      ...DEFAULTS,
+      ...settings,
+      ...patch,
+      providers: {
+        ...DEFAULT_PROVIDER_SETTINGS,
+        ...settings.providers,
+        ...(patch.providers ?? {}),
+      },
+      captureTypes: {
+        ...current.captureTypes,
+        ...(patch.captureTypes ?? {}),
+      },
+    },
+    DEFAULTS,
+  );
+  current = next;
+  await chrome.storage.local.set({ settings: next });
+  try {
+    await chrome.runtime.sendMessage({ type: 'settingsChanged' });
+  } catch {
+    // Worker may be waking up.
+  }
+  await render();
+}
+
+function renderFilters() {
+  const container = el('quick-filters');
+  container.replaceChildren();
+  for (const [key, label] of Object.entries(filterLabels)) {
+    const active = Boolean(current.captureTypes[key]);
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `filter-chip${active ? ' active' : ''}${key === 'recents' ? ' is-recents' : ''}`;
+    chip.setAttribute('aria-pressed', String(active));
+    chip.textContent = label;
+    chip.addEventListener('click', () => {
+      saveSettingsPatch({ captureTypes: { [key]: !active } });
+    });
+    container.appendChild(chip);
+  }
+}
 
 async function render() {
   const { settings = {}, status = {} } = await chrome.storage.local.get(['settings', 'status']);
@@ -31,48 +88,158 @@ async function render() {
     },
     DEFAULTS,
   );
-  const names = {
-    projects: 'Projects',
-    pinned: 'Pinned',
-    agents: 'GPTs & agents',
-    recents: 'Recents',
-  };
+
   el('selection-summary').textContent =
     Object.entries(current.captureTypes)
       .filter(([, value]) => value)
-      .map(([key]) => names[key])
+      .map(([key]) => filterLabels[key])
       .join(' · ') || 'No chat types selected';
   el('recents-note').textContent = current.captureTypes.recents
     ? 'Ordinary Recents included'
     : 'Ordinary Recents stay out';
-  el('schedule').textContent = `Checks every ${current.intervalMinutes} min`;
-  el('providers').replaceChildren();
+  el('schedule').textContent = `Every ${current.intervalMinutes}m`;
+
+  renderFilters();
+
+  const providersBox = el('providers');
+  providersBox.replaceChildren();
+  let anyRunning = false;
+
   for (const [id, provider] of Object.entries(PROVIDERS)) {
-    const state = providerState(status[id], current.providers[id], {
+    const entry = status[id];
+    const enabled = Boolean(current.providers[id]);
+    const state = providerState(entry, enabled, {
       apiConnected,
       captureTypes: current.captureTypes,
       providerId: id,
     });
-    const row = document.createElement('article');
-    row.className = 'popup-provider';
-    row.innerHTML = `<span class="provider-mark ${id}" aria-hidden="true">${marks[id]}</span><div class="popup-provider-copy"><h2>${provider.name}</h2><p></p></div><span class="status-dot ${state.tone}"></span>`;
-    row.querySelector('p').textContent =
-      state.label === 'Off' ? 'Off · enable in settings' : state.detail;
-    if (state.tone === 'error') row.querySelector('p').className = 'error-copy';
-    if (state.tone === 'warning') row.querySelector('p').className = 'warning-copy';
-    el('providers').appendChild(row);
+    if (entry?.running) anyRunning = true;
+    const caps = PROVIDER_CAPABILITIES[id];
+    const breakdown = formatSyncBreakdown(entry);
+    const hasTypes = Object.values(current.captureTypes).some(Boolean);
+    const canSyncSingle =
+      enabled &&
+      apiConnected &&
+      hasTypes &&
+      !entry?.running &&
+      !(id === 'gemini' && !current.captureTypes.recents);
+
+    const card = document.createElement('article');
+    card.className = `popup-provider${enabled ? '' : ' is-off'}`;
+
+    const top = document.createElement('div');
+    top.className = 'popup-provider-top';
+    top.innerHTML = `
+      <span class="provider-mark ${id}" aria-hidden="true">${PROVIDER_ICONS[id]}</span>
+      <div class="popup-provider-copy">
+        <div class="popup-provider-title">
+          <h2>${provider.name}</h2>
+          <span class="status-dot ${state.tone}" title="${state.label}"></span>
+          <span class="popup-state-label ${state.tone}">${state.label}</span>
+        </div>
+        <p class="popup-provider-detail"></p>
+      </div>
+      <label class="switch switch-sm" title="Enable ${provider.name}">
+        <input type="checkbox" aria-label="Enable ${provider.name}" />
+      </label>
+    `;
+
+    const detailEl = top.querySelector('.popup-provider-detail');
+    detailEl.textContent = enabled ? state.detail : `${provider.site} · Off`;
+    if (state.tone === 'error') detailEl.classList.add('error-copy');
+    if (state.tone === 'warning') detailEl.classList.add('warning-copy');
+
+    const toggle = top.querySelector('input');
+    toggle.checked = enabled;
+    toggle.addEventListener('change', () => {
+      saveSettingsPatch({ providers: { [id]: toggle.checked } });
+    });
+
+    card.appendChild(top);
+
+    if (enabled && entry?.running) {
+      const bar = document.createElement('div');
+      bar.className = `progress-track${breakdown.percent === null ? ' indeterminate' : ''}`;
+      const fill = document.createElement('div');
+      fill.className = 'progress-fill';
+      if (breakdown.percent !== null) fill.style.width = `${breakdown.percent}%`;
+      bar.appendChild(fill);
+      card.appendChild(bar);
+    }
+
+    const showMetaRow =
+      enabled &&
+      (entry?.lastRunMs ||
+        breakdown.chips.length > 0 ||
+        canSyncSingle ||
+        entry?.lastErrorCode === 'not_logged_in');
+    if (showMetaRow) {
+      const meta = document.createElement('div');
+      meta.className = 'popup-provider-meta';
+
+      const left = document.createElement('div');
+      left.className = 'popup-meta-chips';
+      if (entry?.lastRunMs && !entry?.running) {
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'meta-time';
+        timeSpan.textContent = formatTime(entry.lastSuccessMs ?? entry.lastRunMs);
+        left.appendChild(timeSpan);
+      }
+      for (const chip of breakdown.chips.slice(0, 2)) {
+        const badge = document.createElement('span');
+        badge.className = `mini-chip ${chip.tone}`;
+        badge.textContent = chip.label;
+        left.appendChild(badge);
+      }
+      meta.appendChild(left);
+
+      const actions = document.createElement('div');
+      actions.className = 'popup-meta-actions';
+      if (entry?.lastErrorCode === 'not_logged_in' && caps?.loginUrl) {
+        const link = document.createElement('a');
+        link.className = 'mini-action';
+        link.href = caps.loginUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.innerHTML = `Open site ${UI_ICONS.external}`;
+        actions.appendChild(link);
+      } else if (canSyncSingle) {
+        const syncBtn = document.createElement('button');
+        syncBtn.type = 'button';
+        syncBtn.className = 'mini-action';
+        syncBtn.innerHTML = `${UI_ICONS.play} Sync`;
+        syncBtn.addEventListener('click', async () => {
+          el('notice').textContent = '';
+          const res = await chrome.runtime.sendMessage({ type: 'syncProvider', provider: id });
+          el('notice').textContent = res?.ok
+            ? `Syncing ${provider.name}…`
+            : (res?.error ?? 'Could not start sync.');
+        });
+        actions.appendChild(syncBtn);
+      }
+      meta.appendChild(actions);
+      card.appendChild(meta);
+    }
+
+    providersBox.appendChild(card);
   }
-  const selected =
-    Object.values(current.providers).some(Boolean) &&
-    Object.values(current.captureTypes).some(Boolean);
-  el('sync').textContent = busy
-    ? 'Starting capture…'
-    : !apiConnected
-      ? 'Connect your computer'
-      : selected
-        ? 'Capture selected chats'
-        : 'Choose what to capture';
-  el('sync').disabled = busy;
+
+  const hasProviders = Object.values(current.providers).some(Boolean);
+  const hasTypes = Object.values(current.captureTypes).some(Boolean);
+  const selected = hasProviders && hasTypes;
+  const syncBtn = el('sync');
+  if (busy || anyRunning) {
+    syncBtn.innerHTML = `${UI_ICONS.refresh} ${busy ? 'Starting capture…' : 'Syncing in background…'}`;
+  } else if (!apiConnected) {
+    syncBtn.innerHTML = `Connect your computer ${UI_ICONS.arrowRight}`;
+  } else if (!hasProviders) {
+    syncBtn.textContent = 'Turn on a web source above';
+  } else if (!hasTypes) {
+    syncBtn.textContent = 'Choose at least one chat type';
+  } else {
+    syncBtn.innerHTML = `${UI_ICONS.play} Capture selected chats`;
+  }
+  syncBtn.disabled = busy;
 }
 
 async function checkApi() {
@@ -96,9 +263,11 @@ async function checkApi() {
   const state = connectionPresentation(result);
   el('api-title').textContent = apiConnected ? 'Connected to your computer' : state.label;
   el('api-detail').textContent = apiConnected
-    ? 'Your selected chats stay on this computer.'
+    ? `Local receiver active · 127.0.0.1:${current.port}`
     : state.detail;
   el('api-dot').className = `status-dot ${state.tone}`;
+  el('connection-banner').className = `popup-connection is-${apiConnected ? 'connected' : state.tone}`;
+  el('open-setup').hidden = apiConnected;
   el('retry').disabled = false;
   await render();
   return apiConnected;
@@ -119,7 +288,7 @@ el('sync').addEventListener('click', async () => {
     const result = await chrome.runtime.sendMessage({ type: 'syncNow' });
     el('notice').textContent = result?.ok
       ? 'Capturing your selection. You can close this popup.'
-      : 'Could not start. Check your connection in settings.';
+      : (result?.error ?? 'Could not start. Check your connection in settings.');
   } catch {
     el('notice').textContent = 'Check your connection in settings and try again.';
   } finally {
@@ -127,9 +296,12 @@ el('sync').addEventListener('click', async () => {
     await render();
   }
 });
-for (const id of ['settings', 'edit-selection'])
-  el(id).addEventListener('click', () => chrome.runtime.openOptionsPage());
+
+for (const id of ['settings', 'edit-selection', 'open-setup']) {
+  el(id)?.addEventListener('click', () => chrome.runtime.openOptionsPage());
+}
 el('retry').addEventListener('click', checkApi);
+
 chrome.storage.onChanged.addListener(async (changes) => {
   const previous = { port: current.port, token: current.token };
   const values = changes.settings?.newValue;
@@ -142,5 +314,6 @@ chrome.storage.onChanged.addListener(async (changes) => {
   if (changes.status || changes.settings) await render();
   if (authChanged) await checkApi();
 });
+
 await render();
 await checkApi();

@@ -17,8 +17,10 @@ const DEFAULT_SETTINGS = {
 
 const ALARM_NAME = 'hstry-sync';
 const CONTINUE_ALARM_PREFIX = 'hstry-sync-continue-';
+const MAX_ACTIVITY_LOG = 12;
 const activeProviders = new Set();
 let statusWriteQueue = Promise.resolve();
+let activityWriteQueue = Promise.resolve();
 let captureEpoch = 0;
 let captureKey = null;
 
@@ -73,6 +75,18 @@ function setStatusEntry(name, entry) {
   return statusWriteQueue;
 }
 
+function appendActivityLog(record) {
+  activityWriteQueue = activityWriteQueue
+    .then(async () => {
+      const data = await chrome.storage.local.get('activityLog');
+      const existing = Array.isArray(data?.activityLog) ? data.activityLog : [];
+      const next = [record, ...existing].slice(0, MAX_ACTIVITY_LOG);
+      await chrome.storage.local.set({ activityLog: next });
+    })
+    .catch(() => {});
+  return activityWriteQueue;
+}
+
 async function clearInterruptedRuns() {
   const status = await getStatus();
   let changed = false;
@@ -80,6 +94,7 @@ async function clearInterruptedRuns() {
     if (!entry?.running) continue;
     entry.running = false;
     entry.lastError = 'Previous sync was interrupted. Run it again.';
+    entry.lastErrorCode = 'interrupted';
     entry.progress = { ...entry.progress, phase: 'failed' };
     changed = true;
   }
@@ -169,12 +184,17 @@ function localError(code) {
 function safeSyncFailure(error) {
   if (Object.hasOwn(LOCAL_ERRORS, error?.code))
     return { code: error.code, error: LOCAL_ERRORS[error.code] };
-  if (error instanceof NotLoggedInError)
+  if (error instanceof NotLoggedInError || error?.name === 'NotLoggedInError')
     return { code: 'not_logged_in', error: 'Open this provider and sign in, then sync again.' };
-  if (error instanceof RateLimitedError)
+  if (error instanceof RateLimitedError || error?.name === 'RateLimitedError')
     return {
       code: 'rate_limited',
       error: 'This provider is busy. Wait a few minutes and try again.',
+    };
+  if (error instanceof TypeError && /fetch|network/i.test(error.message))
+    return {
+      code: 'network_error',
+      error: 'Could not reach the provider website. Check your internet connection and retry.',
     };
   return {
     code: 'provider_error',
@@ -226,6 +246,7 @@ async function runSync(
         : 'Choose a provider in settings before syncing.',
     };
   for (const [name] of selected) activeProviders.add(name);
+  await chrome.action.setBadgeBackgroundColor({ color: '#007aff' });
   await chrome.action.setBadgeText({ text: '…' });
 
   // Verify local credentials before any provider makes remote account or chat reads.
@@ -260,6 +281,7 @@ async function runSync(
   let startedReported = false;
   await Promise.all(
     selected.map(async ([name, provider]) => {
+      const startedAt = Date.now();
       const policyChanged =
         !status[name]?.capturePolicy ||
         JSON.stringify(status[name].capturePolicy) !== JSON.stringify(settings.captureTypes);
@@ -271,7 +293,7 @@ async function runSync(
           : {}),
         capturePolicy: { ...settings.captureTypes },
         continuationPending: false,
-        lastRunMs: Date.now(),
+        lastRunMs: startedAt,
         trigger,
         running: true,
         progress: {
@@ -331,6 +353,7 @@ async function runSync(
         entry.lastCount = result.conversations;
         entry.lastError = null;
         entry.lastErrorCode = null;
+        entry.durationMs = Math.max(0, Date.now() - startedAt);
         entry.running = false;
         entry.continuationPending = Boolean(result.hasMore);
         entry.progress = {
@@ -340,17 +363,52 @@ async function runSync(
           selectionWarning: entry.selectionWarning,
         };
         if (result.hasMore) await scheduleContinuation(name);
+        await appendActivityLog({
+          id: `${name}-${startedAt}`,
+          timestampMs: Date.now(),
+          provider: name,
+          trigger,
+          outcome: result.hasMore ? 'queued' : entry.selectionWarning ? 'warning' : 'success',
+          errorCode: null,
+          durationMs: entry.durationMs,
+          counts: {
+            detected: entry.progress.detected ?? 0,
+            processed: entry.progress.processed ?? 0,
+            created: entry.progress.created ?? 0,
+            updated: entry.progress.updated ?? 0,
+            skipped: entry.selection?.skipped ?? 0,
+            unknown: entry.selection?.unknown ?? 0,
+          },
+        });
       } catch (err) {
         anyError = true;
         const failure = safeSyncFailure(err);
         entry.lastError = failure.error;
         entry.lastErrorCode = failure.code;
+        entry.durationMs = Math.max(0, Date.now() - startedAt);
         entry.running = false;
         entry.continuationPending = false;
         entry.progress = {
           ...entry.progress,
           phase: failure.code === 'selection_changed' ? 'cancelled' : 'failed',
         };
+        await appendActivityLog({
+          id: `${name}-${startedAt}`,
+          timestampMs: Date.now(),
+          provider: name,
+          trigger,
+          outcome: failure.code === 'selection_changed' ? 'cancelled' : 'error',
+          errorCode: failure.code,
+          durationMs: entry.durationMs,
+          counts: {
+            detected: entry.progress.detected ?? 0,
+            processed: entry.progress.processed ?? 0,
+            created: entry.progress.created ?? 0,
+            updated: entry.progress.updated ?? 0,
+            skipped: entry.selection?.skipped ?? 0,
+            unknown: entry.selection?.unknown ?? 0,
+          },
+        });
       } finally {
         activeProviders.delete(name);
         await setStatusEntry(name, entry);
@@ -410,6 +468,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     start('manual');
     return true;
   }
+  if (message?.type === 'syncProvider') {
+    const providerName = message.provider;
+    if (!Object.hasOwn(PROVIDERS, providerName)) {
+      sendResponse({ ok: false, error: 'Unknown provider' });
+      return false;
+    }
+    start('manual', { onlyProvider: providerName, full: false });
+    return true;
+  }
   if (message?.type === 'fullSyncProvider') {
     const providerName = message.provider;
     if (!Object.hasOwn(PROVIDERS, providerName)) {
@@ -449,6 +516,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then(([, sources]) => {
         sendResponse({ ok: true, sources });
       });
+    return true;
+  }
+  if (message?.type === 'clearActivityLog') {
+    chrome.storage.local.set({ activityLog: [] }).then(() => sendResponse({ ok: true }));
     return true;
   }
   if (message?.type === 'checkApi') {
