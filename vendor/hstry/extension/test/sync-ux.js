@@ -237,4 +237,6 @@ for (let i = 0; i < 50 && !popupSent.includes('settingsChanged'); i++) {
 assert.equal(settings.captureTypes.recents, true);
 assert.ok(popupSent.includes('settingsChanged'));
 
-console.log('PASS web sync UX: offline recovery, capability plans, single-provider sync, safe log, popup controls');
+console.log(
+  'PASS web sync UX: offline recovery, capability plans, single-provider sync, safe log, popup controls',
+);

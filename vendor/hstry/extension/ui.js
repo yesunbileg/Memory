@@ -294,7 +294,8 @@ export function formatSyncBreakdown(entry) {
   const progress = entry.progress ?? {};
   const selection = entry.selection ?? {};
   const chips = [];
-  if ((progress.created ?? 0) > 0) chips.push({ label: `+${progress.created} new`, tone: 'success' });
+  if ((progress.created ?? 0) > 0)
+    chips.push({ label: `+${progress.created} new`, tone: 'success' });
   if ((progress.updated ?? 0) > 0)
     chips.push({ label: `${progress.updated} updated`, tone: 'info' });
   if ((selection.skipped ?? 0) > 0)

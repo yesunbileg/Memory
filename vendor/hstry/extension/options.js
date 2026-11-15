@@ -220,7 +220,8 @@ function renderActivityLog(entries) {
     right.className = 'log-meta';
     const pill = document.createElement('span');
     pill.className = `mini-chip ${outcomeTone}`;
-    pill.textContent = run.trigger === 'alarm' ? 'Auto' : run.trigger === 'full' ? 'Rescan' : 'Sync';
+    pill.textContent =
+      run.trigger === 'alarm' ? 'Auto' : run.trigger === 'full' ? 'Rescan' : 'Sync';
     const time = document.createElement('span');
     time.className = 'log-time';
     time.textContent = formatTime(run.timestampMs);

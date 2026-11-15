@@ -266,7 +266,8 @@ async function checkApi() {
     ? `Local receiver active · 127.0.0.1:${current.port}`
     : state.detail;
   el('api-dot').className = `status-dot ${state.tone}`;
-  el('connection-banner').className = `popup-connection is-${apiConnected ? 'connected' : state.tone}`;
+  el('connection-banner').className =
+    `popup-connection is-${apiConnected ? 'connected' : state.tone}`;
   el('open-setup').hidden = apiConnected;
   el('retry').disabled = false;
   await render();
