@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .diagnostics import failure_code
+from .notebook import NotebookLMError
 from .privacy import find_sensitive, redact_sensitive
 from .segments import CapacityError, SegmentBuilder, SourceBudgetError
 from .store import Store, digest
@@ -171,6 +172,12 @@ class SyncEngine:
 
         if current and current["revision"] != job["revision"]:
             if unresolved_uploading:
+                # An unchanged, already-safe immutable snapshot can take the same
+                # reconciliation/retry path as a current uploading revision. Do
+                # not discard an uncertain registration, or reconstruct old text
+                # from the edited archive. Legacy raw uploads remain unresolved.
+                if redact_sensitive(original) == original:
+                    return False
                 raise SnapshotError("Stale in-flight upload cannot be reconciled yet")
             if not self._carry_old_sources(job["segment_id"], old_ids):
                 raise SnapshotError("Stale upload has no active replacement for source cleanup")
@@ -310,6 +317,61 @@ class SyncEngine:
             )
         ]
 
+    def _repair_missing_mapping(self, mapping):
+        """Requeue a confirmed absent/failed source without losing cleanup IDs."""
+        db = self.store.connection
+        with db:
+            db.execute("DELETE FROM source_map WHERE source_id=?", (mapping["source_id"],))
+            job = db.execute(
+                "SELECT * FROM sync_jobs WHERE segment_id=? AND new_source_id=?",
+                (mapping["segment_id"], mapping["source_id"]),
+            ).fetchone()
+            if job:
+                db.execute(
+                    """UPDATE sync_jobs SET stage='pending',new_source_id=NULL,
+                    error=NULL,next_attempt=0,attempts=0 WHERE id=?""",
+                    (job["id"],),
+                )
+        self._enqueue()
+        # Keep the absent ID as an obligation if it later becomes visible again.
+        self._carry_old_sources(mapping["segment_id"], [mapping["source_id"]])
+
+    async def _reconcile_mapped_sources(self):
+        mappings = self.store.connection.execute(
+            "SELECT * FROM source_map ORDER BY segment_id"
+        ).fetchall()
+        if not mappings:
+            return
+        # An inventory exception is unknown state, never proof of absence.
+        sources = {source["id"]: source for source in await self.adapter.list_sources()}
+        for mapping in mappings:
+            source = sources.get(mapping["source_id"])
+            if source is None:
+                self._repair_missing_mapping(mapping)
+            elif source.get("ready") is not True:
+                # Readiness retries belong to the persistent queue, including
+                # their backoff. A finished mapping may need checking again even
+                # though its upload-only snapshot was already removed.
+                db = self.store.connection
+                with db:
+                    db.execute(
+                        """INSERT OR IGNORE INTO sync_jobs
+                        (segment_id,revision,title,stage,new_source_id)
+                        VALUES(?,?,?,'cleanup',?)""",
+                        (
+                            mapping["segment_id"],
+                            mapping["revision"],
+                            f"{mapping['segment_id']}-r{mapping['revision']}-check.md",
+                            mapping["source_id"],
+                        ),
+                    )
+                    db.execute(
+                        """UPDATE sync_jobs SET stage='cleanup',new_source_id=?,
+                        error=NULL,attempts=0,next_attempt=0
+                        WHERE segment_id=? AND revision=? AND stage='done'""",
+                        (mapping["source_id"], mapping["segment_id"], mapping["revision"]),
+                    )
+
     async def _process(self, job):
         db = self.store.connection
         job = dict(job)
@@ -351,11 +413,12 @@ class SyncEngine:
                 expected = f"{job['segment_id']}-r{job['revision']}-{digest(text)[:16]}.md"
                 if expected != job["title"] or len(text.split()) > 500_000:
                     raise SnapshotError("Pending snapshot differs from its validated revision")
-                _, expected_text, expected_title = self._prepare_snapshot(
-                    job["segment_id"], job["revision"]
-                )
-                if text != expected_text or job["title"] != expected_title:
-                    raise SnapshotError("Pending snapshot differs from its validated revision")
+                if not (job["stage"] == "uploading" and current["revision"] != job["revision"]):
+                    _, expected_text, expected_title = self._prepare_snapshot(
+                        job["segment_id"], job["revision"]
+                    )
+                    if text != expected_text or job["title"] != expected_title:
+                        raise SnapshotError("Pending snapshot differs from its validated revision")
                 if redact_sensitive(text) != text:
                     raise SnapshotError("Pending snapshot is not redacted")
                 if find_sensitive(text):
@@ -439,8 +502,26 @@ class SyncEngine:
                     "UPDATE sync_jobs SET stage='cleanup',error=NULL WHERE id=?", (job["id"],)
                 )
         old_ids = json.loads(job["old_source_ids"])
+        sources = {s["id"]: s for s in await self.adapter.list_sources()}
+        replacement = sources.get(job["new_source_id"])
+        if replacement is None:
+            self._repair_missing_mapping(
+                {"segment_id": job["segment_id"], "source_id": job["new_source_id"]}
+            )
+            raise SnapshotError("Replacement missing; predecessors retained for repair")
+        if replacement.get("ready") is not True:
+            try:
+                await self.adapter.wait_ready(job["new_source_id"])
+            except Exception as exc:
+                if failure_code(exc) == "processing_failed":
+                    # A confirmed failed replacement is not a valid mapping.
+                    # Retain it and every predecessor until a new source is ready.
+                    self._repair_missing_mapping(
+                        {"segment_id": job["segment_id"], "source_id": job["new_source_id"]}
+                    )
+                raise
         if old_ids:
-            present = {s["id"] for s in await self.adapter.list_sources()}
+            present = set(sources)
             for old_id in old_ids:
                 if old_id == job["new_source_id"]:
                     continue
@@ -545,10 +626,16 @@ class SyncEngine:
                 result["status"] = self.store.status()
                 return result
             try:
+                await self._reconcile_mapped_sources()
                 self._enqueue()
             except SnapshotError:
                 result["blocked"].append({"reason": "SnapshotError"})
                 result["status"] = self.store.status()
+                return result
+            except (NotebookLMError, ConnectionError, TimeoutError) as exc:
+                result["blocked"].append({"reason": failure_code(exc)})
+                result["status"] = self.store.status()
+                result["status"]["sync_status"] = "pending"
                 return result
             drained = await self._drain(result)
             if drained in {"complete", "merge"}:
@@ -560,7 +647,7 @@ class SyncEngine:
                     and status["segments"] >= self.builder.max_active
                 ):
                     try:
-                        self.builder.merge_oldest()
+                        self.builder.merge_oldest(include_open=drained == "merge")
                         self._enqueue()
                         if await self._drain(result) == "complete":
                             self.builder.build()

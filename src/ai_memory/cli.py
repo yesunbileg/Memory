@@ -319,6 +319,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if (
             "error" in result
+            or (args.command == "check" and not result.get("notebook", {}).get("connected"))
             or result.get("blocked")
             or result.get("failed_files")
             or result.get("status", {}).get("sync_status") == "pending"

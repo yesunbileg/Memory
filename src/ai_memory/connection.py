@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 import secrets
+import sqlite3
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -209,12 +210,20 @@ def check_running_receiver(port: int, token: str, db_path: Path) -> str:
             return "incompatible"
         if not isinstance(data.get("archive_id"), str):
             return "incompatible"
+        if not hmac.compare_digest(data["archive_id"], archive_identity(db_path)):
+            return "different_archive"
+        if not isinstance(data.get("archive_instance_id"), str):
+            return "incompatible"
+        from .store import Store
+
+        with Store(db_path) as store:
+            expected_instance = store.archive_instance_id()
         return (
             "ok"
-            if hmac.compare_digest(data["archive_id"], archive_identity(db_path))
+            if hmac.compare_digest(data["archive_instance_id"], expected_instance)
             else "different_archive"
         )
-    except (OSError, ValueError, http.client.HTTPException):
+    except (OSError, ValueError, sqlite3.Error, http.client.HTTPException):
         return "incompatible"
     finally:
         connection.close()

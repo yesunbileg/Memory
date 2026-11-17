@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -99,6 +100,15 @@ class Store:
         elif version != 1:
             self.close()
             raise ValueError("Unsupported archive schema")
+
+    def archive_instance_id(self) -> str:
+        """Persist a logical archive identity, independent of its filesystem location."""
+        with self.connection:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO settings(key,value) VALUES('archive_instance_id',?)",
+                (json.dumps(uuid.uuid4().hex),),
+            )
+        return self.get_setting("archive_instance_id")
 
     def close(self):
         self.connection.close()

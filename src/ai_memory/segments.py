@@ -206,13 +206,17 @@ class SegmentBuilder:
                     )
         return changed
 
-    def merge_oldest(self) -> str:
+    def merge_oldest(self, *, include_open=False) -> str:
         db = self.store.connection
         with db:
             # A newly created merge occupies its parents' chronological position.
-            candidates = db.execute("""SELECT s.*,MIN(m.rowid) AS first_position FROM segments s
+            candidates = db.execute(
+                """SELECT s.*,MIN(m.rowid) AS first_position FROM segments s
                 JOIN segment_messages sm ON s.id=sm.segment_id JOIN messages m ON m.id=sm.message_id
-                WHERE s.state='sealed' GROUP BY s.id ORDER BY first_position""").fetchall()
+                WHERE s.state='sealed' OR (? AND s.state='open')
+                GROUP BY s.id ORDER BY first_position""",
+                (include_open,),
+            ).fetchall()
             for start in range(len(candidates)):
                 window, total = [], 0
                 for c in candidates[start : start + 3]:

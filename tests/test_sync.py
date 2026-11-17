@@ -792,3 +792,234 @@ async def test_auth_failure_has_safe_status_retry_and_rate_limited_log(tmp_path,
         assert len(caplog.records) == 1
         assert "auth_required" in caplog.text and "retry" in caplog.text
         assert "Эх текст" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_unregistered_upload_then_edit_recovers_without_losing_revision(tmp_path):
+    with Store(tmp_path / "db") as store:
+        c = conversation()
+        c["messages"][0]["text"] = "old exact content"
+        store.ingest(c, consent=True)
+        remote = Remote()
+        remote.fail_upload = True
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        first = store.connection.execute("SELECT * FROM sync_jobs").fetchone()
+        assert first["stage"] == "uploading" and not remote.sources
+        c["messages"][0]["text"] = "new exact content"
+        store.ingest(c)
+        remote.fail_upload = False
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        assert not result["blocked"]
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 1
+        assert "new exact content\n" in next(iter(remote.sources.values()))["text"]
+        assert [
+            r[0] for r in store.connection.execute("SELECT stage FROM sync_jobs ORDER BY id")
+        ] == ["done", "done"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_state", ["missing", "failed", "unknown"])
+async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
+    tmp_path, replacement_state
+):
+    from ai_memory.notebook import NotebookLMError
+
+    class UnreadyRemote(Remote):
+        rejected_id = None
+
+        async def wait_ready(self, source_id):
+            if source_id == self.rejected_id:
+                code = "processing_failed" if replacement_state == "failed" else "not_ready"
+                raise NotebookLMError("Synthetic readiness failure", code)
+            await super().wait_ready(source_id)
+
+    with Store(tmp_path / "db") as store:
+        c = conversation()
+        store.ingest(c, consent=True)
+        remote = UnreadyRemote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        predecessor = next(iter(remote.sources))
+        c["messages"][0]["text"] = "replacement exact text"
+        store.ingest(c)
+        remote.fail_delete = True
+        await engine.run_once()
+        job = store.connection.execute("SELECT * FROM sync_jobs ORDER BY id DESC").fetchone()
+        replacement = job["new_source_id"]
+        assert job["stage"] == "cleanup"
+        if replacement_state == "missing":
+            del remote.sources[replacement]
+        else:
+            remote.sources[replacement]["ready"] = False
+            remote.rejected_id = replacement
+        remote.fail_delete = False
+        before = len(remote.operations)
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        if replacement_state == "missing" and predecessor not in remote.sources:
+            # A repaired replacement may authorize cleanup, but only after ready.
+            repaired = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
+            assert repaired in remote.sources and remote.sources[repaired]["ready"]
+            operations = remote.operations[before:]
+            assert operations.index(("ready", repaired)) < operations.index(("delete", predecessor))
+        else:
+            assert predecessor in remote.sources
+            assert result["status"]["sync_status"] == "pending"
+            if replacement_state == "failed":
+                with store.connection:
+                    store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+                recovered = await engine.run_once()
+                assert not recovered["blocked"]
+                assert recovered["status"]["sync_status"] == "up_to_date"
+                repaired = store.connection.execute("SELECT source_id FROM source_map").fetchone()[
+                    0
+                ]
+                assert repaired not in {predecessor, replacement}
+                assert set(remote.sources) == {repaired}
+                operations = remote.operations[before:]
+                assert operations.index(("ready", repaired)) < operations.index(
+                    ("delete", predecessor)
+                )
+
+
+@pytest.mark.asyncio
+async def test_missing_current_managed_source_is_repaired_by_identity(tmp_path):
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        remote = Remote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        lost = next(iter(remote.sources))
+        del remote.sources[lost]
+        remote.sources["foreign"] = {"title": "Foreign", "ready": True, "text": "untouched"}
+        result = await engine.run_once()
+        assert not result["blocked"]
+        mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
+        assert mapped != lost and mapped in remote.sources
+        assert "foreign" in remote.sources
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert store.connection.execute("SELECT revision FROM segments").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_inventory_failure_is_unknown_and_preserves_current_mapping(tmp_path):
+    class InventoryRemote(Remote):
+        offline = False
+
+        async def list_sources(self):
+            if self.offline:
+                raise ConnectionError("Synthetic inventory failure")
+            return await super().list_sources()
+
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        remote = InventoryRemote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
+        remote.offline = True
+        result = await engine.run_once()
+        assert result["blocked"]
+        assert result["status"]["sync_status"] == "pending"
+        assert store.connection.execute("SELECT source_id FROM source_map").fetchone()[0] == mapped
+        assert mapped in remote.sources
+
+
+@pytest.mark.asyncio
+async def test_foreign_capacity_compacts_open_tail_and_preserves_exact_text(tmp_path):
+    with Store(tmp_path / "db") as store:
+        for n in range(2):
+            c = conversation(external_id=f"tiny-{n}")
+            c["messages"][0]["text"] = f"exact text {n}"
+            store.ingest(c, consent=True)
+        remote = Remote()
+        foreign = {f"foreign-{n}" for n in range(48)}
+        remote.sources.update({sid: {"title": sid, "ready": True, "text": sid} for sid in foreign})
+        builder = SegmentBuilder(store, target_words=3, max_words=20)
+        engine = SyncEngine(store, builder, remote, tmp_path / "md")
+        result = await engine.run_once()
+        assert not result["blocked"]
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 49 and remote.peak_sources <= 50
+        assert foreign <= set(remote.sources)
+        managed = [source for sid, source in remote.sources.items() if sid not in foreign]
+        assert len(managed) == 1
+        assert "exact text 0\n" in managed[0]["text"]
+        assert "exact text 1\n" in managed[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_missing_cleanup_replacement_after_another_edit_transfers_obligations(tmp_path):
+    with Store(tmp_path / "db") as store:
+        c = conversation()
+        store.ingest(c, consent=True)
+        remote = Remote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        predecessor = next(iter(remote.sources))
+        c["messages"][0]["text"] = "first replacement"
+        store.ingest(c)
+        remote.fail_delete = True
+        await engine.run_once()
+        replacement = store.connection.execute(
+            "SELECT new_source_id FROM sync_jobs WHERE stage='cleanup'"
+        ).fetchone()[0]
+        del remote.sources[replacement]
+        c["messages"][0]["text"] = "newest replacement exact text"
+        store.ingest(c)
+        remote.fail_delete = False
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        assert not result["blocked"]
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 1
+        assert predecessor not in remote.sources
+        assert "newest replacement exact text\n" in next(iter(remote.sources.values()))["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["processing_failed", "not_ready"])
+async def test_unready_current_mapping_uses_queue_backoff_and_can_recover(tmp_path, code):
+    from ai_memory.notebook import NotebookLMError
+
+    class ReadinessRemote(Remote):
+        rejected_id = None
+        checks = 0
+
+        async def wait_ready(self, source_id):
+            if source_id == self.rejected_id:
+                self.checks += 1
+                raise NotebookLMError("Synthetic source not ready", code)
+            await super().wait_ready(source_id)
+
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        remote = ReadinessRemote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        await engine.run_once()
+        source_id = next(iter(remote.sources))
+        remote.rejected_id = source_id
+        remote.sources[source_id]["ready"] = False
+        result = await engine.run_once()
+        assert result["blocked"]
+        job = store.connection.execute("SELECT * FROM sync_jobs").fetchone()
+        assert job["stage"] != "done" and job["next_attempt"] > time.time()
+        await engine.run_once()
+        assert remote.checks == 1
+        assert source_id in remote.sources
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        if code == "not_ready":
+            remote.rejected_id = None
+        result = await engine.run_once()
+        assert not result["blocked"]
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 1
+        if code == "processing_failed":
+            assert source_id not in remote.sources

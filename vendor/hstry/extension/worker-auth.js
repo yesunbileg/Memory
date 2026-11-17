@@ -61,5 +61,10 @@ export async function checkConnection(settings, { fetchImpl = globalThis.fetch }
       error: 'This port is not a compatible AI Memory receiver. Run ai-memory connect.',
     };
   }
-  return { ok: true, url };
+  // Legacy probes remain recognizable, but capture requires a logical archive identity.
+  const archiveId =
+    typeof data.archive_instance_id === 'string' && data.archive_instance_id
+      ? data.archive_instance_id
+      : null;
+  return { ok: true, url, archiveId };
 }

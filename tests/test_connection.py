@@ -135,4 +135,9 @@ def test_running_receiver_identity_distinguishes_archives_without_exposing_paths
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
-    assert not first.exists() and not second.exists()
+    assert first.exists() and not second.exists()
+    from ai_memory.store import Store
+
+    with Store(first) as store:
+        assert store.archive_instance_id()
+        assert store.connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0

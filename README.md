@@ -65,6 +65,9 @@ uv sync --frozen --extra login
 .venv/bin/ai-memory ask 'Өмнө ямар шийдвэр гаргасан бэ?'
 ```
 
+`ai-memory check` returns zero only when the configured NotebookLM connection
+succeeds. Local-only `ai-memory status` does not require authentication.
+
 Replace `brave` with `chrome` or `firefox` for those browsers. For a specific Brave profile, use `--browser-cookies 'brave::Profile 1'`; for multiple signed-in Google accounts, add `--account YOUR_EMAIL`. Run this on the same computer and as the same operating-system user as the signed-in browser; a cloud host cannot read your laptop's browser profile. If cookie extraction fails, check the selected profile and desktop keyring access before retrying.
 
 Use the same `NOTEBOOKLM_HOME` for login, the worker, MCP and the demo. If your archive already uses an explicit storage file, pass that file to login with `--storage /private/path/storage_state.json`; configure the archive with `init --storage` only when changing its auth location. Reauthentication does not require a new notebook. To test against Google using **only synthetic data** in a dedicated demo notebook:

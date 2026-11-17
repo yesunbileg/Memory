@@ -3,16 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import tempfile
 from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from notebooklm import NotebookLMClient
+
+
+_private_sdk_call = ContextVar("private_notebooklm_sdk_call", default=False)
+_sdk_log_factory = None
+_sdk_log_namespaces = {"notebooklm", "httpx", "httpcore", "urllib3"}
+
+
+@contextmanager
+def _private_sdk_logging():
+    """Keep raw SDK diagnostics out of every handler during adapter calls."""
+    global _sdk_log_factory
+    previous = logging.getLogRecordFactory()
+    if previous is not _sdk_log_factory:
+
+        def safe_record(*args, **kwargs):
+            record = previous(*args, **kwargs)
+            if _private_sdk_call.get() and record.name.partition(".")[0] in _sdk_log_namespaces:
+                record.msg = "NotebookLM SDK diagnostic withheld."
+                record.args = ()
+                record.exc_info = record.exc_text = record.stack_info = None
+            return record
+
+        # An ancestor logger filter won't run for descendants, and the SDK or
+        # app can attach direct handlers. Strip content before either sees it.
+        _sdk_log_factory = safe_record
+        logging.setLogRecordFactory(safe_record)
+    token = _private_sdk_call.set(True)
+    try:
+        yield
+    finally:
+        _private_sdk_call.reset(token)
 
 
 MEMORY_PROMPT = """Answer the question using the provided NotebookLM sources.
@@ -123,8 +156,9 @@ class NotebookLMAdapter:
         async with self._connect_lock:
             if self._client is None:
                 try:
-                    context = self._factory(self.storage_path)
-                    client = await context.__aenter__()
+                    with _private_sdk_logging():
+                        context = self._factory(self.storage_path)
+                        client = await context.__aenter__()
                 except Exception as error:
                     raise _safe_error(error, loading_auth=True) from None
                 self._context, self._client = context, client
@@ -133,7 +167,8 @@ class NotebookLMAdapter:
     async def list_sources(self) -> list[dict]:
         client = await self._connect()
         try:
-            sources = await client.sources.list(self.notebook_id)
+            with _private_sdk_logging():
+                sources = await client.sources.list(self.notebook_id)
             return [{"id": s.id, "title": s.title, "ready": s.is_ready} for s in sources]
         except Exception as error:
             raise _safe_error(error) from None
@@ -160,12 +195,13 @@ class NotebookLMAdapter:
                 upload_path = Path(directory) / title
                 shutil.copyfile(path, upload_path)
                 upload_path.chmod(0o600)
-                source = await client.sources.add_file(
-                    self.notebook_id,
-                    upload_path,
-                    title=title,
-                    wait=False,
-                )
+                with _private_sdk_logging():
+                    source = await client.sources.add_file(
+                        self.notebook_id,
+                        upload_path,
+                        title=title,
+                        wait=False,
+                    )
             return source.id
         except Exception as error:
             sanitized = _safe_error(error)
@@ -182,7 +218,8 @@ class NotebookLMAdapter:
     async def wait_ready(self, source_id: str) -> None:
         client = await self._connect()
         try:
-            source = await client.sources.wait_until_ready(self.notebook_id, source_id)
+            with _private_sdk_logging():
+                source = await client.sources.wait_until_ready(self.notebook_id, source_id)
             if not source.is_ready:
                 raise NotebookLMError("NotebookLM source is not ready.", "not_ready")
         except NotebookLMError:
@@ -193,7 +230,8 @@ class NotebookLMAdapter:
     async def delete(self, source_id: str) -> None:
         client = await self._connect()
         try:
-            await client.sources.delete(self.notebook_id, source_id)
+            with _private_sdk_logging():
+                await client.sources.delete(self.notebook_id, source_id)
         except Exception as error:
             raise _safe_error(error) from None
 
@@ -206,11 +244,12 @@ class NotebookLMAdapter:
             raise ValueError("Explicit source IDs must contain at least one valid source")
         client = await self._connect()
         try:
-            result = await client.chat.ask(
-                self.notebook_id,
-                MEMORY_PROMPT.format(question=question),
-                source_ids=source_ids,
-            )
+            with _private_sdk_logging():
+                result = await client.chat.ask(
+                    self.notebook_id,
+                    MEMORY_PROMPT.format(question=question),
+                    source_ids=source_ids,
+                )
             return {
                 "answer": result.answer,
                 "references": [
@@ -230,6 +269,7 @@ class NotebookLMAdapter:
             context, self._context, self._client = self._context, None, None
             if context is not None:
                 try:
-                    await context.__aexit__(None, None, None)
+                    with _private_sdk_logging():
+                        await context.__aexit__(None, None, None)
                 except Exception as error:
                     raise _safe_error(error) from None

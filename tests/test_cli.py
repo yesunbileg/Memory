@@ -35,6 +35,51 @@ def test_cli_init_status_and_missing_notebook(tmp_path):
     assert json.loads(result.stdout)["error"]["code"] == "not_configured"
 
 
+@pytest.mark.parametrize(
+    ("configured", "failure", "exit_code"),
+    [
+        (False, None, 1),
+        (True, "auth_required", 1),
+        (True, "network_error", 1),
+        (True, None, 0),
+    ],
+)
+def test_check_exit_reflects_notebook_connectivity(
+    tmp_path, monkeypatch, capsys, configured, failure, exit_code
+):
+    from ai_memory.cli import main
+    from ai_memory.notebook import NotebookLMError
+    from ai_memory.store import Store
+
+    class OfflineNotebook:
+        def __init__(self, notebook_id, storage_path):
+            assert notebook_id == "synthetic-notebook"
+
+        async def list_sources(self):
+            if failure:
+                raise NotebookLMError("Safe failure message", failure)
+            return []
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("ai_memory.gateway.NotebookLMAdapter", OfflineNotebook)
+    db = tmp_path / "archive.sqlite"
+    with Store(db) as store:
+        if configured:
+            store.set_setting("notebook_id", "synthetic-notebook")
+    assert main(["--db", str(db), "status"]) == 0
+    assert "notebook" not in json.loads(capsys.readouterr().out)
+
+    actual_exit = main(["--db", str(db), "check"])
+    notebook = json.loads(capsys.readouterr().out)["notebook"]
+    assert notebook["configured"] is configured
+    assert notebook["connected"] is (configured and not failure)
+    if failure:
+        assert notebook["error"]["code"] == failure
+    assert actual_exit == exit_code
+
+
 def test_cli_real_demo_is_repeatable_and_excludes_hidden_events(tmp_path):
     output = tmp_path / "demo"
     first = run_cli("demo", "--output", output)
@@ -322,4 +367,5 @@ def test_connect_rejects_running_receiver_for_other_database_in_same_directory(t
     assert result.returncode == 1
     assert "different archive" in result.stdout.lower()
     assert not (tmp_path / "extension-connection.json").exists()
-    assert not first.exists() and not second.exists()
+    # The authenticated probe persists only the logical receiver archive identity.
+    assert first.exists() and not second.exists()

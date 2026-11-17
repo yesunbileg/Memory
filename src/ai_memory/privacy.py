@@ -32,6 +32,7 @@ _EXPRESSION_SUFFIX = re.compile(
 _COOKIE_PAIR = re.compile(r"(?P<name>[!#$%&'*+.^_`|~0-9A-Za-z-]+)=(?P<value>[^;\s,\"']+)")
 _STRING_PREFIX = re.compile(r"(?i)(?P<prefix>[rubf]{1,2})(?P<quote>[\"'])")
 _INTERPOLATION = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z_0-9]*|\{\{.*?\}\}")
+_DOTTED_PASSPHRASE = re.compile(r"(?:[A-Z][a-z]+(?:\.[A-Z][a-z]+){2,}|[a-z]+(?:\.[a-z]+){3,})")
 
 
 def _private_key_payload_spans(text: str) -> list[tuple[int, int]]:
@@ -106,8 +107,44 @@ def _cookie_value_spans(text: str, start: int, end: int) -> list[tuple[int, int]
     return [match.span("value") for match in _COOKIE_PAIR.finditer(text, start, end)]
 
 
+def _expression_literal_spans(text: str, start: int) -> list[tuple[int, int]]:
+    """Find top-level literal operands, not function arguments or lookup keys."""
+    spans = []
+    depth = 0
+    cursor = start
+    while cursor < len(text):
+        char = text[cursor]
+        if char in "\r\n;#" or text.startswith("//", cursor):
+            break
+        if char == "," and depth == 0:
+            break
+        prefix = _STRING_PREFIX.match(text, cursor)
+        quoted_start = cursor + len(prefix.group("prefix")) if prefix else cursor
+        quoted = _quoted_value(text, quoted_start) if prefix or char in "\"'`\\" else None
+        if quoted:
+            value_start, value_end, after, _ = quoted
+            value = text[value_start:value_end]
+            interpolated = _INTERPOLATION.search(value) or (
+                prefix
+                and "f" in prefix.group("prefix").casefold()
+                and any(c in "{}" for c in value)
+            )
+            if depth == 0 and value_end > value_start and not interpolated:
+                spans.append((value_start, value_end))
+            cursor = after
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        cursor += 1
+    return spans
+
+
 def _assignment_value_spans(text: str, assignment: re.Match[str]) -> list[tuple[int, int]] | None:
-    """Return credential value spans, or None when the RHS is an expression."""
+    """Return literal spans, None for dynamic values, or [] for review-required RHS."""
     start = assignment.end()
     name = assignment.group("name").casefold().replace("_", "").replace("-", "")
 
@@ -120,16 +157,19 @@ def _assignment_value_spans(text: str, assignment: re.Match[str]) -> list[tuple[
     quoted = _quoted_value(text, start)
     if quoted:
         value_start, value_end, after, delimiter = quoted
+        expression_spans = (
+            _expression_literal_spans(text, after)
+            if _looks_like_expression(text, start, after)
+            else []
+        )
         if (
             prefix
             and "f" in prefix.group("prefix").casefold()
             and any(char in "{}" for char in text[value_start:value_end])
         ):
-            return None
+            return expression_spans or None
         if _INTERPOLATION.search(text, value_start, value_end):
-            return None
-        if _looks_like_expression(text, start, after):
-            return None
+            return expression_spans or None
         if name == "authorization":
             bearer = re.match(r"(?i)(?:Bearer|Basic|Token)\s+", text[value_start:value_end])
             if bearer:
@@ -138,7 +178,7 @@ def _assignment_value_spans(text: str, assignment: re.Match[str]) -> list[tuple[
             pairs = _cookie_value_spans(text, value_start, value_end)
             if pairs:
                 return pairs
-        return [(value_start, value_end)] if value_end > value_start else None
+        return ([(value_start, value_end)] + expression_spans) if value_end > value_start else None
 
     if start < len(text) and text[start] in "$@{([":
         return None
@@ -147,8 +187,15 @@ def _assignment_value_spans(text: str, assignment: re.Match[str]) -> list[tuple[
         token_end += 1
     while token_end > start and text[token_end - 1] in _TERMINAL_PUNCTUATION:
         token_end -= 1
-    if token_end <= start or _looks_like_expression(text, start, token_end):
+    if token_end <= start:
         return None
+    # Three title-case or four lowercase dotted words can be a passphrase or an
+    # attribute chain. Preserve the text, but require review rather than assume
+    # this ambiguous shape is a harmless dynamic credential source.
+    if _DOTTED_PASSPHRASE.fullmatch(text[start:token_end]):
+        return []
+    if _looks_like_expression(text, start, token_end):
+        return _expression_literal_spans(text, start) or None
     if name == "cookie":
         line_end = text.find("\n", start)
         if line_end < 0:
@@ -177,7 +224,7 @@ def find_sensitive(text: str) -> list[str]:
 
     for assignment in _ASSIGNMENT.finditer(text):
         spans = _assignment_value_spans(text, assignment)
-        if spans and any(not _is_fully_masked(text, span) for span in spans):
+        if spans == [] or (spans and any(not _is_fully_masked(text, span) for span in spans)):
             findings.append("credential_assignment")
             break
 
@@ -214,6 +261,9 @@ def redact_sensitive(text: str) -> str:
     Labels, quotes, separators, line breaks, and all unrelated text remain
     unchanged. Assignment expressions such as ``password = get_password()``
     are left intact because they describe a credential source, not its value.
+    Identifiable literal operands are masked even inside expressions. Ambiguous
+    dotted word passphrases are left intact for ``find_sensitive`` to block for
+    review. This is a bounded detector, not comprehensive secret detection.
     """
     spans: list[tuple[int, int]] = []
 

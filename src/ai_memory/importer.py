@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from .store import Store
@@ -108,6 +109,15 @@ def collect_into(
                     "INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (file_key, fingerprint)
                 )
             scanned += 1
+        except subprocess.TimeoutExpired:
+            # Timeout exceptions can contain command paths and partial transcript
+            # output. Persist only a bounded category, never the exception text.
+            failures.append(
+                {
+                    "file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
+                    "category": "timeout",
+                }
+            )
         except (OSError, RuntimeError, ValueError, UnicodeError):
             failures.append(
                 {"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16], "category": "parse"}

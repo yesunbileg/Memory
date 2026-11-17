@@ -2,6 +2,8 @@
 
 Public health, authenticated connection checks, and hstry ``POST /ingest`` are exposed.
 Capture archives locally with upload consent disabled; cloud sync is separate.
+Receipts count accepted conversation records, partitioned into created, updated
+(actual stored revision change), and unchanged replay.
 """
 
 from __future__ import annotations
@@ -233,6 +235,8 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 if self.path == "/auth/check":
                     if not isinstance(packet, dict) or packet:
                         raise ValueError("connection check requires an empty object")
+                    with Store(db_path) as store:
+                        instance_id = store.archive_instance_id()
                     self._reply(
                         200,
                         {
@@ -240,19 +244,33 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                             "service": "ai-memory",
                             "schema": 1,
                             "archive_id": archive_identity(db_path),
+                            "archive_instance_id": instance_id,
                         },
                     )
                     return
                 conversations = _normalize_packet(packet)
+            except sqlite3.OperationalError:
+                self._reply(503, {"error": "archive_unavailable"})
+                return
             except (ValueError, TypeError, UnicodeError, RecursionError, TimeoutError):
                 self._reply(400, {"error": "invalid_payload"})
                 return
-            created = updated = 0
+            created = updated = unchanged = 0
             try:
                 with Store(db_path) as store:
+                    expected_instance = packet.get("archive_instance_id")
+                    if expected_instance is not None and (
+                        not isinstance(expected_instance, str)
+                        or not hmac.compare_digest(
+                            expected_instance.encode("utf-8"),
+                            store.archive_instance_id().encode("utf-8"),
+                        )
+                    ):
+                        self._reply(409, {"error": "archive_changed"})
+                        return
                     for conversation in conversations:
                         previous = store.connection.execute(
-                            "SELECT id FROM conversations WHERE platform=? AND account=? AND external_id=?",
+                            "SELECT id,revision FROM conversations WHERE platform=? AND account=? AND external_id=?",
                             (
                                 conversation["platform"],
                                 conversation["account"],
@@ -275,10 +293,17 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                                 else:
                                     sequence += 1
                                     message["sequence"] = sequence
-                            updated += 1
-                        else:
+                        key = store.ingest(conversation, consent=False)
+                        if previous is None:
                             created += 1
-                        store.ingest(conversation, consent=False)
+                        else:
+                            revision = store.connection.execute(
+                                "SELECT revision FROM conversations WHERE id=?", (key,)
+                            ).fetchone()[0]
+                            if revision != previous["revision"]:
+                                updated += 1
+                            else:
+                                unchanged += 1
             except ValueError:
                 self._reply(400, {"error": "invalid_payload"})
                 return
@@ -286,7 +311,13 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 self._reply(503, {"error": "archive_unavailable"})
                 return
             self._reply(
-                200, {"conversations": len(conversations), "created": created, "updated": updated}
+                200,
+                {
+                    "conversations": len(conversations),
+                    "created": created,
+                    "updated": updated,
+                    "unchanged": unchanged,
+                },
             )
 
     return HTTPServer(("127.0.0.1", port), Handler)

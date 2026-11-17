@@ -5,6 +5,7 @@ import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
 import { DEFAULT_CAPTURE_TYPES, normalizeCaptureTypes } from './providers/selection.js';
 import { normalizeSettings } from './ui.js';
 import { checkConnection } from './worker-auth.js';
+import { requestGroups } from './transport.js';
 
 const DEFAULT_SETTINGS = {
   port: 41770,
@@ -103,44 +104,58 @@ async function clearInterruptedRuns() {
 
 const startupReady = clearInterruptedRuns();
 
-function makePush(settings, onResult = async () => {}, beforePush = async () => {}) {
+function makePush(
+  settings,
+  onResult = async () => {},
+  beforePush = async () => {},
+  archiveId = null,
+) {
   const url = `http://127.0.0.1:${settings.port}/ingest`;
   return async function push(sourceId, adapter, conversations) {
-    await beforePush();
     if (!settings.token) throw localError('missing_token');
-    let res;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${settings.token}`,
-        },
-        redirect: 'error',
-        credentials: 'omit',
-        body: JSON.stringify({
-          source: sourceId,
-          adapter,
-          account: settings.account,
-          conversations,
-        }),
-      });
-    } catch {
-      throw localError('offline');
+    // Preflight the entire provider batch before sending any part of it.
+    const groups = requestGroups(sourceId, adapter, settings.account, conversations, archiveId);
+    for (const group of groups) {
+      let created = 0,
+        updated = 0,
+        unchanged = 0;
+      for (const body of group.bodies) {
+        await beforePush();
+        let res;
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${settings.token}`,
+            },
+            redirect: 'error',
+            credentials: 'omit',
+            body,
+          });
+        } catch {
+          throw localError('offline');
+        }
+        if (res.status === 401) throw localError('unauthorized');
+        if (res.status === 409) throw localError('archive_changed');
+        if (res.status === 413) throw localError('body_too_large');
+        if (!res.ok) throw localError('archive_unavailable');
+        const data = await res.json();
+        // Split groups have one logical conversation in each request.
+        if (data?.conversations !== group.count) {
+          throw localError('archive_unavailable');
+        }
+        created += data?.created ?? 0;
+        updated += data?.updated ?? 0;
+        unchanged += data?.unchanged ?? 0;
+      }
+      // A chunked snapshot is still one logical conversation receipt.
+      created = Math.min(group.count, created);
+      updated = Math.min(group.count - created, updated);
+      unchanged = Math.min(group.count - created - updated, unchanged);
+      await onResult({ accepted: group.count, created, updated, unchanged });
     }
-    if (res.status === 401) {
-      throw localError('unauthorized');
-    }
-    if (!res.ok) {
-      throw localError('archive_unavailable');
-    }
-    const data = await res.json();
-    await onResult({
-      accepted: data?.conversations ?? conversations.length,
-      created: data?.created ?? 0,
-      updated: data?.updated ?? 0,
-    });
-    return data?.conversations ?? conversations.length;
+    return conversations.length;
   };
 }
 
@@ -173,7 +188,10 @@ const LOCAL_ERRORS = {
   missing_token: 'Connect AI Memory using your private connection file first.',
   unauthorized: 'This connection file does not match the running AI Memory receiver.',
   offline: 'AI Memory is offline. Run ai-memory connect and keep its terminal open.',
+  archive_changed: 'The receiving archive changed during capture. Capture again to replay safely.',
   archive_unavailable: 'AI Memory could not save this batch. Check its terminal and retry.',
+  body_too_large:
+    'A conversation item is too large for the local receiver. Split the source item before retrying.',
   selection_changed: 'Your selection changed. Capture again to use the updated settings.',
 };
 
@@ -250,7 +268,16 @@ async function runSync(
   await chrome.action.setBadgeText({ text: '…' });
 
   // Verify local credentials before any provider makes remote account or chat reads.
-  const connection = await checkConnection(settings);
+  let connection = await checkConnection(settings);
+  if (connection.ok && !connection.archiveId) {
+    connection = {
+      ...connection,
+      ok: false,
+      code: 'incompatible_server',
+      error:
+        'This receiver cannot identify its archive. Restart AI Memory with the current version before capturing.',
+    };
+  }
   if (!connection.ok) {
     for (const [name] of selected) {
       await setStatusEntry(name, {
@@ -268,6 +295,7 @@ async function runSync(
           accepted: 0,
           created: 0,
           updated: 0,
+          unchanged: 0,
         },
       });
       activeProviders.delete(name);
@@ -282,16 +310,32 @@ async function runSync(
   await Promise.all(
     selected.map(async ([name, provider]) => {
       const startedAt = Date.now();
+      const captureScope = connection.archiveId
+        ? JSON.stringify([connection.archiveId, settings.account, settings.captureTypes])
+        : null;
+      const scopeChanged = !captureScope || status[name]?.captureScope !== captureScope;
+      if (
+        (trigger === 'alarm' || trigger === 'continuation') &&
+        !scopeChanged &&
+        status[name]?.lastErrorCode === 'body_too_large'
+      ) {
+        // Permanent payload failures need an explicit retry or changed scope,
+        // not an endless sequence of identical scheduled 413 requests.
+        anyError = true;
+        activeProviders.delete(name);
+        return;
+      }
       const policyChanged =
         !status[name]?.capturePolicy ||
         JSON.stringify(status[name].capturePolicy) !== JSON.stringify(settings.captureTypes);
       const entry = {
         ...(status[name] ?? {}),
-        ...((full && name === onlyProvider) || policyChanged ? { state: {} } : {}),
-        ...(policyChanged
+        ...((full && name === onlyProvider) || policyChanged || scopeChanged ? { state: {} } : {}),
+        ...(policyChanged || scopeChanged
           ? { lastSuccessMs: null, lastCount: null, selection: null, selectionWarning: null }
           : {}),
         capturePolicy: { ...settings.captureTypes },
+        captureScope,
         continuationPending: false,
         lastRunMs: startedAt,
         trigger,
@@ -303,6 +347,7 @@ async function runSync(
           accepted: 0,
           created: 0,
           updated: 0,
+          unchanged: 0,
         },
       };
       await setStatusEntry(name, entry);
@@ -324,9 +369,11 @@ async function runSync(
             accepted: entry.progress.accepted + result.accepted,
             created: entry.progress.created + result.created,
             updated: entry.progress.updated + result.updated,
+            unchanged: (entry.progress.unchanged ?? 0) + result.unchanged,
           });
         },
         () => assertCurrentCapture(settings, epoch),
+        connection.archiveId,
       );
       const register = makeRegister(settings);
       try {
@@ -376,6 +423,7 @@ async function runSync(
             processed: entry.progress.processed ?? 0,
             created: entry.progress.created ?? 0,
             updated: entry.progress.updated ?? 0,
+            unchanged: entry.progress.unchanged ?? 0,
             skipped: entry.selection?.skipped ?? 0,
             unknown: entry.selection?.unknown ?? 0,
           },
@@ -405,6 +453,7 @@ async function runSync(
             processed: entry.progress.processed ?? 0,
             created: entry.progress.created ?? 0,
             updated: entry.progress.updated ?? 0,
+            unchanged: entry.progress.unchanged ?? 0,
             skipped: entry.selection?.skipped ?? 0,
             unknown: entry.selection?.unknown ?? 0,
           },

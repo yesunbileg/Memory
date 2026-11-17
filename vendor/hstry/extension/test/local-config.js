@@ -125,7 +125,14 @@ assert.equal(status.chatgpt.lastSuccessMs, 111);
 assert.equal(status.chatgpt.lastErrorCode, 'unauthorized');
 
 globalThis.fetch = async () =>
-  new Response(JSON.stringify({ status: 'ok', service: 'ai-memory', schema: 1 }));
+  new Response(
+    JSON.stringify({
+      status: 'ok',
+      service: 'ai-memory',
+      schema: 1,
+      archive_instance_id: 'synthetic-archive',
+    }),
+  );
 assert.equal((await send({ type: 'syncNow' })).ok, true);
 await finished();
 assert.deepEqual(providerInputs[0], {
@@ -184,7 +191,14 @@ assert.deepEqual(providerInputs.at(-1), { state: {}, captureTypes: settings.capt
 const archiveRequests = [];
 globalThis.fetch = async (url, options) => {
   if (new URL(url).pathname === '/auth/check') {
-    return new Response(JSON.stringify({ status: 'ok', service: 'ai-memory', schema: 1 }));
+    return new Response(
+      JSON.stringify({
+        status: 'ok',
+        service: 'ai-memory',
+        schema: 1,
+        archive_instance_id: 'synthetic-archive',
+      }),
+    );
   }
   archiveRequests.push({ url, options });
   return new Response(JSON.stringify({ conversations: 1, created: 1, updated: 0 }));

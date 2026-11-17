@@ -42,6 +42,8 @@ Codex messages retain native IDs or original JSONL record positions. Mirrored
 identical replies. Source record order wins over unreliable clocks. Commentary
 maps to visible progress; analysis channels, private subagent sessions,
 inter-agent routing, tool/system traffic, and compaction summaries are excluded.
+Supported message and event payloads explicitly marked `visibility: hidden` are
+excluded before mirror reconciliation. Visible payload markers are retained.
 Known bootstrap wrappers are filtered only at the start of a message; a user's
 ordinary question about `AGENTS.md` is retained. An explicitly selected file/tree
 does not inspect an unrelated default Codex home or its SQLite index.
@@ -69,10 +71,21 @@ is required before any provider fetch. The namespace distinguishes Gemini
 accounts/browser profiles; ChatGPT account IDs and Claude organization IDs take
 precedence. Capture adds no Google upload consent.
 
+The authenticated probe identifies the logical archive with a persistent, opaque
+instance ID. Capture checkpoints are reused only for the matching archive, account
+namespace, provider principal where known, and selection policy. Older state
+without that scope is replayed rather than trusted. The worker binds new ingest
+requests to the probed archive to catch a receiver change between probe and send.
+A receiver without an instance ID can still answer the connection probe, but
+capture requires a receiver with identity support.
+
 The receiver requires constant-time Bearer authentication, checks Host/Origin,
 permits recognized extension and exact loopback origins without wildcard CORS,
 bounds input to 16 MiB/100 conversations, and validates the complete packet before
-writing. Repeated native message IDs update existing records. Partial snapshots
+writing. The worker caps the serialized UTF-8 body and can split an oversized
+conversation at stable message boundaries. An indivisible oversized item is
+reported rather than truncated. Repeated native message IDs update existing
+records, and identical replays are counted as `unchanged`. Partial snapshots
 retain absent archive history, preserve known sequences, and append newly seen
 IDs. No search, dashboard, transcript-read, cloud-upload, or source-deletion API
 is exposed.
@@ -128,6 +141,12 @@ Organized-only selection captures nothing and returns a metadata warning.
 Explicit Recents capture and the original bounded continuation behavior remain
 available. This limitation is shown to the user instead of claiming selective
 Gemini support. Local Codex collection is outside this browser-only policy.
+
+Gemini distinguishes explicit empty pages from unsupported response shapes,
+cursor loops, and pagination limits. Incomplete runs keep the previous completion
+watermark. Native turn IDs deduplicate overlapping pages. Completed conversations
+from incomplete discovery remain eligible, but incomplete details are deferred so
+their messages receive archive positions only after the full source order is known.
 
 ## Validation and limits
 

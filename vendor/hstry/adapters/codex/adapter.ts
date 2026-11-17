@@ -303,7 +303,7 @@ async function parseRolloutFile(
       }
       case 'response_item': {
         const payload = event.payload as CodexResponseItem | undefined;
-        if (!payload?.type) break;
+        if (!payload?.type || payload.visibility === 'hidden') break;
 
         if (payload.type === 'reasoning') {
           // Reasoning is private unless the source explicitly marks a UI summary.
@@ -341,7 +341,7 @@ async function parseRolloutFile(
             parts: textOnlyParts(content),
             createdAt: timestampMs,
             model,
-            metadata: { source: 'response_item.message', id: payload.id, record: recordIndex + 1, channel: payload.channel, kind: payload.channel === 'commentary' ? 'progress' : 'text' },
+            metadata: { source: 'response_item.message', id: payload.id, record: recordIndex + 1, channel: payload.channel, visibility: payload.visibility, kind: payload.channel === 'commentary' ? 'progress' : 'text' },
           });
           break;
         }
@@ -421,7 +421,7 @@ async function parseRolloutFile(
       case 'event_msg': {
         // Mirrors are reconciled one-to-one after all response items are known.
         const payload = event.payload as CodexResponseItem | undefined;
-        if (!payload || !['agent_message', 'user_message'].includes(payload.type ?? '')) break;
+        if (!payload || payload.visibility === 'hidden' || !['agent_message', 'user_message'].includes(payload.type ?? '')) break;
         if (payload.channel && !['final', 'commentary'].includes(payload.channel)) break;
         const content = payload.message;
         if (typeof content !== 'string' || !content) break;
@@ -430,7 +430,7 @@ async function parseRolloutFile(
         if (!firstUserMessage && role === 'user') firstUserMessage = content;
         messages.push({
           role, content, parts: textOnlyParts(content), createdAt: timestampMs, model,
-          metadata: { source: 'event_msg.' + payload.type, id: payload.id, record: recordIndex + 1, kind: payload.channel === 'commentary' ? 'progress' : 'text' },
+          metadata: { source: 'event_msg.' + payload.type, id: payload.id, record: recordIndex + 1, visibility: payload.visibility, kind: payload.channel === 'commentary' ? 'progress' : 'text' },
         });
         break;
       }

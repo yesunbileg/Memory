@@ -105,7 +105,7 @@ def test_authenticated_ingest_preserves_raw_text_visibility_and_no_consent(runni
     assert server.server_address[0] == "127.0.0.1"
     status, headers, body = request(server, headers={"Origin": ORIGIN})
     assert status == 200
-    assert json.loads(body) == {"conversations": 1, "created": 1, "updated": 0}
+    assert json.loads(body) == {"conversations": 1, "created": 1, "updated": 0, "unchanged": 0}
     assert headers["Access-Control-Allow-Origin"] == ORIGIN
     conversation = archived(database)[0]
     assert conversation["platform"] == "chatgpt"
@@ -127,7 +127,7 @@ def test_reimports_edit_without_duplicates_and_partial_snapshot_keeps_history(ru
     updated["conversations"][0]["messages"] = [updated["conversations"][0]["messages"][0]]
     status, _, body = request(server, data=updated)
     assert status == 200
-    assert json.loads(body) == {"conversations": 1, "created": 0, "updated": 1}
+    assert json.loads(body) == {"conversations": 1, "created": 0, "updated": 1, "unchanged": 0}
     conversation = archived(database)[0]
     assert len(conversation["messages"]) == 3
     assert conversation["messages"][0]["text"] == "  edited text\n"
@@ -319,20 +319,23 @@ def test_extreme_body_length_header_is_rejected_without_parsing_large_integer(ru
     assert archived(database) == []
 
 
-def test_authenticated_connection_probe_does_not_create_or_write_archive(running_server):
+def test_authenticated_connection_probe_initializes_identity_without_archiving(running_server):
     server, database = running_server
     status, headers, body = request(server, path="/auth/check", data={}, headers={"Origin": ORIGIN})
     assert status == 200
     from ai_memory.connection import archive_identity
 
-    assert json.loads(body) == {
+    data = json.loads(body)
+    instance_id = data.pop("archive_instance_id")
+    assert isinstance(instance_id, str) and instance_id
+    assert data == {
         "status": "ok",
         "service": "ai-memory",
         "schema": 1,
         "archive_id": archive_identity(database),
     }
     assert headers["Access-Control-Allow-Origin"] == ORIGIN
-    assert not database.exists()
+    assert archived(database) == []
     assert request(server)[0] == 200
     before = archived(database)
     assert request(server, path="/auth/check", data={})[0] == 200
@@ -400,4 +403,94 @@ process.stdout.write(JSON.stringify({accepted, rejected}));
     assert data["rejected"]["ok"] is False
     assert data["rejected"]["code"] == "unauthorized"
     assert TOKEN not in result.stdout + result.stderr
-    assert not database.exists()
+    assert data["accepted"]["archiveId"]
+    assert archived(database) == []
+
+
+def test_unchanged_replay_receipt_tracks_actual_revision(running_server):
+    server, database = running_server
+    first = json.loads(request(server)[2])
+    revision = archived(database)[0]["revision"]
+    second = json.loads(request(server)[2])
+    assert second["updated"] == 0
+    assert second["unchanged"] == 1
+    assert first["unchanged"] == 0
+    assert archived(database)[0]["revision"] == revision
+    changed = json.loads(request(server, data=payload("edited synthetic text"))[2])
+    assert changed["updated"] == 1 and changed["unchanged"] == 0
+
+
+def test_authenticated_identity_survives_restart_but_not_database_replacement(running_server):
+    server, database = running_server
+    first = json.loads(request(server, path="/auth/check", data={})[2])
+    assert isinstance(first.get("archive_instance_id"), str)
+    assert first["archive_instance_id"]
+    assert request(server)[0] == 200
+    same = json.loads(request(server, path="/auth/check", data={})[2])
+    assert same["archive_instance_id"] == first["archive_instance_id"]
+    database.unlink()
+    replaced = json.loads(request(server, path="/auth/check", data={})[2])
+    assert replaced["archive_id"] == first["archive_id"]
+    assert replaced["archive_instance_id"] != first["archive_instance_id"]
+    assert archived(database) == []
+
+
+def test_ingest_rejects_a_batch_bound_to_replaced_archive(running_server):
+    server, database = running_server
+    identity = json.loads(request(server, path="/auth/check", data={})[2])["archive_instance_id"]
+    packet = payload()
+    packet["archive_instance_id"] = identity
+    assert request(server, data=packet)[0] == 200
+    database.unlink()
+    status, _, body = request(server, data=packet)
+    assert status == 409
+    assert json.loads(body) == {"error": "archive_changed"}
+    assert archived(database) == []
+
+
+def test_real_byte_chunk_transport_preserves_text_order_identity_and_replay(running_server):
+    """Exercise shared extension serializer over real local HTTP into SQLite."""
+    server, database = running_server
+    script = """
+import {requestGroups,MAX_BODY_BYTES} from './vendor/hstry/extension/transport.js';
+const port=Number(process.argv[1]);
+const headers={'Content-Type':'application/json',Authorization:'Bearer synthetic-ingest-token'};
+const identity=await (await fetch(`http://127.0.0.1:${port}/auth/check`,{method:'POST',headers,body:'{}'})).json();
+const text='漢🦦\\n '.repeat(1_000_000);
+const conversation={externalId:'long',title:'Synthetic chunked conversation',updatedAt:1700000000000,metadata:{accountId:'native-account'},messages:Array.from({length:3},(_,i)=>({role:i%2?'assistant':'user',content:text,metadata:{id:`native-${i}`}}))};
+const groups=requestGroups('chatgpt-web','chatgpt-web','configured-account',[conversation],identity.archive_instance_id);
+const receipts=[];
+for(let replay=0;replay<2;replay++){
+ const round=[];
+ for(const group of groups)for(const body of group.bodies){
+  if(new TextEncoder().encode(body).length>MAX_BODY_BYTES)throw new Error('unsafe body');
+  const response=await fetch(`http://127.0.0.1:${port}/ingest`,{method:'POST',headers,body});
+  if(!response.ok)throw new Error(`unexpected HTTP ${response.status}`);
+  round.push(await response.json());
+ }
+ receipts.push(round);
+}
+process.stdout.write(JSON.stringify(receipts));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(server.server_port)],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=40,
+    )
+    receipts = json.loads(result.stdout)
+    assert len(receipts[0]) == 3
+    assert sum(receipt["created"] for receipt in receipts[0]) == 1
+    assert all(receipt["unchanged"] == 1 and receipt["updated"] == 0 for receipt in receipts[1])
+    conversation = archived(database)[0]
+    assert conversation["account"] == "native-account"
+    assert conversation["consent"] is False
+    assert [message["native_id"] for message in conversation["messages"]] == [
+        "native-0",
+        "native-1",
+        "native-2",
+    ]
+    assert [message["sequence"] for message in conversation["messages"]] == [1, 2, 3]
+    assert all(message["text"] == "漢🦦\n " * 1_000_000 for message in conversation["messages"])

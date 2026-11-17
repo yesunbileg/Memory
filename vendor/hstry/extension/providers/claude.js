@@ -178,7 +178,8 @@ export async function syncClaude({
     const key = shortId(org.id);
     const sourceId = multiOrg ? `claude-web-${key}` : 'claude-web';
     await register(sourceId, 'claude-web');
-    const lastSyncMs = state?.orgs?.[key]?.lastSyncMs ?? null;
+    const previous = state?.orgs?.[key];
+    const lastSyncMs = previous?.principalId === org.id ? (previous.lastSyncMs ?? null) : null;
     const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
     const runStartedMs = Date.now();
     const candidates = new Map();
@@ -277,7 +278,11 @@ export async function syncClaude({
       }
     }
     if (batch.length) total += await push(sourceId, 'claude-web', batch);
-    newState.orgs[key] = { lastSyncMs: failures > 0 ? lastSyncMs : runStartedMs, name: org.name };
+    newState.orgs[key] = {
+      principalId: org.id,
+      lastSyncMs: failures > 0 ? lastSyncMs : runStartedMs,
+      name: org.name,
+    };
   }
   if (missingMetadata)
     warnings.add(

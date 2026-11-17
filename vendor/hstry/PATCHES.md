@@ -37,3 +37,9 @@ Patch groups:
    `UPSTREAM.json` modified flags now reflect actual file hashes, including
    earlier local UI edits. Wheels ship adapters/license/provenance only; the
    extension has its own runtime ZIP.
+10. Explicitly hidden Codex message/event payloads are rejected before mirror
+    matching. Browser checkpoints use the authenticated archive and provider
+    identity in addition to the selection policy. Gemini reports incomplete RPC
+    discovery/detail and keeps its old watermark instead of completing silently.
+    The local transport bounds serialized UTF-8 batches and splits long
+    conversations only at stable message boundaries.

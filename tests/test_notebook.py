@@ -142,6 +142,78 @@ async def test_sdk_terminal_processing_failure_is_distinct_from_timeout(failure,
         await adapter.close()
 
 
+async def test_real_sdk_post_answer_failure_is_content_safe(monkeypatch, caplog, capsys):
+    import io
+    import json
+    import logging
+
+    import httpx
+    from notebooklm import NotebookLMClient
+    from notebooklm.auth import AuthTokens
+    from notebooklm.options import ClientConfig, WebBackendConfig
+    from notebooklm.rpc import RPCMethod
+
+    from ai_memory.notebook import NotebookLMAdapter, NotebookLMError
+
+    question = "Synthetic-Private-Question"
+    answer = "Synthetic-Private-Answer"
+    cookie = "Synthetic-Private-Cookie"
+    csrf = "Synthetic-Private-Credential"
+    transcript = "Synthetic-Private-Transcript"
+    requested = []
+
+    def simulated_google(request):
+        if request.url.path.endswith("GenerateFreeFormStreamed"):
+            requested.append("answer")
+            assert question.encode() in request.content
+            response = [[answer, None, ["fake-chat", 12], None, [[], None, None, [], 1]]]
+            chunk = json.dumps([["wrb.fr", None, json.dumps(response)]])
+        else:
+            method = request.url.params.get("rpcids")
+            assert method == RPCMethod.GET_LAST_CONVERSATION_ID.value
+            requested.append("post_answer" if "answer" in requested else "pre_answer")
+            chunk = json.dumps(["wrb.fr", method, json.dumps([]), None, None])
+        # Emulate diagnostic output from the transport while handling the turn.
+        logging.getLogger("httpcore.http11").debug("%s [%s, %s]", transcript, cookie, csrf)
+        return httpx.Response(200, content=f")]}}'\n{len(chunk)}\n{chunk}\n".encode())
+
+    transport = httpx.MockTransport(simulated_google)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    auth = AuthTokens(cookies={"SID": cookie}, csrf_token=csrf, session_id="offline")
+    adapter = NotebookLMAdapter(
+        "synthetic-notebook",
+        client_factory=lambda path: NotebookLMClient(
+            auth, config=ClientConfig(backend=WebBackendConfig())
+        ),
+    )
+    sdk_logger = logging.getLogger("notebooklm._chat.api")
+    direct_output = io.StringIO()
+    direct_handler = logging.StreamHandler(direct_output)
+    sdk_logger.addHandler(direct_handler)
+    try:
+        with (
+            caplog.at_level(logging.DEBUG),
+            caplog.at_level(logging.DEBUG, logger="notebooklm"),
+            pytest.raises(NotebookLMError) as caught,
+        ):
+            await adapter.ask(question, ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"])
+        assert requested == ["pre_answer", "answer", "post_answer"]
+        assert caught.value.code == "notebooklm_error"
+    finally:
+        sdk_logger.removeHandler(direct_handler)
+        await adapter.close()
+
+    logging.getLogger("ai_memory.synthetic").warning("Application logging still works")
+    logging.getLogger("httpx").warning("Unrelated HTTP logging still works")
+    assert "Application logging still works" in caplog.text
+    assert "Unrelated HTTP logging still works" in caplog.text
+    assert "NotebookLM SDK diagnostic withheld." in direct_output.getvalue()
+    captured = capsys.readouterr()
+    output = caplog.text + direct_output.getvalue() + captured.out + captured.err
+    for private in (answer, question, transcript, cookie, csrf):
+        assert private not in output
+
+
 async def test_query_uses_sources_and_historical_context_prompt():
     from ai_memory.notebook import NotebookLMAdapter
 

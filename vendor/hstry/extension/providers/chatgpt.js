@@ -331,7 +331,11 @@ export async function syncChatGPT({
     const key = account.id ? shortId(account.id) : 'default';
     const sourceId = account.id && account.isWorkspace ? `chatgpt-web-${key}` : 'chatgpt-web';
     await register(sourceId, 'chatgpt-web');
-    const lastSyncMs = state?.accounts?.[key]?.lastSyncMs ?? null;
+    const previous = state?.accounts?.[key];
+    // Short source labels are not principal identities. Legacy/unknown account
+    // state is replayed conservatively rather than borrowed by another account.
+    const lastSyncMs =
+      account.id && previous?.principalId === account.id ? (previous.lastSyncMs ?? null) : null;
     const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
     const runStartedMs = Date.now();
     const candidates = new Map();
@@ -449,6 +453,7 @@ export async function syncChatGPT({
     }
     if (batch.length) total += await push(sourceId, 'chatgpt-web', batch);
     newState.accounts[key] = {
+      principalId: account.id,
       lastSyncMs: failures > 0 ? lastSyncMs : runStartedMs,
       name: account.name,
     };

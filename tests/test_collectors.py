@@ -452,3 +452,67 @@ def test_opencode_does_not_silently_drop_corrupt_source_parts(tmp_path):
     (tmp_path / "storage/part/msg_user/prt_03.json").write_text('{"text":')
     with pytest.raises(RuntimeError, match="parser failed"):
         collect("opencode", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "record_type,role",
+    [
+        ("response_item", "user"),
+        ("response_item", "assistant"),
+        ("event_msg", "user"),
+        ("event_msg", "assistant"),
+    ],
+)
+def test_codex_explicit_hidden_records_never_enter_archive(tmp_path, record_type, role):
+    from ai_memory.store import Store
+
+    path = tmp_path / "rollout-visibility.jsonl"
+    records = [{"type": "session_meta", "payload": {"id": "visibility"}}]
+    for visibility in ["hidden", "ui", None]:
+        text = f"  {visibility or 'default'} {role} exact text\n\t"
+        payload = {"id": str(visibility), "channel": "commentary"}
+        if record_type == "response_item":
+            payload.update(
+                type="message",
+                role=role,
+                content=[{"type": "input_text" if role == "user" else "output_text", "text": text}],
+            )
+        else:
+            payload.update(type="user_message" if role == "user" else "agent_message", message=text)
+        if visibility is not None:
+            payload["visibility"] = visibility
+        records.append({"type": record_type, "payload": payload})
+    records.extend(
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "id": "hidden-summary",
+                    "visibility": "hidden",
+                    "summary": [{"type": "summary_text", "text": "hidden reasoning"}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "id": "visible-summary",
+                    "visibility": "ui",
+                    "summary": [{"type": "summary_text", "text": "  visible summary\n"}],
+                },
+            },
+        ]
+    )
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+    # Actual TypeScript donor -> normalizer -> SQLite, not a mocked parser.
+    conversation = collect("codex", path, account="synthetic")[0]
+    with Store(tmp_path / "archive.sqlite") as store:
+        saved = store.get_conversation(store.ingest(conversation))
+        assert [(message["native_id"], message["text"]) for message in saved["messages"]] == [
+            ("ui", f"  ui {role} exact text\n\t"),
+            ("None", f"  default {role} exact text\n\t"),
+            ("visible-summary", "  visible summary\n"),
+        ]
+        assert "hidden" not in json.dumps(saved)

@@ -201,10 +201,7 @@ def test_cookie_pair_redaction_preserves_names_separators_and_quotes():
 @pytest.mark.parametrize(
     "text",
     [
-        'password = "prefix_" + get_password()',
         "password = prefix + suffix",
-        'password = "value" if flag else "fallback"',
-        'password = "value" == expected',
         'password = f"{get_password()}"',
         "password = ${SECRET}",
         'password = "${SECRET}"',
@@ -212,6 +209,132 @@ def test_cookie_pair_redaction_preserves_names_separators_and_quotes():
 )
 def test_dynamic_assignment_expressions_remain_entirely_unchanged(text):
     assert redact_sensitive(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('password = "SyntheticSecret987!" + suffix', 'password = "*******************" + suffix'),
+        ('password = "SyntheticSecret987!" == guess', 'password = "*******************" == guess'),
+        ('password = "prefix_" + get_password()', 'password = "*******" + get_password()'),
+        (
+            'password = "value" if flag else "fallback"',
+            'password = "*****" if flag else "********"',
+        ),
+        ('password = prefix + "SyntheticSecret987!"', 'password = prefix + "*******************"'),
+        (
+            'password = "secret" + get_password("ENV_NAME")',
+            'password = "******" + get_password("ENV_NAME")',
+        ),
+        (
+            'password = "secret" or settings["password"]',
+            'password = "******" or settings["password"]',
+        ),
+        (
+            'password = "${SECRET}" + "SyntheticSecret987!"',
+            'password = "${SECRET}" + "*******************"',
+        ),
+        (
+            'password = f"{get_password()}" + "SyntheticSecret987!"',
+            'password = f"{get_password()}" + "*******************"',
+        ),
+    ],
+)
+def test_static_literals_in_credential_expressions_are_masked(text, expected):
+    assert "credential_assignment" in find_sensitive(text)
+    assert redact_sensitive(text) == expected
+    assert find_sensitive(expected) == []
+    assert redact_sensitive(expected) == expected
+    assert len(expected) == len(text)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Correct.Horse.Battery.Staple", "Synthetic.Secret.Passphrase", "correct.horse.battery.staple"],
+)
+def test_ambiguous_dotted_passphrases_require_review(value):
+    text = "password=" + value
+    assert redact_sensitive(text) == text
+    assert "credential_assignment" in find_sensitive(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'password=get_password("PASSWORD_ENV")',
+        'password=settings["password"]',
+        "password=config.credentials.password",
+        "password=SecretProvider.current.password",
+        "password=get_password() or default_password",
+        'message = "value" if flag else "fallback"',
+    ],
+)
+def test_ordinary_code_expressions_preserve_text_and_clear_gate(text):
+    assert redact_sensitive(text) == text
+    assert find_sensitive(text) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            'opts = dict(password="secret" + suffix, label="PUBLIC TITLE")',
+            'opts = dict(password="******" + suffix, label="PUBLIC TITLE")',
+        ),
+        (
+            'opts = {password: "secret" + suffix, label: "PUBLIC TITLE"}',
+            'opts = {password: "******" + suffix, label: "PUBLIC TITLE"}',
+        ),
+        (
+            'opts = dict(password=prefix + "secret", label="PUBLIC TITLE")',
+            'opts = dict(password=prefix + "******", label="PUBLIC TITLE")',
+        ),
+    ],
+)
+def test_expression_redaction_does_not_cross_into_other_arguments(text, expected):
+    assert redact_sensitive(text) == expected
+    assert find_sensitive(expected) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "uploaded_text"),
+    [
+        ('password = "SyntheticSecret987!" + suffix', 'password = "*******************" + suffix'),
+        ('password = "SyntheticSecret987!" == guess', 'password = "*******************" == guess'),
+        ("password=Correct.Horse.Battery.Staple", None),
+    ],
+)
+async def test_expression_privacy_boundary_keeps_original_and_masks_or_blocks_upload(
+    tmp_path, text, uploaded_text
+):
+    from test_store import conversation
+    from test_sync import Remote
+
+    from ai_memory.segments import SegmentBuilder
+    from ai_memory.store import Store
+    from ai_memory.sync import SyncEngine
+
+    with Store(tmp_path / "synthetic.db") as store:
+        packet = conversation()
+        packet["messages"][0]["text"] = text
+        conversation_id = store.ingest(packet, consent=True)
+        remote = Remote()
+        result = await SyncEngine(
+            store, SegmentBuilder(store), remote, tmp_path / "upload-artifacts"
+        ).run_once()
+
+        assert store.get_conversation(conversation_id)["messages"][0]["text"] == text
+        if uploaded_text is None:
+            assert result["blocked"]
+            assert remote.sources == {}
+            assert remote.operations == []
+        else:
+            assert not result["blocked"]
+            assert len(remote.sources) == 1
+            artifact = next(iter(remote.sources.values()))["text"]
+            assert uploaded_text in artifact
+            assert "SyntheticSecret987!" not in artifact
 
 
 def test_static_template_literal_credential_is_redacted():
