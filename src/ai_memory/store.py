@@ -4,9 +4,11 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
+from .archive_lock import archive_lock
 from .diagnostics import SAFE_FAILURES
 
 
@@ -119,7 +121,118 @@ class Store:
     def __exit__(self, *args):
         self.close()
 
-    def ingest(self, conversation: dict, consent: bool = False) -> str:
+    def _resolve_aliases(self, key: str, messages: list[dict]):
+        """Resolve only source-proven aliases, scoped to one conversation."""
+        db = self.connection
+        known = {
+            row[0]
+            for row in db.execute("SELECT native_id FROM messages WHERE conversation_id=?", (key,))
+        }
+        resolved = set()
+        assignments = {}
+        claimed = {}
+        for message in messages:
+            aliases = {message["native_id"], *message.get("native_aliases", [])}
+            matches = aliases & known
+            saved_aliases = {}
+            for alias in aliases:
+                alias_key = "message-alias:" + digest([key, alias])
+                row = db.execute(
+                    "SELECT value FROM checkpoints WHERE key=?", (alias_key,)
+                ).fetchone()
+                if row:
+                    saved_aliases[alias] = row[0]
+                    matches.add(row[0])
+            if message["native_id"] in known:
+                # Pre-fix archives may already contain both mirror rows. Keep
+                # the observed primary without deleting or relinking history.
+                target = message["native_id"]
+            elif len(matches) > 1:
+                raise ValueError("Message aliases identify multiple archived messages")
+            else:
+                target = next(iter(matches), message["native_id"])
+            if target in resolved:
+                raise ValueError("Message aliases identify duplicate snapshot messages")
+            resolved.add(target)
+            for alias in aliases:
+                if (alias in known and alias != target) or saved_aliases.get(alias) not in (
+                    None,
+                    target,
+                ):
+                    continue
+                if alias in claimed and claimed[alias] != target:
+                    raise ValueError("Message aliases conflict within the snapshot")
+                claimed[alias] = target
+                if alias == target:
+                    continue
+                alias_key = "message-alias:" + digest([key, alias])
+                if alias_key in assignments and assignments[alias_key] != target:
+                    raise ValueError("Message aliases conflict within the snapshot")
+                assignments[alias_key] = target
+            message["native_id"] = target
+        db.executemany(
+            "INSERT OR REPLACE INTO checkpoints(key,value) VALUES(?,?)", assignments.items()
+        )
+
+    def _reconcile_order(self, key: str, messages: list[dict]) -> bool:
+        """Insert unseen chunks at consistent native-ID anchors without dropping history.
+
+        Existing IDs retain their relative order. Contradictory snapshots and
+        chunks without a following known anchor append instead of guessing.
+        Sequence updates do not change message content or its version clock.
+        The caller holds the same write transaction used for ingestion.
+        """
+        db = self.connection
+        rows = db.execute(
+            "SELECT * FROM messages WHERE conversation_id=? ORDER BY sequence", (key,)
+        ).fetchall()
+        known = {row["native_id"]: row["sequence"] for row in rows}
+        incoming = sorted(messages, key=lambda message: message["sequence"])
+        anchors = [known[m["native_id"]] for m in incoming if m["native_id"] in known]
+        consistent = anchors == sorted(anchors)
+        before, pending = {}, []
+        for message in incoming:
+            native_id = message["native_id"]
+            if native_id not in known:
+                pending.append(native_id)
+            elif consistent:
+                before[native_id] = pending
+                pending = []
+        ordered = []
+        for row in rows:
+            ordered.extend(before.get(row["native_id"], []))
+            ordered.append(row["native_id"])
+        ordered.extend(pending)
+        sequences = {native_id: seq for seq, native_id in enumerate(ordered, 1)}
+        moved = [row for row in rows if row["sequence"] != sequences[row["native_id"]]]
+        # Move changed rows out of the final range before assigning new slots,
+        # preserving the positive and unique sequence constraints throughout.
+        offset = max(known.values(), default=0) + len(ordered)
+        db.executemany(
+            "UPDATE messages SET sequence=sequence+? WHERE id=?",
+            [(offset, row["id"]) for row in moved],
+        )
+        for row in moved:
+            sequence = sequences[row["native_id"]]
+            content_hash = digest(
+                [sequence, row["role"], row["kind"], row["text"], row["timestamp"], row["model"]]
+            )
+            db.execute(
+                "UPDATE messages SET sequence=?,content_hash=? WHERE id=?",
+                (sequence, content_hash, row["id"]),
+            )
+            db.execute(
+                """UPDATE segments SET content_hash='' WHERE id IN (
+                SELECT segment_id FROM segment_messages WHERE message_id=?)""",
+                (row["id"],),
+            )
+        for message in messages:
+            message["sequence"] = sequences[message["native_id"]]
+        return bool(moved)
+
+    def ingest(
+        self, conversation: dict, consent: bool = False, *, reconcile_order: bool = False
+    ) -> str:
         c = dict(conversation)
         platform = str(c.get("platform", "")).lower()
         external = c.get("external_id")
@@ -143,6 +256,8 @@ class Store:
             raise ValueError("messages must be a list")
         seen_ids, seen_sequences = set(), set()
         for m in messages:
+            if not isinstance(m, dict):
+                raise ValueError("messages must contain objects")
             if m.get("role") not in {"user", "assistant"} or m.get("kind", "text") not in {
                 "text",
                 "progress",
@@ -166,8 +281,14 @@ class Store:
             for field in ("timestamp", "updated_at", "model"):
                 if m.get(field) is not None and not isinstance(m[field], str):
                     raise ValueError(f"message {field} must be source text or null")
+            aliases = m.get("native_aliases", [])
+            if not isinstance(aliases, list) or any(
+                not isinstance(alias, str) or not alias for alias in aliases
+            ):
+                raise ValueError("Message aliases must be nonempty source-proven IDs")
             seen_ids.add(m["native_id"])
             seen_sequences.add(seq)
+        messages = [dict(message) for message in messages]
         prefix = {
             "codex": "CX",
             "opencode": "OC",
@@ -178,7 +299,16 @@ class Store:
         key = prefix + "-" + digest([platform, account, external])[:16].upper()
         db = self.connection
         with db:
+            # sqlite3's context manager does not begin until the first DML.
+            # Take the write reservation before reading metadata or positions.
+            if not db.in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            else:
+                db.execute("UPDATE conversations SET revision=revision WHERE 0")
             old = db.execute("SELECT * FROM conversations WHERE id=?", (key,)).fetchone()
+            if platform == "codex":
+                self._resolve_aliases(key, messages)
+            reordered = self._reconcile_order(key, messages) if reconcile_order else False
             incoming_update = c.get("updated_at")
             old_update = old["updated_at"] if old else None
             metadata_stale = bool(
@@ -198,9 +328,13 @@ class Store:
                 for f in ("title", "project", "created_at", "updated_at", "source_url")
             ]
             metadata = [*fields, json.dumps(models, ensure_ascii=False)]
-            changed = old is None or metadata != [
-                old[f] for f in ("title", "project", "created_at", "updated_at", "source_url")
-            ] + [old["models"]]
+            changed = (
+                reordered
+                or old is None
+                or metadata
+                != [old[f] for f in ("title", "project", "created_at", "updated_at", "source_url")]
+                + [old["models"]]
+            )
             db.execute(
                 """INSERT INTO conversations(id,external_id,platform,account,title,project,
                 created_at,updated_at,source_url,models,consent) VALUES(?,?,?,?,?,?,?,?,?,?,?)
@@ -316,19 +450,21 @@ class Store:
         return json.loads(row[0]) if row else default
 
     def set_setting(self, key: str, value):
-        if key == "notebook_id" and self.get_setting(key) not in (None, value):
-            mapped = self.connection.execute("SELECT COUNT(*) FROM source_map").fetchone()[0]
-            unresolved = self.connection.execute(
-                "SELECT COUNT(*) FROM sync_jobs WHERE stage NOT IN ('done','superseded')"
-            ).fetchone()[0]
-            if mapped or unresolved:
-                raise ValueError(
-                    "Use a separate archive for a different notebook; sources or unresolved uploads already exist"
+        with archive_lock(self.path) if key == "notebook_id" else nullcontext():
+            if key == "notebook_id" and self.get_setting(key) not in (None, value):
+                mapped = self.connection.execute("SELECT COUNT(*) FROM source_map").fetchone()[0]
+                unresolved = self.connection.execute(
+                    "SELECT COUNT(*) FROM sync_jobs WHERE stage NOT IN ('done','superseded')"
+                ).fetchone()[0]
+                if mapped or unresolved:
+                    raise ValueError(
+                        "Use a separate archive for a different notebook; sources or unresolved uploads already exist"
+                    )
+            with self.connection:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                    (key, json.dumps(value)),
                 )
-        with self.connection:
-            self.connection.execute(
-                "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, json.dumps(value))
-            )
 
     def status(self) -> dict:
         db = self.connection
@@ -355,6 +491,15 @@ class Store:
                 ORDER BY next_attempt,segment_id""")
         ]
         import_failures = self.get_setting("import_failures", [])
+        sync_preflight_errors = [
+            {
+                "reason": error["reason"]
+                if error.get("reason") in SAFE_FAILURES
+                else "operation_failed"
+            }
+            for error in self.get_setting("sync_preflight_errors", [])
+            if isinstance(error, dict)
+        ]
         return {
             "conversations": count("SELECT COUNT(*) FROM conversations"),
             "messages": count("SELECT COUNT(*) FROM messages"),
@@ -365,6 +510,7 @@ class Store:
             "unassigned_messages": unassigned,
             "pending_jobs": cleanup,
             "sync_errors": sync_errors,
+            "sync_preflight_errors": sync_preflight_errors,
             "import_failures": import_failures,
             "sync_status": "pending" if pending or unassigned or cleanup else "up_to_date",
             "notebook_configured": bool(self.get_setting("notebook_id")),

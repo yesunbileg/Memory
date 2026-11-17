@@ -329,9 +329,9 @@ async function parseRolloutFile(
           if (payload.channel && !['final', 'commentary'].includes(payload.channel)) break;
           if (payload.recipient && payload.recipient !== 'all') break;
           const content = extractContent(payload.content);
-          if (!content || (payload.role === 'user' && isSystemContext(content))) break;
+          if (!content || (payload.role === 'user' && isCodexBootstrap(content))) break;
 
-          if (!firstUserMessage && payload.role === 'user' && !isSystemContext(content)) {
+          if (!firstUserMessage && payload.role === 'user') {
             firstUserMessage = content;
           }
 
@@ -426,7 +426,7 @@ async function parseRolloutFile(
         const content = payload.message;
         if (typeof content !== 'string' || !content) break;
         const role = payload.type === 'user_message' ? 'user' : 'assistant';
-        if (role === 'user' && isSystemContext(content)) break;
+        if (role === 'user' && isCodexBootstrap(content)) break;
         if (!firstUserMessage && role === 'user') firstUserMessage = content;
         messages.push({
           role, content, parts: textOnlyParts(content), createdAt: timestampMs, model,
@@ -453,7 +453,7 @@ async function parseRolloutFile(
     if (!response) continue;
     paired.add(response);
     paired.add(mirror);
-    response.metadata = { ...response.metadata, record: Math.min(Number(response.metadata?.record), Number(mirror.metadata?.record)) };
+    response.metadata = { ...response.metadata, mirror, identityRecord: response.metadata?.record, record: Math.min(Number(response.metadata?.record), Number(mirror.metadata?.record)) };
   }
   const reconciled = messages.filter(m => !(paired.has(m) && String(m.metadata?.source ?? '').startsWith('event_msg.')));
   // Source record order wins over missing/out-of-order wall clock timestamps.
@@ -493,6 +493,15 @@ async function parseRolloutFile(
       git: gitInfo,
     },
   };
+}
+
+function isCodexBootstrap(content: string): boolean {
+  // Plain headings are also ordinary user prose. Unlike reserved wrappers,
+  // they do not establish that the source was hidden harness context.
+  if (/^\s*(?:# AGENTS\.md|# Agent Configuration|Guidance for coding agents)/.test(content)) {
+    return /^\s*# AGENTS\.md[^\n]*\n\s*<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/.test(content);
+  }
+  return isSystemContext(content);
 }
 
 function extractContent(

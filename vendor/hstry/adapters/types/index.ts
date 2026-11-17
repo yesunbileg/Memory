@@ -20,8 +20,8 @@ export type AttachmentType = 'file' | 'image' | 'code';
 
 /** Canonical part types for render-stable chat messages */
 export type CanonPart =
-  | { id: string; type: 'text'; text: string; format?: 'markdown' | 'plain'; meta?: Record<string, unknown> }
-  | { id: string; type: 'thinking'; text: string; visibility?: 'ui' | 'hidden'; meta?: Record<string, unknown> }
+  | { id: string; type: 'text'; text: string; updatedAt?: number; format?: 'markdown' | 'plain'; meta?: Record<string, unknown> }
+  | { id: string; type: 'thinking'; text: string; updatedAt?: number; visibility?: 'ui' | 'hidden'; meta?: Record<string, unknown> }
   | { id: string; type: 'tool_call'; toolCallId: string; name: string; input?: unknown; meta?: Record<string, unknown> }
   | { id: string; type: 'tool_result'; toolCallId: string; name?: string; output?: unknown; isError?: boolean; meta?: Record<string, unknown> }
   | { id: string; type: 'file_ref'; uri: string; label?: string; range?: { startLine?: number; endLine?: number; startCol?: number; endCol?: number }; originText?: string; meta?: Record<string, unknown> }
@@ -62,6 +62,7 @@ export interface Message {
   content: string;
   parts?: CanonPart[];
   createdAt?: number;     // Unix timestamp (ms)
+  updatedAt?: number;     // Native message edit time (ms)
   model?: string;
   tokens?: number;
   costUsd?: number;

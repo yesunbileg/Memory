@@ -217,3 +217,234 @@ def test_notebook_binding_cannot_change_while_first_upload_is_unresolved(tmp_pat
         with pytest.raises(ValueError, match="notebook"):
             store.set_setting("notebook_id", "notebook-B")
         assert store.get_setting("notebook_id") == "notebook-A"
+
+
+def snapshot(*ids, **overrides):
+    return conversation(
+        messages=[
+            dict(conversation()["messages"][0], native_id=mid, sequence=i, text=mid)
+            for i, mid in enumerate(ids, 1)
+        ],
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize(
+    ("incoming", "expected"),
+    [
+        (("a", "b", "c", "d"), ["a", "b", "c", "d"]),
+        (("a", "b", "d"), ["a", "b", "c", "d"]),
+        (("b", "between", "d"), ["b", "c", "between", "d"]),
+        (("unanchored",), ["b", "c", "d", "unanchored"]),
+        (("d", "ambiguous", "b"), ["b", "c", "d", "ambiguous"]),
+    ],
+)
+def test_reconciled_snapshot_anchors_new_turns_without_losing_absent_history(
+    tmp_path, incoming, expected
+):
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("b", "c", "d"))
+        original_ids = {m["native_id"]: m["id"] for m in store.get_conversation(key)["messages"]}
+        packet = snapshot(*incoming)
+        untouched = copy.deepcopy(packet)
+        store.ingest(packet, reconcile_order=True)
+        saved = store.get_conversation(key)
+        assert [m["native_id"] for m in saved["messages"]] == expected
+        assert [m["sequence"] for m in saved["messages"]] == list(range(1, len(expected) + 1))
+        assert all(
+            m["id"] == original_ids[m["native_id"]]
+            for m in saved["messages"]
+            if m["native_id"] in original_ids
+        )
+        assert packet == untouched
+        store.ingest(packet, reconcile_order=True)
+        assert store.get_conversation(key)["revision"] == saved["revision"]
+
+
+def test_stale_overlapping_snapshot_reorders_but_does_not_replace_newer_text(tmp_path):
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("b", updated_at="2026-11-12T00:00:00Z"), consent=True)
+        from ai_memory.segments import SegmentBuilder
+
+        segment = SegmentBuilder(store).build()[0]
+        with store.connection:
+            store.connection.execute(
+                "UPDATE segments SET state='sealed' WHERE id=?", (segment["id"],)
+            )
+            store.connection.execute(
+                "INSERT INTO source_map VALUES(?,?,?)",
+                (segment["id"], "synthetic-source", segment["revision"]),
+            )
+        older = snapshot("a", "b", updated_at="2026-11-11T00:00:00Z")
+        older["messages"][1]["text"] = "stale text"
+        store.ingest(older, reconcile_order=True)
+        saved = store.get_conversation(key)
+        assert [(m["sequence"], m["text"]) for m in saved["messages"]] == [(1, "a"), (2, "b")]
+        assert (
+            store.connection.execute(
+                "SELECT content_hash FROM segments WHERE id=?", (segment["id"],)
+            ).fetchone()[0]
+            == ""
+        )
+        assert store.status()["pending_segments"] == 1
+
+
+def test_concurrent_ingest_serializes_metadata_reads_with_writes(tmp_path):
+    path = tmp_path / "db"
+    with Store(path) as first, Store(path) as second:
+        key = first.ingest(conversation(updated_at="2026-11-10T00:00:00Z"))
+        second.connection.execute("PRAGMA busy_timeout=0")
+        newer = conversation(
+            title="latest title", models=["latest-model"], updated_at="2026-11-12T00:00:00Z"
+        )
+        newer["messages"][0]["text"] = "latest text"
+        attempted = blocked = False
+
+        def interleave(cursor, values):
+            nonlocal attempted, blocked
+            row = sqlite3.Row(cursor, values)
+            if not attempted and "external_id" in row.keys():
+                attempted = True
+                try:
+                    second.ingest(newer)
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc):
+                        raise
+                    blocked = True
+            return row
+
+        first.connection.row_factory = interleave
+        first.ingest(
+            conversation(
+                title="older title", models=["older-model"], updated_at="2026-11-11T00:00:00Z"
+            )
+        )
+        assert attempted
+        if blocked:
+            second.ingest(newer)
+        saved = first.get_conversation(key)
+        assert saved["title"] == "latest title"
+        assert saved["updated_at"] == "2026-11-12T00:00:00Z"
+        assert "latest-model" in saved["models"]
+        assert saved["messages"][0]["text"] == "latest text"
+
+
+def test_notebook_change_cannot_pass_source_check_during_archive_operation(tmp_path):
+    import fcntl
+
+    path = tmp_path / "db"
+    with Store(path) as store:
+        store.set_setting("notebook_id", "notebook-A")
+        with path.with_suffix(".sync.lock").open("w") as active:
+            fcntl.flock(active, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(RuntimeError, match="active"):
+                store.set_setting("notebook_id", "notebook-B")
+            assert store.get_setting("notebook_id") == "notebook-A"
+            store.set_setting("unrelated", "allowed")
+        store.set_setting("notebook_id", "notebook-B")
+        assert store.get_setting("notebook_id") == "notebook-B"
+
+
+def test_native_alias_resolves_existing_message_and_keeps_segment_identity(tmp_path):
+    from ai_memory.segments import SegmentBuilder
+
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("event"), consent=True)
+        original = store.get_conversation(key)["messages"][0]
+        segment = SegmentBuilder(store).build()[0]
+        response = snapshot("response")
+        response["messages"][0]["native_aliases"] = ["event", "codex-record:1"]
+        response["messages"][0]["text"] = "canonical text"
+        store.ingest(response)
+        saved = store.get_conversation(key)
+        assert len(saved["messages"]) == 1
+        assert saved["messages"][0]["id"] == original["id"]
+        assert saved["messages"][0]["native_id"] == "event"
+        assert saved["messages"][0]["text"] == "canonical text"
+        assert (
+            store.connection.execute(
+                "SELECT message_id FROM segment_messages WHERE segment_id=?", (segment["id"],)
+            ).fetchone()[0]
+            == original["id"]
+        )
+    with Store(tmp_path / "db") as store:
+        # Replaying only the response ID still resolves the archived event row.
+        replay = snapshot("response")
+        replay["messages"][0]["text"] = "canonical text"
+        store.ingest(replay)
+        assert store.get_conversation(key)["revision"] == saved["revision"]
+
+
+def test_conflicting_native_aliases_roll_back_without_merging_real_messages(tmp_path):
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("first", "second"))
+        before = store.get_conversation(key)
+        ambiguous = snapshot("canonical")
+        ambiguous["messages"][0]["native_aliases"] = ["first", "second"]
+        with pytest.raises(ValueError, match="alias"):
+            store.ingest(ambiguous)
+        assert store.get_conversation(key) == before
+
+
+def test_existing_duplicate_mirror_keeps_exact_primary_and_import_remains_usable(tmp_path):
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("event", "response"))
+        before = store.get_conversation(key)["messages"]
+        replay = snapshot("response")
+        replay["messages"][0].update(
+            sequence=2, text="updated canonical", native_aliases=["event", "record-response"]
+        )
+        store.ingest(replay)
+        saved = store.get_conversation(key)["messages"]
+        assert [m["id"] for m in saved] == [m["id"] for m in before]
+        assert [m["text"] for m in saved] == ["event", "updated canonical"]
+        store.ingest(snapshot("event"))
+        assert [m["text"] for m in store.get_conversation(key)["messages"]] == [
+            "event",
+            "updated canonical",
+        ]
+
+
+def test_non_codex_messages_do_not_register_unproven_aliases(tmp_path):
+    with Store(tmp_path / "db") as store:
+        key = store.ingest(snapshot("original", platform="chatgpt"))
+        other = snapshot("separate", platform="chatgpt")
+        other["messages"][0].update(sequence=2, native_aliases=["original"])
+        store.ingest(other)
+        assert [m["native_id"] for m in store.get_conversation(key)["messages"]] == [
+            "original",
+            "separate",
+        ]
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE key LIKE 'message-alias:%'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_alias_cannot_claim_another_new_message_primary_in_one_snapshot(tmp_path):
+    with Store(tmp_path / "db") as store:
+        packet = snapshot("first", "second")
+        packet["messages"][0]["native_aliases"] = ["second"]
+        with pytest.raises(ValueError, match="alias"):
+            store.ingest(packet)
+        assert store.status()["messages"] == 0
+        assert store.status()["conversations"] == 0
+
+
+def test_status_exposes_only_safe_sync_preflight_categories(tmp_path):
+    with Store(tmp_path / "db") as store:
+        store.set_setting(
+            "sync_preflight_errors",
+            [
+                {"reason": "auth_required"},
+                {"reason": "synthetic private detail", "text": "must not be exposed"},
+            ],
+        )
+        assert store.status()["sync_preflight_errors"] == [
+            {"reason": "auth_required"},
+            {"reason": "operation_failed"},
+        ]
+        store.set_setting("sync_preflight_errors", [])
+        assert store.status()["sync_preflight_errors"] == []

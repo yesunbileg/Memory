@@ -91,6 +91,11 @@ function extractMessage(msg, index) {
   const sender = msg?.sender;
   const role = sender === 'human' ? 'user' : sender === 'assistant' ? 'assistant' : null;
   if (!role || msg?.visibility === 'hidden' || msg?.is_hidden) return null;
+  if (
+    (msg.content != null && !Array.isArray(msg.content)) ||
+    (msg.content == null && typeof msg.text !== 'string')
+  )
+    throw new Error('Claude message content shape is unavailable');
   const parts = [];
   const texts = [];
   const blocks = Array.isArray(msg.content) ? msg.content : [];
@@ -125,7 +130,20 @@ function extractMessage(msg, index) {
 }
 
 function toParsedConversation(detail, orgId) {
-  const messages = (detail?.chat_messages ?? []).map(extractMessage).filter(Boolean);
+  if (
+    typeof detail?.uuid !== 'string' ||
+    !detail.uuid ||
+    !Array.isArray(detail.chat_messages) ||
+    detail.chat_messages.some(
+      (message) =>
+        !message ||
+        typeof message !== 'object' ||
+        Array.isArray(message) ||
+        typeof message.sender !== 'string',
+    )
+  )
+    throw new Error('Claude conversation detail shape is unavailable');
+  const messages = detail.chat_messages.map(extractMessage).filter(Boolean);
   if (messages.length === 0) return null;
 
   return {

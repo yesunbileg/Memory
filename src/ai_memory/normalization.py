@@ -54,6 +54,69 @@ def _is_codex_internal_context(text: str) -> bool:
     return not _CODEX_CONTEXT_TAG.search(body) and _is_codex_context_tag(opening["attributes"])
 
 
+def _message_id(message: dict, fallback_counts: dict[str, int], *, consume: bool = True) -> str:
+    meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    native_id = (
+        _string(message.get("clientId")) or _string(meta.get("id")) or _string(message.get("id"))
+    )
+    if not native_id:
+        parts = message.get("parts")
+        stable_parts = (
+            [
+                {
+                    key: part.get(key)
+                    for key in ("type", "text", "visibility", "synthetic", "ignored")
+                    if key in part
+                }
+                for part in parts
+                if isinstance(part, dict)
+            ]
+            if isinstance(parts, list)
+            else None
+        )
+        signature = hashlib.sha256(
+            json.dumps(
+                [
+                    message["role"],
+                    message.get("createdAt"),
+                    message.get("model"),
+                    message.get("content"),
+                    stable_parts,
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        occurrence = fallback_counts.get(signature, 0)
+        if consume:
+            fallback_counts[signature] = occurrence + 1
+        native_id = f"derived:{signature[:32]}:{occurrence}"
+    return native_id
+
+
+def _codex_record_alias(message: dict) -> str | None:
+    meta = message.get("metadata", {})
+    record = meta.get("identityRecord", meta.get("record"))
+    if type(record) is not int or record < 1 or not meta.get("source"):
+        return None
+    # Scope to this exact source record, not merely a line number which can be
+    # reused by a partial snapshot with a different layout.
+    signature = hashlib.sha256(
+        json.dumps(
+            [
+                record,
+                meta["source"],
+                message.get("createdAt"),
+                message.get("role"),
+                message.get("content"),
+                message.get("model"),
+            ],
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"codex-record:{signature}"
+
+
 def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
     """Normalize trusted adapter shape while excluding unmarked reasoning.
 
@@ -83,44 +146,35 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
         if meta.get("channel") in {"analysis", "justify", "confidence"}:
             continue
         model = _string(message.get("model"))
-        native_id = (
-            _string(message.get("clientId"))
-            or _string(meta.get("id"))
-            or _string(message.get("id"))
+        mirror = meta.get("mirror") if platform.lower() == "codex" else None
+        mirror_id = (
+            _message_id(mirror, fallback_counts, consume=False)
+            if isinstance(mirror, dict)
+            else None
         )
-        if not native_id:
-            parts = message.get("parts")
-            stable_parts = (
-                [
-                    {
-                        key: part.get(key)
-                        for key in ("type", "text", "visibility", "synthetic", "ignored")
-                        if key in part
-                    }
-                    for part in parts
-                    if isinstance(part, dict)
-                ]
-                if isinstance(parts, list)
-                else None
+        native_id = _message_id(message, fallback_counts)
+        aliases: list[str] = []
+        if platform.lower() == "codex":
+            has_native = (
+                _string(message.get("clientId"))
+                or _string(meta.get("id"))
+                or _string(message.get("id"))
             )
-            signature = hashlib.sha256(
-                json.dumps(
-                    [
-                        message["role"],
-                        message.get("createdAt"),
-                        message.get("model"),
-                        message.get("content"),
-                        stable_parts,
-                    ],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
-            occurrence = fallback_counts.get(signature, 0)
-            fallback_counts[signature] = occurrence + 1
-            native_id = f"derived:{signature[:32]}:{occurrence}"
+            record_alias = _codex_record_alias(message) if not has_native or mirror_id else None
+            if record_alias:
+                aliases.append(record_alias)
+            if isinstance(mirror, dict):
+                aliases.append(mirror_id)
+                # Reserve the mirrored occurrence even when the canonical item
+                # has a native ID. Otherwise a later equal event with no time
+                # would reuse the first event's legacy fallback identity.
+                if mirror_id != native_id:
+                    _message_id(mirror, fallback_counts)
+                mirror_alias = _codex_record_alias(mirror)
+                if mirror_alias:
+                    aliases.append(mirror_alias)
 
-        groups: list[tuple[str, str]] = []
+        groups: list[tuple[str, str, str | None]] = []
         parts = message.get("parts")
         if isinstance(parts, list) and parts:
             for part in parts:
@@ -140,16 +194,21 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
                 if kind is None or not part["text"]:
                     continue
                 if groups and groups[-1][0] == kind:
-                    previous_kind, previous_text = groups[-1]
-                    groups[-1] = (previous_kind, previous_text + part["text"])
+                    previous_kind, previous_text, previous_update = groups[-1]
+                    updates = [t for t in (previous_update, _timestamp(part.get("updatedAt"))) if t]
+                    groups[-1] = (
+                        previous_kind,
+                        previous_text + part["text"],
+                        max(updates, default=None),
+                    )
                 else:
-                    groups.append((kind, part["text"]))
+                    groups.append((kind, part["text"], _timestamp(part.get("updatedAt"))))
         elif isinstance(message.get("content"), str) and message["content"]:
             kind = meta.get("kind", "text")
             if kind in {"text", "progress"}:
-                groups.append((kind, message["content"]))
+                groups.append((kind, message["content"], None))
             elif kind == "thinking_summary" and meta.get("visibility") == "ui":
-                groups.append((kind, message["content"]))
+                groups.append((kind, message["content"], None))
 
         if (
             platform.lower() == "codex"
@@ -161,7 +220,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
             continue
 
         kind_counts: dict[str, int] = {}
-        for kind, content in groups:
+        for kind, content, part_update in groups:
             ordinal = kind_counts.get(kind, 0)
             kind_counts[kind] = ordinal + 1
             if kind in {"text", "progress"} and ordinal == 0:
@@ -182,6 +241,14 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
                 "text": content,
                 "timestamp": _timestamp(message.get("createdAt")),
             }
+            if aliases:
+                suffix = group_id[len(native_id) :]
+                item["native_aliases"] = list(
+                    dict.fromkeys(alias + suffix for alias in aliases if alias != native_id)
+                )
+            updates = [t for t in (_timestamp(message.get("updatedAt")), part_update) if t]
+            if updates:
+                item["updated_at"] = max(updates)
             if model:
                 item["model"] = model
                 if model not in models:

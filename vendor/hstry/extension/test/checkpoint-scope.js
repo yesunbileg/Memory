@@ -87,6 +87,9 @@ assert.deepEqual(
   'credentials and port are not logical archive identity',
 );
 archive = null;
+const legacyProbe = await new Promise((resolve) => listener({ type: 'checkApi' }, {}, resolve));
+assert.equal(legacyProbe.ok, false, 'UI connection checks must reflect capture eligibility');
+assert.equal(legacyProbe.code, 'incompatible_server');
 await run();
 await run();
 assert.equal(

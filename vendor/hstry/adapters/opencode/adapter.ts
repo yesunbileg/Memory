@@ -87,6 +87,7 @@ interface MessageInfo {
   time: {
     created: number;
     completed?: number;
+    updated?: number;
   };
   parentID?: string;
   modelID?: string;
@@ -109,6 +110,8 @@ interface PartInfo {
   sessionID: string;
   type: string;
   text?: string;
+  updatedAt?: number;
+  time?: { updated?: number };
   visibility?: 'ui' | 'hidden';
   synthetic?: boolean;
   ignored?: boolean;
@@ -466,8 +469,15 @@ function tableExists(db: SqliteDb, name: string): boolean {
  * Parse all conversations from the SQLite layout.
  */
 async function parseSqliteLayout(basePath: string, opts?: ParseOptions): Promise<Conversation[]> {
-  const result = await parseSqliteStream(basePath, { ...opts, batchSize: 999999 });
-  return result.conversations;
+  const conversations: Conversation[] = [];
+  let cursor: unknown = undefined;
+  do {
+    const result = await parseSqliteStream(basePath, { ...opts, batchSize: 500, cursor });
+    conversations.push(...result.conversations);
+    if (result.done) break;
+    cursor = result.cursor;
+  } while (true);
+  return conversations;
 }
 
 /**
@@ -479,7 +489,7 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
   }
 
   const dbPath = join(basePath, 'opencode.db');
-  const batchSize = opts?.batchSize ?? 25;
+  const batchSize = Math.max(1, Math.min(opts?.batchSize ?? 25, 500));
   const cursor = opts?.cursor as { offset: number } | undefined;
   const offset = cursor?.offset ?? 0;
 
@@ -506,7 +516,7 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
       params.push(opts.since, opts.since);
     }
 
-    sessionQuery += ` ORDER BY s.time_created DESC LIMIT ? OFFSET ?`;
+    sessionQuery += ` ORDER BY s.time_created DESC, s.id LIMIT ? OFFSET ?`;
     params.push(batchSize + 1, offset); // fetch one extra to check if done
 
     const sessionRows = db.prepare(sessionQuery).all(...params) as SqliteSessionRow[];
@@ -639,6 +649,7 @@ function buildSqliteConversation(
             sessionID: msgRow.session_id,
             type: partData.type ?? 'text',
             text: partData.text,
+            updatedAt: latestUpdate(partData.time?.updated, partRow.time_updated),
             visibility: partData.visibility,
             synthetic: partData.synthetic,
             ignored: partData.ignored,
@@ -679,6 +690,7 @@ function buildSqliteConversation(
         content: effectiveContent,
         parts: canonParts,
         createdAt: msgData.time?.created ?? msgRow.time_created,
+        updatedAt: latestUpdate(msgData.time?.updated, msgRow.time_updated),
         model: msgData.modelID || undefined,
         tokens: tokens > 0 ? tokens : undefined,
         costUsd: msgData.cost || undefined,
@@ -730,7 +742,7 @@ function buildSqliteConversation(
  * `compaction`, `idle`, `agent-switched`, `model-switched`, `location-switched`).
  */
 function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
-  const batchSize = opts?.batchSize ?? 25;
+  const batchSize = Math.max(1, Math.min(opts?.batchSize ?? 25, 500));
   const cursor = opts?.cursor as { offset: number } | undefined;
   const offset = cursor?.offset ?? 0;
 
@@ -746,7 +758,7 @@ function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResu
     sessionQuery += ` WHERE s.time_created >= ? OR s.time_updated >= ?`;
     params.push(opts.since, opts.since);
   }
-  sessionQuery += ` ORDER BY s.time_created DESC LIMIT ? OFFSET ?`;
+  sessionQuery += ` ORDER BY s.time_created DESC, s.id LIMIT ? OFFSET ?`;
   params.push(batchSize + 1, offset);
 
   const sessionRows = db.prepare(sessionQuery).all(...params) as SqliteV2SessionRow[];
@@ -810,6 +822,7 @@ function buildSqliteV2Conversation(
     if (data.visibility === 'hidden' || data.ignored === true) continue;
     const type = row.type || data.type;
     const createdAt = data.time?.created ?? row.time_created;
+    const updatedAt = latestUpdate(data.time?.updated, row.time_updated);
 
     if (type === 'user') {
       const text = typeof data.text === 'string' ? data.text : '';
@@ -820,7 +833,7 @@ function buildSqliteV2Conversation(
         if (typeof uri === 'string') parts.push({ id: `x-file-${row.id}-${parts.length}`, type: 'file_ref', uri, ...(file?.name ? { label: file.name } : {}) });
       }
       if (!text.length && parts.length === 0) continue;
-      messages.push({ role: 'user', content: text, parts: parts.length ? parts : textOnlyParts(text), createdAt, metadata: { id: row.id } });
+      messages.push({ role: 'user', content: text, parts: parts.length ? parts : textOnlyParts(text), createdAt, updatedAt, metadata: { id: row.id } });
       continue;
     }
 
@@ -830,10 +843,10 @@ function buildSqliteV2Conversation(
       for (const block of Array.isArray(data.content) ? data.content : []) {
         if (!block || typeof block !== 'object' || block.visibility === 'hidden' || block.synthetic === true || block.ignored === true) continue;
         if (block.type === 'text' && typeof block.text === 'string' && block.text.length) {
-          parts.push(textPart(block.text));
+          parts.push({ ...textPart(block.text), updatedAt: latestUpdate(block.time?.updated, block.time_updated) });
           chunks.push(block.text);
         } else if (block.type === 'reasoning' && typeof block.text === 'string' && block.text.length) {
-          parts.push({ ...thinkingPart(block.text), ...(block.visibility === 'ui' ? { visibility: 'ui' } : {}) });
+          parts.push({ ...thinkingPart(block.text), updatedAt: latestUpdate(block.time?.updated, block.time_updated), ...(block.visibility === 'ui' ? { visibility: 'ui' } : {}) });
           chunks.push(block.text);
         } else if (block.type === 'tool' && includeTools) {
           parts.push(...v2ToolParts(block));
@@ -847,6 +860,7 @@ function buildSqliteV2Conversation(
         content: content || projectPartsToContent(parts),
         parts: parts.length ? parts : textOnlyParts(content),
         createdAt,
+        updatedAt,
         model: data.model?.id ?? modelRef?.id,
         tokens: total || undefined,
         costUsd: typeof data.cost === 'number' ? data.cost : undefined,
@@ -1240,6 +1254,7 @@ async function loadMessagesNew(
           content: content || projectPartsToContent(canonParts),
           parts: canonParts,
           createdAt: msgInfo.time.created,
+          updatedAt: msgInfo.time.updated,
           model: msgInfo.modelID || undefined,
           tokens: tokens > 0 ? tokens : undefined,
           costUsd: msgInfo.cost || undefined,
@@ -1474,6 +1489,7 @@ async function loadMessagesOld(
           content: content || projectPartsToContent(canonParts),
           parts: canonParts,
           createdAt: msgInfo.time.created,
+          updatedAt: msgInfo.time.updated,
           model: msgInfo.modelID || undefined,
           tokens: tokens > 0 ? tokens : undefined,
           costUsd: msgInfo.cost || undefined,
@@ -1544,17 +1560,23 @@ async function loadPartsOld(
   return parts;
 }
 
+/** Preserve reliable native edit times, without inventing an observed-time version. */
+function latestUpdate(...values: unknown[]): number | undefined {
+  const times = values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  return times.length ? Math.max(...times) : undefined;
+}
+
 /** Build CanonPart[] from opencode PartInfo[]. */
 function buildCanonParts(oparts: PartInfo[], role: string, includeTools: boolean): CanonPart[] | undefined {
   const canon: CanonPart[] = [];
   for (const p of oparts) {
     if (p.synthetic || p.ignored || p.visibility === 'hidden') continue;
     if (p.type === 'text' && p.text) {
-      canon.push(textPart(p.text));
+      canon.push({ ...textPart(p.text), updatedAt: latestUpdate(p.updatedAt, p.time?.updated) });
     } else if (p.type === 'reasoning' && p.text) {
       // Assistant turns are split into per-step rows; early rows often carry
       // only reasoning. Preserve it or the step reads as an empty reply.
-      canon.push({ ...thinkingPart(p.text), ...(p.visibility === 'ui' ? { visibility: 'ui' } : {}) });
+      canon.push({ ...thinkingPart(p.text), updatedAt: latestUpdate(p.updatedAt, p.time?.updated), ...(p.visibility === 'ui' ? { visibility: 'ui' } : {}) });
     } else if (p.type === 'tool' && p.tool && includeTools) {
       // Tool parts in opencode represent both the call and result.
       // The state has input, output, status.

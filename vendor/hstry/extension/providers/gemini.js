@@ -57,6 +57,18 @@ async function getSession() {
   return { ...session, userIndex };
 }
 
+async function sessionFingerprint(session) {
+  // These existing RPC credentials identify continuity of this active session,
+  // not a durable Google principal. Rotation intentionally forces a full replay.
+  // The account slot only disambiguates routing and is never sufficient alone.
+  if (!session.at || !session.sid) return null;
+  const bytes = new TextEncoder().encode(
+    JSON.stringify(['gemini-session-v1', session.at, session.sid, session.userIndex]),
+  );
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function batchExecute(session, rpcId, arg) {
   const reqId = Math.floor(Math.random() * 900000) + 100000;
   const accountPath = session.userIndex === null ? '' : `/u/${session.userIndex}`;
@@ -270,9 +282,18 @@ export async function syncGemini({
   await report({ phase: 'discovering', selection, selectionWarning });
   const session = await getSession();
   await register('gemini-web', 'gemini');
-  const lastSyncMs = state?.lastSyncMs ?? null;
+  const fingerprint = await sessionFingerprint(session);
+  const matchingSession = fingerprint !== null && state?.sessionFingerprint === fingerprint;
+  const lastSyncMs = matchingSession ? (state?.lastSyncMs ?? null) : null;
   const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
-  const pending = state?.pending;
+  const pending = matchingSession ? state?.pending : null;
+  if (!fingerprint)
+    selectionWarning = [
+      selectionWarning,
+      'Gemini session identity is unavailable; previous checkpoints cannot be verified and history is replayed without saving a new checkpoint.',
+    ]
+      .filter(Boolean)
+      .join(' ');
   const runStartedMs = pending?.runStartedMs ?? Date.now();
   const discovery = Array.isArray(pending?.summaries)
     ? { summaries: pending.summaries, incomplete: Boolean(pending?.discoveryIncomplete) }
@@ -297,7 +318,13 @@ export async function syncGemini({
       selection,
       selectionWarning,
     });
-    return { state: { lastSyncMs }, conversations: 0, hasMore: false, selection, selectionWarning };
+    return {
+      state: { lastSyncMs, sessionFingerprint: fingerprint },
+      conversations: 0,
+      hasMore: false,
+      selection,
+      selectionWarning,
+    };
   }
   const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
@@ -335,8 +362,12 @@ export async function syncGemini({
     total += accepted;
     if (accepted !== batch.length) failures++;
   }
-  const hasMore = endIndex < summaries.length;
-  const hadFailures = Boolean(pending?.hadFailures) || failures > 0;
+  const remaining = endIndex < summaries.length;
+  const hasMore = remaining && fingerprint !== null;
+  const hadFailures = Boolean(pending?.hadFailures) || failures > 0 || (remaining && !fingerprint);
+  if (remaining && !fingerprint)
+    selectionWarning +=
+      ' Capture is incomplete and automatic continuation is paused until session identity is available.';
   if (hadFailures)
     selectionWarning = [
       selectionWarning,
@@ -349,6 +380,7 @@ export async function syncGemini({
     state: hasMore
       ? {
           lastSyncMs,
+          sessionFingerprint: fingerprint,
           pending: {
             runStartedMs,
             summaries,
@@ -357,7 +389,10 @@ export async function syncGemini({
             discoveryIncomplete: discovery.incomplete,
           },
         }
-      : { lastSyncMs: hadFailures ? lastSyncMs : runStartedMs },
+      : {
+          lastSyncMs: hadFailures || !fingerprint ? lastSyncMs : runStartedMs,
+          sessionFingerprint: fingerprint,
+        },
     conversations: total,
     hasMore,
     selection,

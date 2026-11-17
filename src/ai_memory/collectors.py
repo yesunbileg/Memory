@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 from .normalization import normalize_conversation as normalize_conversation
@@ -32,6 +34,10 @@ def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
     Direct batch retries match the adapter's depth bound. Incremental archive
     imports pass no bound to retain their recursive explicit-source behavior.
     """
+
+    def fail_listing(error):
+        raise error
+
     roots = [path]
     roots.extend(
         candidate
@@ -40,7 +46,9 @@ def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
     )
     files: set[Path] = set()
     for root in roots:
-        for directory, directories, filenames in os.walk(root, followlinks=False):
+        for directory, directories, filenames in os.walk(
+            root, followlinks=False, onerror=fail_listing
+        ):
             parent = Path(directory)
             depth = len(parent.relative_to(root).parts)
             directories[:] = [name for name in directories if not (parent / name).is_symlink()]
@@ -59,6 +67,36 @@ def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
     return sorted(files)
 
 
+def codex_thread_metadata(path: Path) -> dict[str, dict]:
+    """Read only the selected source's optional title index, never CODEX_HOME."""
+    home = path.parent if path.name.endswith((".jsonl", ".jsonl.zst")) else path
+    for candidate in (path, *path.parents):
+        if candidate.name in {"sessions", "archived_sessions"}:
+            home = candidate.parent
+            break
+    database = next(
+        (
+            home / f"state_{n}.sqlite"
+            for n in range(128, 0, -1)
+            if (home / f"state_{n}.sqlite").is_file()
+        ),
+        None,
+    )
+    if database is None:
+        return {}
+    # Match the adapter's optional-index fallback for absent/older/locked schemas.
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+            rows = db.execute("SELECT id,title,model FROM threads WHERE title != ''").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        native_id: {"title": title, "model": model}
+        for native_id, title, model in rows
+        if isinstance(native_id, str) and isinstance(title, str)
+    }
+
+
 def _merge_codex_snapshots(conversations: list[dict]) -> list[dict]:
     """Merge snapshots per native conversation, preferring newest message versions."""
     grouped: dict[tuple[str, str, str], list[dict]] = {}
@@ -73,6 +111,30 @@ def _merge_codex_snapshots(conversations: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for snapshots in grouped.values():
         snapshots.sort(key=lambda item: item.get("_snapshot_rank", ("", 0, "")))
+        # A full later rollout proves event/response aliases which an earlier
+        # event-only snapshot could not know. Apply only those proven identities,
+        # never a global role/text deduplication.
+        alias_targets: dict[str, str] = {}
+        resolved = []
+        for snapshot in reversed(snapshots):
+            copied = dict(snapshot)
+            copied["messages"] = []
+            for source_message in snapshot["messages"]:
+                message = dict(source_message)
+                identities = [message["native_id"], *message.get("native_aliases", [])]
+                targets = {alias_targets[value] for value in identities if value in alias_targets}
+                if len(targets) > 1:
+                    raise ValueError("Conflicting Codex mirror identities in snapshots")
+                canonical = next(iter(targets)) if targets else message["native_id"]
+                message["native_id"] = canonical
+                aliases = list(dict.fromkeys(value for value in identities if value != canonical))
+                if aliases:
+                    message["native_aliases"] = aliases
+                for value in identities:
+                    alias_targets[value] = canonical
+                copied["messages"].append(message)
+            resolved.append(copied)
+        snapshots = list(reversed(resolved))
         newest = snapshots[-1]
         result = dict(newest)
         for field in ("title", "project", "created_at", "updated_at", "source_url"):

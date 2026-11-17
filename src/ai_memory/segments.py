@@ -1,6 +1,7 @@
 """Deterministic Markdown sources, regenerated from the SQLite archive."""
 
 import json
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -61,8 +62,19 @@ class SegmentBuilder:
             WHERE sm.segment_id=? ORDER BY sm.position""",
             (segment_id,),
         ).fetchall()
+        # A backfilled earlier message can occupy a later arrival slot. Use
+        # canonical sequence within each conversation's existing slots without
+        # moving other conversations or repacking sealed segment membership.
+        conversation_rows = defaultdict(list)
+        for row in rows:
+            conversation_rows[row["conversation_id"]].append(row)
+        ordered = {
+            key: iter(sorted(messages, key=lambda message: message["sequence"]))
+            for key, messages in conversation_rows.items()
+        }
         previous = None
-        for m in rows:
+        for row in rows:
+            m = next(ordered[row["conversation_id"]])
             if previous != m["conversation_id"]:
                 metadata = db.execute(
                     "SELECT metadata FROM segment_metadata WHERE segment_id=? AND conversation_id=?",
@@ -144,6 +156,7 @@ class SegmentBuilder:
     def build(self) -> list[dict]:
         db = self.store.connection
         changed = []
+        budget_exhausted = False
         with db:
             pending = db.execute("""SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id
                 WHERE c.consent=1 AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
@@ -181,11 +194,11 @@ class SegmentBuilder:
                     ).fetchone()[0]
                     if count >= self.max_active:
                         # Sync must upload/verify a merge using the spare slot before assignment resumes.
-                        if assigned:
-                            break
-                        raise SourceBudgetError(
-                            "Active source budget reached; sync a merge before building more segments"
-                        )
+                        # Still refresh edited active segments below. Raising here
+                        # would roll their revision/hash updates back and strand
+                        # immutable pending snapshots behind a stale revision.
+                        budget_exhausted = True
+                        break
                     sid = self._new()
                     row = db.execute("SELECT * FROM segments WHERE id=?", (sid,)).fetchone()
                     used = position = 0
@@ -204,6 +217,10 @@ class SegmentBuilder:
                             db.execute("SELECT * FROM segments WHERE id=?", (row["id"],)).fetchone()
                         )
                     )
+        if budget_exhausted and not assigned:
+            raise SourceBudgetError(
+                "Active source budget reached; sync a merge before building more segments"
+            )
         return changed
 
     def merge_oldest(self, *, include_open=False) -> str:

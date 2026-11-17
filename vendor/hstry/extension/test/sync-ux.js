@@ -140,7 +140,14 @@ PROVIDERS.claude.sync = async () => {
 };
 globalThis.fetch = async (url) => {
   if (new URL(url).pathname === '/auth/check') {
-    return new Response(JSON.stringify({ status: 'ok', service: 'ai-memory', schema: 1 }));
+    return new Response(
+      JSON.stringify({
+        status: 'ok',
+        service: 'ai-memory',
+        schema: 1,
+        archive_instance_id: 'synthetic-ux-archive',
+      }),
+    );
   }
   return new Response(JSON.stringify({ conversations: 1, created: 1, updated: 0 }));
 };

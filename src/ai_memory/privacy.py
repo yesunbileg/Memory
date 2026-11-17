@@ -52,7 +52,7 @@ def _private_key_payload_spans(text: str) -> list[tuple[int, int]]:
 
 def _is_fully_masked(text: str, span: tuple[int, int]) -> bool:
     start, end = span
-    return start < end and all(char == "*" for char in text[start:end])
+    return start < end and all(char in "*\r\n" for char in text[start:end])
 
 
 def _quoted_value(text: str, start: int) -> tuple[int, int, int, str] | None:
@@ -180,6 +180,12 @@ def _assignment_value_spans(text: str, assignment: re.Match[str]) -> list[tuple[
                 return pairs
         return ([(value_start, value_end)] + expression_spans) if value_end > value_start else None
 
+    if start < len(text) and (text[start] in "\"'`" or re.match(r"\\+[\"']", text[start:])):
+        # An opening delimiter without a reliable closing delimiter is not a
+        # dynamic source expression. Preserve the original text, but require
+        # review at the upload gate instead of guessing where the value ends.
+        return []
+
     if start < len(text) and text[start] in "$@{([":
         return None
     token_end = start
@@ -262,8 +268,9 @@ def redact_sensitive(text: str) -> str:
     unchanged. Assignment expressions such as ``password = get_password()``
     are left intact because they describe a credential source, not its value.
     Identifiable literal operands are masked even inside expressions. Ambiguous
-    dotted word passphrases are left intact for ``find_sensitive`` to block for
-    review. This is a bounded detector, not comprehensive secret detection.
+    dotted word passphrases and unterminated quoted values are left intact for
+    ``find_sensitive`` to block for review. This is a bounded detector, not
+    comprehensive secret detection.
     """
     spans: list[tuple[int, int]] = []
 

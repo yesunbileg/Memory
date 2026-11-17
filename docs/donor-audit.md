@@ -37,21 +37,25 @@ surrogates, malformed JSON records, and corrupt source parts fail the import
 instead of replacing characters or silently reporting an incomplete transcript.
 A file being written can be retried by the watcher after the next poll.
 
-Codex messages retain native IDs or original JSONL record positions. Mirrored
-`event_msg`/`response_item` messages reconcile one-to-one, preserving legitimate
-identical replies. Source record order wins over unreliable clocks. Commentary
+Codex messages retain native IDs or original JSONL record evidence. Mirrored
+`event_msg`/`response_item` messages reconcile one-to-one, passing matched identity
+aliases through archive ingestion without deduplicating by reply text. Source
+record order wins over unreliable clocks. Incremental scans refresh indexed
+titles without reparsing unchanged rollouts. Commentary
 maps to visible progress; analysis channels, private subagent sessions,
 inter-agent routing, tool/system traffic, and compaction summaries are excluded.
 Supported message and event payloads explicitly marked `visibility: hidden` are
 excluded before mirror reconciliation. Visible payload markers are retained.
-Known bootstrap wrappers are filtered only at the start of a message; a user's
-ordinary question about `AGENTS.md` is retained. An explicitly selected file/tree
+Known bootstrap wrappers are filtered at the start of a message. A plain
+`# AGENTS.md` heading alone does not establish hidden context, so ordinary user
+messages with that heading are retained. An explicitly selected file or tree
 does not inspect an unrelated default Codex home or its SQLite index.
 
-OpenCode retains message IDs, uses v2's native `seq` order, and excludes synthetic,
-ignored, hidden, tool, and system content. Unmarked reasoning never enters the
-archive. Thinking summaries require explicit `visibility: ui`; hidden reasoning
-is not made visible because it happens to contain readable text.
+OpenCode retains message IDs and available native message or part modification
+times, uses v2's native `seq` order, and reads large SQLite archives in bounded
+session batches. It excludes synthetic, ignored, hidden, tool, and system content.
+Unmarked reasoning never enters the archive. Thinking summaries require explicit
+`visibility: ui`, so hidden reasoning is not exposed for containing readable text.
 
 Web providers retain message UUIDs/IDs and Gemini turn IDs where the response
 provides them, with original record positions as the fallback. ChatGPT no longer
@@ -76,8 +80,10 @@ instance ID. Capture checkpoints are reused only for the matching archive, accou
 namespace, provider principal where known, and selection policy. Older state
 without that scope is replayed rather than trusted. The worker binds new ingest
 requests to the probed archive to catch a receiver change between probe and send.
-A receiver without an instance ID can still answer the connection probe, but
-capture requires a receiver with identity support.
+A receiver without an instance ID can still answer the low-level connection
+probe for compatibility. Popup/Settings checks and capture share the stricter
+archive-identity requirement, so a legacy receiver is shown as incompatible before
+any provider reads occur.
 
 The receiver requires constant-time Bearer authentication, checks Host/Origin,
 permits recognized extension and exact loopback origins without wildcard CORS,
@@ -142,9 +148,29 @@ Explicit Recents capture and the original bounded continuation behavior remain
 available. This limitation is shown to the user instead of claiming selective
 Gemini support. Local Codex collection is outside this browser-only policy.
 
+ChatGPT and Claude distinguish recognized empty detail collections from absent or
+malformed collections/message shapes. Unsupported details warn and retain the
+retry watermark. ChatGPT account-discovery fallback can capture the default
+account but reports incomplete discovery and retains unavailable workspace state.
+
 Gemini distinguishes explicit empty pages from unsupported response shapes,
-cursor loops, and pagination limits. Incomplete runs keep the previous completion
-watermark. Native turn IDs deduplicate overlapping pages. Completed conversations
+cursor loops, and pagination limits. Its checkpoint/continuation is bound to a
+SHA-256 fingerprint of the already-used `SNlM0e`/`FdrFJe` session credentials plus
+the redirected account slot. This is active-session continuity evidence, **not**
+a stable Google principal ID. No raw provider credentials are persisted or logged,
+and the slot alone is never trusted. A legacy checkpoint, changed credential,
+session or slot forces rediscovery from the start. Credential rotation may thus
+replay already archived history, with normal native-ID deduplication. A matching
+session retains bounded ten-conversation continuation across worker restarts.
+If session evidence is unavailable, each attempt starts fresh and stores no
+completion watermark. It reads at most ten conversations, warns if history remains,
+and does not schedule an unsafe endless continuation. Complete capture of a larger
+history then requires usable session evidence. Separate user-selected namespaces
+remain necessary to distinguish Google accounts in the archive. No undocumented
+email/principal field or organized-category field is inferred.
+
+Incomplete runs keep only a matching session's previous completion watermark.
+Native turn IDs deduplicate overlapping pages. Completed conversations
 from incomplete discovery remain eligible, but incomplete details are deferred so
 their messages receive archive positions only after the full source order is known.
 

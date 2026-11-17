@@ -181,7 +181,7 @@ async function registerEnabledSources(settings) {
 }
 
 async function checkApi() {
-  return checkConnection(await getSettings());
+  return checkConnection(await getSettings(), { requireArchive: true });
 }
 
 const LOCAL_ERRORS = {
@@ -268,16 +268,7 @@ async function runSync(
   await chrome.action.setBadgeText({ text: '…' });
 
   // Verify local credentials before any provider makes remote account or chat reads.
-  let connection = await checkConnection(settings);
-  if (connection.ok && !connection.archiveId) {
-    connection = {
-      ...connection,
-      ok: false,
-      code: 'incompatible_server',
-      error:
-        'This receiver cannot identify its archive. Restart AI Memory with the current version before capturing.',
-    };
-  }
+  const connection = await checkConnection(settings, { requireArchive: true });
   if (!connection.ok) {
     for (const [name] of selected) {
       await setStatusEntry(name, {

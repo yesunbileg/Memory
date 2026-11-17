@@ -5,6 +5,7 @@ import { syncGemini } from '../providers/gemini.js';
 
 const policy = { projects: false, pinned: false, agents: false, recents: true };
 const watermark = 1_700_000_000_000;
+let acknowledgedState;
 const summary = (id = 'one') => [`c_${id}`, `Synthetic ${id}`, null, null, null, [1800000000, 0]];
 const turn = (id, text = `  question ${id}\n`) => [
   id,
@@ -18,7 +19,7 @@ const rpc = (id, value) =>
 async function capture({
   list = () => [null, null, [summary()]],
   detail = () => [[turn('t')], null],
-  state = { lastSyncMs: watermark },
+  state = acknowledgedState,
   acknowledge,
 } = {}) {
   const pushed = [];
@@ -26,7 +27,8 @@ async function capture({
   const calls = { list: 0, detail: 0 };
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(input);
-    if (url.pathname === '/app') return new Response('<script>{"SNlM0e":"synthetic"}</script>');
+    if (url.pathname === '/app')
+      return new Response('<script>{"SNlM0e":"synthetic","FdrFJe":"synthetic-session"}</script>');
     const id = url.searchParams.get('rpcids');
     const arg = JSON.parse(JSON.parse(init.body.get('f.req'))[0][0][1]);
     const value = id === 'MaZiqc' ? list(calls.list++, arg) : detail(calls.detail++, arg);
@@ -43,6 +45,13 @@ async function capture({
   });
   return { result, pushed, reports, calls };
 }
+
+// Completeness tests start with a checkpoint acknowledged in the same session.
+// Legacy/unbound checkpoints are exercised separately in gemini-session-scope.js.
+acknowledgedState = {
+  ...(await capture({ state: {}, list: () => [null, null, []] })).result.state,
+  lastSyncMs: watermark,
+};
 
 function incomplete(captured) {
   assert.equal(
@@ -88,7 +97,7 @@ test('cyclic discovery cursors preserve discovered chats and a retry path', asyn
 });
 
 test('discovery safety ceiling retains captured data without declaring success', async () => {
-  let state = { lastSyncMs: watermark };
+  let state = acknowledgedState;
   let captured;
   let pushed = 0;
   do {

@@ -348,3 +348,79 @@ def test_multiline_quoted_credential_masks_payload_without_changing_line_breaks(
     text = 'password = """first\nsecond"""'
 
     assert redact_sensitive(text) == 'password = """*****\n******"""'
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"synthetic-only',
+        "'synthetic-only",
+        "`synthetic-only",
+        '"""synthetic-only\nsecond line',
+        "r'synthetic-only",
+        'f"{synthetic_variable}',
+        '\\"synthetic-only',
+        '"synthetic-only\nUnrelated "quoted" explanation.',
+    ],
+)
+def test_unterminated_credential_literals_require_review_without_guessing_bounds(value):
+    text = "password = " + value
+
+    assert redact_sensitive(text) == text
+    assert "credential_assignment" in find_sensitive(text)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_completely_masked_multiline_credentials_clear_the_privacy_gate(newline):
+    text = 'password = """synthetic' + newline + 'only"""'
+    expected = 'password = """*********' + newline + '****"""'
+
+    assert redact_sensitive(text) == expected
+    assert find_sensitive(expected) == []
+    assert redact_sensitive(expected) == expected
+
+
+def test_multiline_mask_does_not_hide_an_unmasked_character():
+    assert "credential_assignment" in find_sensitive('password = """***\n*x*"""')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('password = "synthetic-only', None),
+        ('password = """synthetic\nonly"""', 'password = """*********\n****"""'),
+    ],
+)
+async def test_incomplete_and_multiline_values_obey_the_upload_boundary(tmp_path, text, expected):
+    from test_store import conversation
+    from test_sync import Remote
+
+    from ai_memory.segments import SegmentBuilder
+    from ai_memory.store import Store
+    from ai_memory.sync import SyncEngine
+
+    with Store(tmp_path / "synthetic.db") as store:
+        packet = conversation()
+        packet["messages"][0]["text"] = text
+        conversation_id = store.ingest(packet, consent=True)
+        other = conversation(external_id="unrelated")
+        other["messages"][0]["text"] = "Unrelated synthetic conversation"
+        store.ingest(other, consent=True)
+        remote = Remote()
+        result = await SyncEngine(
+            store, SegmentBuilder(store), remote, tmp_path / "upload-artifacts"
+        ).run_once()
+
+        assert store.get_conversation(conversation_id)["messages"][0]["text"] == text
+        if expected is None:
+            assert result["blocked"]
+            assert remote.sources == {}
+            assert remote.operations == []
+        else:
+            assert result["blocked"] == []
+            assert len(remote.sources) == 1
+            uploaded = next(iter(remote.sources.values()))["text"]
+            assert expected in uploaded
+            assert "Unrelated synthetic conversation" in uploaded
+            assert "synthetic\nonly" not in uploaded

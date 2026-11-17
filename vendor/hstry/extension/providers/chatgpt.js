@@ -59,11 +59,11 @@ async function listAccounts(token) {
         isWorkspace: (account?.structure ?? account?.plan_type) === 'workspace',
       });
     }
-    if (accounts.length > 0) return accounts;
+    if (accounts.length > 0) return { accounts, incomplete: false };
   } catch {
     // Endpoint shape changed or unavailable: sync the default account only.
   }
-  return [{ id: null, name: 'default', isWorkspace: false }];
+  return { accounts: [{ id: null, name: 'default', isWorkspace: false }], incomplete: true };
 }
 
 async function* listUpdatedConversations(token, accountId, sinceMs) {
@@ -241,14 +241,23 @@ function extractMessage(node, index) {
   if (msg.recipient && msg.recipient !== 'all') return null;
   const parts = [];
   const texts = [];
-  const content = msg.content ?? {};
+  const content = msg.content;
+  if (
+    !content ||
+    typeof content !== 'object' ||
+    Array.isArray(content) ||
+    typeof content.content_type !== 'string'
+  )
+    throw new Error('ChatGPT message content shape is unavailable');
   const addText = (text) => {
     if (typeof text !== 'string' || text.length === 0) return;
     texts.push(text);
     parts.push(textPart(text));
   };
   if (content.content_type === 'text' || content.content_type === 'multimodal_text') {
-    for (const part of content.parts ?? []) {
+    if (!Array.isArray(content.parts))
+      throw new Error('ChatGPT message parts shape is unavailable');
+    for (const part of content.parts) {
       if (typeof part === 'string') addText(part);
       else if (part?.content_type === 'text' && typeof part.text === 'string') addText(part.text);
     }
@@ -276,6 +285,23 @@ function extractMessage(node, index) {
 }
 
 function toParsedConversation(detail, conversationId, accountId) {
+  const mapping = detail?.mapping;
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping))
+    throw new Error('ChatGPT conversation detail shape is unavailable');
+  for (const node of Object.values(mapping)) {
+    if (
+      !node ||
+      typeof node !== 'object' ||
+      Array.isArray(node) ||
+      !Object.hasOwn(node, 'message') ||
+      (node.message !== null &&
+        (!node.message ||
+          typeof node.message !== 'object' ||
+          Array.isArray(node.message) ||
+          typeof node.message.author?.role !== 'string'))
+    )
+      throw new Error('ChatGPT conversation node shape is unavailable');
+  }
   const messages = linearize(detail).map(extractMessage).filter(Boolean);
   if (messages.length === 0) return null;
 
@@ -318,9 +344,14 @@ export async function syncChatGPT({
   }
   await report({ phase: 'discovering', selection });
   const token = await getAccessToken();
-  const accounts = await listAccounts(token);
-  const newState = { ...state, accounts: {} };
+  const discovery = await listAccounts(token);
+  const accounts = discovery.accounts;
+  const newState = { ...state, accounts: discovery.incomplete ? { ...state.accounts } : {} };
   const warnings = new Set();
+  if (discovery.incomplete)
+    warnings.add(
+      'ChatGPT account discovery is incomplete; other workspaces may be unavailable. Retry to capture them.',
+    );
   const missingTypes = new Set();
   let missingMetadata = 0;
   let total = 0;
@@ -342,7 +373,7 @@ export async function syncChatGPT({
     const projectGizmoIds = new Set();
     let catalogAvailable = false;
     let projectMembershipAvailable = false;
-    let failures = 0;
+    let failures = discovery.incomplete ? 1 : 0;
     const add = (item, context = {}) => {
       if (typeof item?.id !== 'string' || !item.id)
         throw new Error('ChatGPT conversation identifier is unavailable');

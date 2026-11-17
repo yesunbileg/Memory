@@ -1023,3 +1023,168 @@ async def test_unready_current_mapping_uses_queue_backoff_and_can_recover(tmp_pa
         assert len(remote.sources) == 1
         if code == "processing_failed":
             assert source_id not in remote.sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_active", [2, 49])
+async def test_full_budget_failed_upload_then_edit_and_new_conversation_recovers(
+    tmp_path, max_active
+):
+    with Store(tmp_path / "db") as store:
+        first = conversation(external_id="conversation-0")
+        first["messages"][0]["text"] = "first original"
+        store.ingest(first, consent=True)
+        for n in range(1, max_active):
+            item = conversation(external_id=f"conversation-{n}")
+            item["messages"][0]["text"] = f"message {n}"
+            store.ingest(item, consent=True)
+        remote = Remote()
+        builder = SegmentBuilder(store, target_words=2, max_words=10, max_active=max_active)
+        engine = SyncEngine(store, builder, remote, tmp_path / "md")
+        await engine.run_once()
+        original_source = store.connection.execute(
+            "SELECT source_id FROM source_map WHERE segment_id='SEG-001'"
+        ).fetchone()[0]
+
+        first["messages"][0]["text"] = "first interim"
+        store.ingest(first)
+        remote.fail_upload = True
+        failed = await engine.run_once()
+        assert failed["blocked"][0]["reason"] == "ConnectionError"
+        first["messages"][0]["text"] = "first corrected"
+        store.ingest(first)
+        extra = conversation(external_id="overflow")
+        extra["messages"][0]["text"] = "overflow message"
+        store.ingest(extra, consent=True)
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+
+        # Capacity pressure cannot invalidate the in-flight revision's hash or
+        # delete the committed predecessor while the network is still down.
+        retry = await engine.run_once()
+        assert retry["blocked"][0]["reason"] == "ConnectionError"
+        assert original_source in remote.sources
+        assert not any(op == ("delete", original_source) for op in remote.operations)
+
+        remote.fail_upload = False
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        recovered = await engine.run_once()
+        assert not recovered["blocked"]
+        assert recovered["status"]["sync_status"] == "up_to_date"
+        assert recovered["status"]["unassigned_messages"] == 0
+        assert recovered["status"]["messages"] == max_active + 1
+        uploaded = "\n".join(source["text"] for source in remote.sources.values())
+        assert "first corrected\n" in uploaded
+        assert "first interim\n" not in uploaded
+        assert "overflow message\n" in uploaded
+        assert len(remote.sources) <= max_active
+        assert remote.peak_sources <= max_active + 1
+
+
+@pytest.mark.asyncio
+async def test_already_locked_sync_keeps_shared_lock_until_operation_finishes(tmp_path):
+    from ai_memory.archive_lock import archive_lock
+
+    class LockCheckingRemote(Remote):
+        async def upload(self, path, title):
+            with pytest.raises(RuntimeError, match="active"):
+                with archive_lock(store.path):
+                    pytest.fail("Archive lock released before upload")
+            return await super().upload(path, title)
+
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        remote = LockCheckingRemote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        with archive_lock(store.path):
+            result = await engine._run_once_locked()
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 1
+
+
+def test_snapshot_is_private_before_fsync_in_existing_public_directory(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    output = tmp_path / "public"
+    output.mkdir(mode=0o755)
+    observed_modes = []
+    real_fsync = os.fsync
+
+    def inspect_before_fsync(fd):
+        observed_modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        assert [file.read_text() for file in output.iterdir()] == ["synthetic snapshot"]
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", inspect_before_fsync)
+    mask = os.umask(0o022)
+    try:
+        with Store(tmp_path / "db") as store:
+            engine = SyncEngine(store, SegmentBuilder(store), Remote(), output)
+            path = engine._write_snapshot("segment.md", "synthetic snapshot")
+        assert observed_modes == [0o600]
+        assert path.read_text() == "synthetic snapshot"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(output.stat().st_mode) == 0o755
+        assert list(output.iterdir()) == [path]
+    finally:
+        os.umask(mask)
+
+
+@pytest.mark.asyncio
+async def test_first_sync_retains_notebook_binding_during_concurrent_rebind(tmp_path):
+    class RebindingRemote(Remote):
+        async def upload(self, path, title):
+            with Store(db_path) as competing_store:
+                with pytest.raises(RuntimeError, match="active"):
+                    competing_store.set_setting("notebook_id", "notebook-B")
+            return await super().upload(path, title)
+
+    db_path = tmp_path / "archive.sqlite"
+    with Store(db_path) as store:
+        store.set_setting("notebook_id", "notebook-A")
+        store.ingest(conversation(), consent=True)
+        remote = RebindingRemote()
+        result = await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
+        assert result["blocked"] == []
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert store.get_setting("notebook_id") == "notebook-A"
+        (mapping,) = store.connection.execute("SELECT source_id FROM source_map").fetchall()
+        assert mapping["source_id"] in remote.sources
+        with pytest.raises(ValueError, match="separate archive"):
+            store.set_setting("notebook_id", "notebook-B")
+
+
+def test_notebook_rebind_guard_cannot_overlap_first_sync(tmp_path):
+    import asyncio
+    import sqlite3
+
+    db_path = tmp_path / "archive.sqlite"
+    with Store(db_path) as settings, Store(db_path) as syncing:
+        settings.set_setting("notebook_id", "notebook-A")
+        settings.ingest(conversation(), consent=True)
+        remote = Remote()
+        engine = SyncEngine(syncing, SegmentBuilder(syncing), remote, tmp_path / "md")
+        attempted = blocked = False
+
+        def interleave(cursor, raw):
+            nonlocal attempted, blocked
+            row = sqlite3.Row(cursor, raw)
+            if not attempted and cursor.description[0][0] == "COUNT(*)":
+                # Pause the real setting setter after reading its empty mapping
+                # guard, at the exact boundary where the audit raced first sync.
+                attempted = True
+                try:
+                    asyncio.run(engine.run_once())
+                except RuntimeError as error:
+                    assert "active" in str(error)
+                    blocked = True
+            return row
+
+        settings.connection.row_factory = interleave
+        settings.set_setting("notebook_id", "notebook-B")
+        assert attempted and blocked
+        assert settings.get_setting("notebook_id") == "notebook-B"
+        assert remote.sources == {}
+        assert settings.connection.execute("SELECT COUNT(*) FROM source_map").fetchone()[0] == 0

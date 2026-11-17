@@ -55,12 +55,22 @@ def test_parser_timeout_is_content_safe_isolated_and_retryable(tmp_path, monkeyp
         failures = store.get_setting("import_failures")
         assert failures[0]["categories"] == ["timeout"]
         assert "private" not in json.dumps([result, failures])
-        assert store.connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 1
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE key LIKE 'codex:%'"
+            ).fetchone()[0]
+            == 1
+        )
         assert store.status()["conversations"] == 1
         monkeypatch.setattr(collectors.subprocess, "run", real_run)
         retried = collect_into(store, "codex", source)
         assert retried["failed_files"] == 0
         assert retried["imported_conversations"] == 1
         assert store.status()["conversations"] == 2
-        assert store.connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 2
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE key LIKE 'codex:%'"
+            ).fetchone()[0]
+            == 2
+        )
         assert store.get_setting("import_failures") == []

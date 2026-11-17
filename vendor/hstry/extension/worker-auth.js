@@ -1,5 +1,8 @@
 // Only an authenticated identity check establishes an AI Memory connection.
-export async function checkConnection(settings, { fetchImpl = globalThis.fetch } = {}) {
+export async function checkConnection(
+  settings,
+  { fetchImpl = globalThis.fetch, requireArchive = false } = {},
+) {
   const port = Number(settings?.port);
   const validPort = Number.isInteger(port) && port >= 1 && port <= 65535;
   const url = `http://127.0.0.1:${validPort ? port : 41770}/auth/check`;
@@ -66,5 +69,14 @@ export async function checkConnection(settings, { fetchImpl = globalThis.fetch }
     typeof data.archive_instance_id === 'string' && data.archive_instance_id
       ? data.archive_instance_id
       : null;
+  if (requireArchive && !archiveId) {
+    return {
+      ok: false,
+      url,
+      code: 'incompatible_server',
+      error:
+        'This receiver cannot identify its archive. Restart AI Memory with the current version before capturing.',
+    };
+  }
   return { ok: true, url, archiveId };
 }

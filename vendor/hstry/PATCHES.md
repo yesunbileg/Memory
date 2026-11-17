@@ -43,3 +43,8 @@ Patch groups:
     discovery/detail and keeps its old watermark instead of completing silently.
     The local transport bounds serialized UTF-8 batches and splits long
     conversations only at stable message boundaries.
+11. OpenCode preserves native message and part modification times and bounds
+    SQLite session batches. Codex passes proven mirror provenance to archive
+    identity reconciliation and no longer treats plain heading-like user text
+    as bootstrap instructions. Incremental Codex imports can refresh matching
+    titles directly from the selected source's index without reparsing rollouts.

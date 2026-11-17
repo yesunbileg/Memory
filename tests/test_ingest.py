@@ -135,6 +135,25 @@ def test_reimports_edit_without_duplicates_and_partial_snapshot_keeps_history(ru
     assert len(archived(database)[0]["messages"]) == 3
 
 
+def test_later_full_snapshot_places_earlier_native_turns_before_known_suffix(running_server):
+    server, database = running_server
+    full = payload()
+    partial = payload()
+    partial["conversations"][0]["messages"] = partial["conversations"][0]["messages"][3:]
+    assert request(server, data=partial)[0] == 200
+    before = archived(database)[0]
+    assert request(server, data=full)[0] == 200
+    after = archived(database)[0]
+    assert [m["text"] for m in after["messages"]] == [
+        RAW,
+        "  Visible summary.\n",
+        "  Final answer.\n",
+    ]
+    assert [m["id"] for m in after["messages"][1:]] == [m["id"] for m in before["messages"]]
+    receipt = json.loads(request(server, data=full)[2])
+    assert receipt == {"conversations": 1, "created": 0, "updated": 0, "unchanged": 1}
+
+
 def test_account_isolation_uses_provider_native_account_not_short_source_id(running_server):
     server, database = running_server
     assert request(server)[0] == 200

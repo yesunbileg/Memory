@@ -320,3 +320,82 @@ def test_active_segment_rejects_rendered_snapshot_over_500000(tmp_path):
         with pytest.raises(CapacityError):
             builder.build()
         assert store.connection.execute("SELECT COUNT(*) FROM segment_messages").fetchone()[0] == 0
+
+
+def test_full_source_budget_still_commits_edited_segment_revision(tmp_path):
+    from ai_memory.segments import SourceBudgetError
+
+    with Store(tmp_path / "db") as store:
+        first = conversation(external_id="first")
+        first["messages"][0]["text"] = "first original"
+        second = conversation(external_id="second")
+        second["messages"][0]["text"] = "second original"
+        store.ingest(first, consent=True)
+        store.ingest(second, consent=True)
+        builder = SegmentBuilder(store, target_words=2, max_words=10, max_active=2)
+        builder.build()
+        first["messages"][0]["text"] = "first corrected"
+        store.ingest(first)
+        extra = conversation(external_id="overflow")
+        extra["messages"][0]["text"] = "overflow message"
+        store.ingest(extra, consent=True)
+
+        with pytest.raises(SourceBudgetError):
+            builder.build()
+
+        edited = store.connection.execute(
+            "SELECT revision,content_hash,word_count FROM segments WHERE id='SEG-001'"
+        ).fetchone()
+        assert edited["revision"] == 2
+        assert edited["content_hash"] == digest(builder.render("SEG-001"))
+        assert edited["word_count"] == 2
+        assert store.status()["unassigned_messages"] == 1
+        assert store.status()["messages"] == 3
+
+
+def test_render_uses_canonical_sequence_within_existing_conversation_slots(tmp_path):
+    with Store(tmp_path / "db") as store:
+        base = conversation()["messages"][0]
+        key = store.ingest(
+            conversation(
+                messages=[
+                    dict(base, native_id="early", sequence=1, text="earlier body"),
+                    dict(base, native_id="late", sequence=2, text="later body"),
+                ]
+            ),
+            consent=True,
+        )
+        other = store.ingest(
+            conversation(external_id="other", messages=[dict(base, text="unrelated body")]),
+            consent=True,
+        )
+        builder = SegmentBuilder(store)
+        (segment,) = builder.build()
+        # Model a late-discovered earlier message allocated after an unrelated
+        # conversation. Canonical message sequence is already repaired by Store.
+        with store.connection:
+            store.connection.execute("UPDATE segment_messages SET position=-position-1")
+            for conversation_id, native_id, position in [
+                (key, "late", 0),
+                (other, "m1", 1),
+                (key, "early", 2),
+            ]:
+                store.connection.execute(
+                    """UPDATE segment_messages SET position=? WHERE message_id=(
+                    SELECT id FROM messages WHERE conversation_id=? AND native_id=?)""",
+                    (position, conversation_id, native_id),
+                )
+        before = [
+            tuple(row)
+            for row in store.connection.execute("SELECT * FROM segment_messages ORDER BY position")
+        ]
+
+        rendered = builder.render(segment["id"])
+        assert rendered.index("earlier body") < rendered.index("unrelated body")
+        assert rendered.index("unrelated body") < rendered.index("later body")
+        assert f"### {key} · 0001 · User ·" in rendered
+        assert f"### {key} · 0002 · User ·" in rendered
+        assert [
+            tuple(row)
+            for row in store.connection.execute("SELECT * FROM segment_messages ORDER BY position")
+        ] == before

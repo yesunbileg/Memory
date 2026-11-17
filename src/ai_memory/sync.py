@@ -1,15 +1,15 @@
 """Single-worker persistent upload → verify → map → delete state machine."""
 
-import fcntl
 import json
 import logging
-import os
 import time
 from pathlib import Path
 
+from .archive_lock import archive_lock
 from .diagnostics import failure_code
 from .notebook import NotebookLMError
 from .privacy import find_sensitive, redact_sensitive
+from .private_io import write_private_text
 from .segments import CapacityError, SegmentBuilder, SourceBudgetError
 from .store import Store, digest
 
@@ -56,13 +56,7 @@ class SyncEngine:
     def _write_snapshot(self, title, text):
         self.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.output_dir / title
-        temporary = path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8", newline="") as file:
-            file.write(text)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary.chmod(0o600)
-        temporary.replace(path)
+        write_private_text(path, text)
         return path
 
     def _migrate_pending_snapshot(self, job):
@@ -609,57 +603,60 @@ class SyncEngine:
         return "complete"
 
     async def run_once(self) -> dict:
-        lock_path = Path(str(self.store.path) + ".sync.lock")
-        with lock_path.open("a") as lock:
-            lock_path.chmod(0o600)
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise RuntimeError("Another sync worker is active") from exc
-            result = {"completed": 0, "deferred": 0, "blocked": []}
-            try:
-                self.builder.build()
-            except SourceBudgetError:
-                pass
-            except CapacityError as exc:
-                result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
-                result["status"] = self.store.status()
-                return result
-            try:
-                await self._reconcile_mapped_sources()
-                self._enqueue()
-            except SnapshotError:
-                result["blocked"].append({"reason": "SnapshotError"})
-                result["status"] = self.store.status()
-                return result
-            except (NotebookLMError, ConnectionError, TimeoutError) as exc:
-                result["blocked"].append({"reason": failure_code(exc)})
-                result["status"] = self.store.status()
-                result["status"]["sync_status"] = "pending"
-                return result
-            drained = await self._drain(result)
-            if drained in {"complete", "merge"}:
-                # One merge per invocation bounds network work; a daemon can continue next cycle.
-                status = self.store.status()
-                if (
-                    drained == "merge"
-                    or status["unassigned_messages"]
-                    and status["segments"] >= self.builder.max_active
-                ):
-                    try:
-                        self.builder.merge_oldest(include_open=drained == "merge")
-                        self._enqueue()
-                        if await self._drain(result) == "complete":
-                            self.builder.build()
-                            self._enqueue()
-                            if await self._drain(result) == "merge":
-                                result["blocked"].append(
-                                    {
-                                        "reason": "SourceQuota",
-                                        "detail": "Another merge is needed; retry sync",
-                                    }
-                                )
-                    except CapacityError as exc:
-                        result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
+        """Run one sync cycle with exclusive archive/notebook-binding ownership."""
+        with archive_lock(self.store.path):
+            return await self._run_once_locked()
+
+    async def _run_once_locked(self) -> dict:
+        """Run while the caller holds archive_lock(self.store.path).
+
+        CLI callers acquire the lock before reading settings or constructing the
+        adapter, then retain it across this await. Direct callers use run_once.
+        """
+        result = {"completed": 0, "deferred": 0, "blocked": []}
+        try:
+            self.builder.build()
+        except SourceBudgetError:
+            pass
+        except CapacityError as exc:
+            result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
             result["status"] = self.store.status()
             return result
+        try:
+            await self._reconcile_mapped_sources()
+            self._enqueue()
+        except SnapshotError:
+            result["blocked"].append({"reason": "SnapshotError"})
+            result["status"] = self.store.status()
+            return result
+        except (NotebookLMError, ConnectionError, TimeoutError) as exc:
+            result["blocked"].append({"reason": failure_code(exc)})
+            result["status"] = self.store.status()
+            result["status"]["sync_status"] = "pending"
+            return result
+        drained = await self._drain(result)
+        if drained in {"complete", "merge"}:
+            # One merge per invocation bounds network work; a daemon can continue next cycle.
+            status = self.store.status()
+            if (
+                drained == "merge"
+                or status["unassigned_messages"]
+                and status["segments"] >= self.builder.max_active
+            ):
+                try:
+                    self.builder.merge_oldest(include_open=drained == "merge")
+                    self._enqueue()
+                    if await self._drain(result) == "complete":
+                        self.builder.build()
+                        self._enqueue()
+                        if await self._drain(result) == "merge":
+                            result["blocked"].append(
+                                {
+                                    "reason": "SourceQuota",
+                                    "detail": "Another merge is needed; retry sync",
+                                }
+                            )
+                except CapacityError as exc:
+                    result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
+        result["status"] = self.store.status()
+        return result

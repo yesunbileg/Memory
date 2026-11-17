@@ -10,8 +10,9 @@ from pathlib import Path
 from time import monotonic as _monotonic
 from time import sleep as _sleep
 
-from .diagnostics import failure_code
+from .diagnostics import SAFE_FAILURES, failure_code
 from .importer import collect_into
+from .private_io import write_private_text
 from .segments import SegmentBuilder
 from .store import Store
 
@@ -89,20 +90,44 @@ async def _gateway_call(db_path, name, arguments):
 
 
 async def sync_archive(store):
+    from .archive_lock import archive_lock
     from .notebook import NotebookLMAdapter
     from .sync import SyncEngine
 
-    notebook_id = store.get_setting("notebook_id")
-    if not notebook_id:
-        raise ValueError("Set a notebook ID with init --notebook-id before syncing")
-    storage = store.get_setting("storage_path")
-    adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
-    try:
-        return await SyncEngine(
-            store, SegmentBuilder(store), adapter, store.path.parent / "sync"
-        ).run_once()
-    finally:
-        await adapter.close()
+    # Hold the same lock as notebook rebinding before reading its settings.
+    with archive_lock(store.path):
+        notebook_id = store.get_setting("notebook_id")
+        if not notebook_id:
+            raise ValueError("Set a notebook ID with init --notebook-id before syncing")
+        storage = store.get_setting("storage_path")
+        adapter = None
+        try:
+            adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
+            result = await SyncEngine(
+                store, SegmentBuilder(store), adapter, store.path.parent / "sync"
+            )._run_once_locked()
+            errors = _preflight_errors(result)
+            store.set_setting("sync_preflight_errors", errors)
+            result["status"]["sync_preflight_errors"] = errors
+            return result
+        except Exception as error:
+            store.set_setting("sync_preflight_errors", [{"reason": failure_code(error)}])
+            raise
+        finally:
+            if adapter is not None:
+                await adapter.close()
+
+
+def _preflight_errors(result):
+    """Jobless blockers need their own safe diagnostics, distinct from queue state."""
+    reasons = {
+        blocker.get("reason")
+        if isinstance(blocker.get("reason"), str) and blocker["reason"] in SAFE_FAILURES
+        else "operation_failed"
+        for blocker in result.get("blocked", [])
+        if not blocker.get("segment_id")
+    }
+    return [{"reason": reason} for reason in sorted(reasons)]
 
 
 def _watch(args):
@@ -140,18 +165,15 @@ def _watch(args):
                 if not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1):
                     try:
                         result = asyncio.run(sync_archive(store))
-                        # Preflight capacity/snapshot failures have no persisted
+                        # Preflight failures have no persisted
                         # job and therefore do not pass through the queue logger.
-                        for blocker in result.get("blocked", []):
-                            code = blocker.get("reason")
-                            if not blocker.get("segment_id") and code in {
-                                "CapacityError",
-                                "SnapshotError",
-                                "SourceQuota",
-                            }:
-                                report(("sync", code), code)
+                        for blocker in _preflight_errors(result):
+                            code = blocker["reason"]
+                            report(("sync", code), code)
                     except Exception as error:
                         code = failure_code(error)
+                        # Only sync_archive owns durable sync diagnostics while
+                        # holding its lock. A contending worker must not overwrite them.
                         report(("sync", code), code)
                         result = {"status": {"sync_status": "pending"}}
                     # Pending jobs retain their own backoff deadline in SQLite;
@@ -274,8 +296,7 @@ def execute(args):
                 "SELECT id FROM segments WHERE state!='retired' ORDER BY rowid"
             ):
                 path = output / f"{r[0]}.md"
-                path.write_text(builder.render(r[0]), encoding="utf-8", newline="")
-                path.chmod(0o600)
+                write_private_text(path, builder.render(r[0]))
                 ids.append(r[0])
             return {"segments": ids, "output": str(output)}
         if args.command == "sync":

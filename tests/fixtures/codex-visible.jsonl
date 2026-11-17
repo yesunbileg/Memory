@@ -1,7 +1,7 @@
 {"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"synthetic-codex","timestamp":"2026-01-01T00:00:00Z","cwd":"/synthetic/project"}}
 {"type":"turn_context","payload":{"model":"gpt-synthetic"}}
 {"type":"response_item","payload":{"type":"message","role":"user","id":"u-1","content":[{"type":"input_text","text":" \tСайн уу — café\n```python\n"},{"type":"input_text","text":"print('漢字 🦦')\n```\n  "}]}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md\nDO NOT IMPORT instructions"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md\nDO NOT IMPORT instructions"}],"visibility":"hidden"}}
 {"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"DO NOT IMPORT hidden reasoning"}]}}
 {"type":"response_item","payload":{"type":"function_call","call_id":"tool-1","name":"shell","arguments":"DO NOT IMPORT command"}}
 {"type":"response_item","payload":{"type":"function_call_output","call_id":"tool-1","output":"DO NOT IMPORT output"}}

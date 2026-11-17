@@ -277,23 +277,7 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                                 conversation["external_id"],
                             ),
                         ).fetchone()
-                        if previous:
-                            # A browser snapshot may omit deleted or older turns.
-                            # Preserve archive identities and keep absent history.
-                            known = dict(
-                                store.connection.execute(
-                                    "SELECT native_id,sequence FROM messages WHERE conversation_id=?",
-                                    (previous[0],),
-                                )
-                            )
-                            sequence = max(known.values(), default=0)
-                            for message in conversation["messages"]:
-                                if message["native_id"] in known:
-                                    message["sequence"] = known[message["native_id"]]
-                                else:
-                                    sequence += 1
-                                    message["sequence"] = sequence
-                        key = store.ingest(conversation, consent=False)
+                        key = store.ingest(conversation, consent=False, reconcile_order=True)
                         if previous is None:
                             created += 1
                         else:
