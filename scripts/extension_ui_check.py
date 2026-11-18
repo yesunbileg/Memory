@@ -204,6 +204,12 @@ async def verify_pages(origin, output, executable):
             )
             assert await popup.locator("#sync").is_disabled()
             assert not await popup.evaluate("__memoryTest.messages.includes('syncNow')")
+            for theme in ("light", "dark"):
+                await popup.emulate_media(color_scheme=theme)
+                disabled = popup.locator("#sync")
+                assert await disabled.evaluate("el => getComputedStyle(el).opacity") == "1"
+                contrast = await disabled.evaluate(CONTRAST)
+                assert contrast >= 4.5, ("#sync:disabled", theme, contrast)
             await popup.locator("#toggle-chatgpt").focus()
             await popup.keyboard.press("Enter")
             await popup.wait_for_function(
@@ -239,7 +245,7 @@ async def verify_pages(origin, output, executable):
                     await popup.emulate_media(color_scheme=theme)
                     for selector in ("#api-title", "#schedule", "#sync"):
                         contrast = await popup.locator(selector).evaluate(CONTRAST)
-                        assert contrast >= 4.5, (selector, theme, contrast)
+                        assert contrast >= 4.5, (selector, width, theme, contrast)
                     await popup.screenshot(
                         path=output / f"popup-{width}-{theme}.png", full_page=True
                     )

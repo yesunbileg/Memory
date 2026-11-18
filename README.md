@@ -106,7 +106,7 @@ Load `vendor/hstry/extension` as an unpacked Chromium/Brave/Chrome extension on 
 .venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-For a standalone extension, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.6.0.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and both project/upstream MIT notices; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
+For a standalone extension, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.6.1.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and both project/upstream MIT notices; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
 
 Open extension Settings → **Choose connection file** and select the `connection_file` path printed by the command. The browser now launches its registered native host as needed; no receiver terminal stays open. A v1 bearer file cannot authenticate the receiver. To migrate, pair again using the v2 file. See [native pairing](docs/native-pairing.md) for custom browser data directories and supported platforms.
 
