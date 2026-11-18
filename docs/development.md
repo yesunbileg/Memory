@@ -40,7 +40,8 @@ collectors, extension or Python checks does not require npm packages.
 | `src/ai_memory/sync.py` | Persistent upload, readiness, mapping, cleanup and retries |
 | `src/ai_memory/notebook.py` | Lazy notebooklm-py client boundary and safe errors |
 | `src/ai_memory/gateway.py` | Two MCP tools and verified structured citations |
-| `src/ai_memory/connection.py`, `ingest.py` | Private archive pairing and legacy HTTP receiver (the browser uses its registered native host) |
+| `src/ai_memory/connection.py`, `ingest.py` | Legacy authenticated HTTP receiver and shared validation for browser packets |
+| `src/ai_memory/native.py` | Linux native messaging host registration, pairing verification and browser packets |
 | `vendor/hstry/adapters/` | Audited upstream TypeScript parsers |
 | `vendor/hstry/extension/` | Browser UI, provider readers and category selection |
 | `tests/`, `vendor/hstry/extension/test/` | Synthetic behavior and recovery regressions |
@@ -56,7 +57,7 @@ internal responsibilities.
 ## Data and generated files
 
 `data/` holds local archives, connection files, synthetic demo output and optional
-screenshots. `dist/` holds built wheels and extension ZIPs. Both are ignored, as
+screenshots. Archive-specific Markdown exports, pending snapshots and native host files live in a private `<database filename>.files/` directory. These workspaces are ignored even outside `data/`. `dist/` holds wheels, source distributions, extension ZIPs and verification records. Build outputs are ignored, as
 are caches, local agent state and auth/token files. Runtime never cleans an
 archive or changes consent automatically. Do not run blanket reset/clean commands
 to update an installation with local changes; inspect `git status` and save those
@@ -77,8 +78,7 @@ uv build
 .venv/bin/python scripts/release_record.py > dist/verification.json
 ```
 
-The ZIP contains referenced runtime assets and both MIT notices. The record lists the clean checkout commit, package versions, regular-file counts and SHA-256 hashes read from the exact artifacts. CI compares the extension ZIP to the previous revision and requires a higher version if the bytes change. The wheel also
-ships adapters so collectors work outside the checkout. Never bundle `data/`,
+The ZIP contains referenced runtime assets and both MIT notices. The record lists the clean checkout commit, package versions, regular-file counts and SHA-256 hashes read from the exact artifacts. CI compares the extension ZIP to the previous revision and requires a higher version if the bytes change. The Python sdist contains the sources, vendored parser dependencies and notices needed to rebuild the wheel. It is not a snapshot of the development repository. The wheel ships the same parser files so collectors work outside the checkout. Never bundle `data/`,
 personal sessions, browser profiles, tokens or saved Google authentication.
 
 For real local browser/Google checks use [local-testing.mn.md](local-testing.mn.md).

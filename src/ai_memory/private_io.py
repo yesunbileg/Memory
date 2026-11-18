@@ -5,12 +5,13 @@ import tempfile
 from pathlib import Path
 
 
-def write_private_text(path: Path, text: str) -> None:
+def write_private_text(path: Path, text: str, *, overwrite: bool = True) -> None:
     """Write UTF-8 text through a 0600 temporary file in the existing parent.
 
     The destination remains unchanged until the complete contents have been
     flushed and synced. Temporary files are removed if writing or replacing
-    fails. Callers own creating the output directory, if needed.
+    fails. With overwrite=False publish only if the destination does not exist.
+    Callers own creating the output directory, if needed.
     """
     path = Path(path)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -27,7 +28,10 @@ def write_private_text(path: Path, text: str) -> None:
             file.write(text)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        if overwrite:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path)
     finally:
         if descriptor >= 0:
             os.close(descriptor)

@@ -1,5 +1,5 @@
 // Smoke test that the options module creates dynamic controls before wiring them.
-// Usage: bun extension/test/options-init.js
+// From the repository root: node --test vendor/hstry/extension/test/options-init.js
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

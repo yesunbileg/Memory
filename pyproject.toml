@@ -29,14 +29,27 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/ai_memory"]
+# Python distributions are not repository snapshots. Select runtime sources
+# explicitly: forcing a whole vendor directory also copies untracked files.
+[tool.hatch.build]
+include = [
+    "/src/ai_memory/*.py",
+    "/vendor/hstry/adapters/codex/adapter.ts",
+    "/vendor/hstry/adapters/opencode/adapter.ts",
+    "/vendor/hstry/adapters/types/first-message.ts",
+    "/vendor/hstry/adapters/types/index.ts",
+    "/vendor/hstry/adapters/types/package.json",
+    "/vendor/hstry/LICENSE",
+    "/vendor/hstry/UPSTREAM.json",
+    "/vendor/hstry/PATCHES.md",
+]
 
-[tool.hatch.build.targets.wheel.force-include]
-"vendor/hstry/adapters" = "ai_memory/vendor/hstry/adapters"
-"vendor/hstry/LICENSE" = "ai_memory/vendor/hstry/LICENSE"
-"vendor/hstry/UPSTREAM.json" = "ai_memory/vendor/hstry/UPSTREAM.json"
-"vendor/hstry/PATCHES.md" = "ai_memory/vendor/hstry/PATCHES.md"
+[tool.hatch.build.targets.sdist]
+artifacts = ["/README.md", "/THIRD_PARTY_NOTICES.md"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"vendor/hstry" = "ai_memory/vendor/hstry"
 
 [tool.ruff]
 target-version = "py312"

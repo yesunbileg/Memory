@@ -266,18 +266,11 @@ async def verify_pages(origin, output, executable):
 
 
 def browser_path(provided):
-    default = next(
-        (
-            shutil.which(name)
-            for name in ("chromium", "chromium-browser", "google-chrome", "brave")
-            if shutil.which(name)
-        ),
-        None,
-    )
-    path = Path(provided or default or "")
-    if not path.is_file():
+    candidates = ("chromium", "chromium-browser", "google-chrome", "brave")
+    selected = provided or next(filter(None, map(shutil.which, candidates)), None)
+    if not selected or not Path(selected).is_file():
         raise SystemExit("Specify an installed Chromium executable via --browser-executable.")
-    return path.resolve()
+    return Path(selected).resolve()
 
 
 def main():

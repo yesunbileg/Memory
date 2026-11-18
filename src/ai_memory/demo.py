@@ -2,25 +2,70 @@
 
 import json
 import resource
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from .collectors import collect
 from .diagnostics import PublicInputError
+from .private_io import write_private_text
 from .segments import SegmentBuilder
 from .store import Store
 
+_CLEAN_OUTPUT = "Choose an empty output directory; existing non-demo files will not be overwritten"
 
-def _write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+DEMO_ORIGINS = frozenset(
+    {
+        ("codex", "synthetic-demo", "memory-demo-codex"),
+        ("opencode", "synthetic-demo", "ses_memory"),
+    }
+)
+
+
+def _require_retained_demo(db: Path) -> None:
+    """Inspect before creating any fixtures, changing permissions or migrating a DB."""
+    if db.is_symlink():
+        raise PublicInputError(_CLEAN_OUTPUT)
+    if not db.exists():
+        return
+    try:
+        with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as connection:
+            origins = set(
+                connection.execute("SELECT platform,account,external_id FROM conversations")
+            )
+            bound = connection.execute(
+                "SELECT 1 FROM settings WHERE key IN ('notebook_id','storage_path') LIMIT 1"
+            ).fetchone()
+    except sqlite3.DatabaseError:
+        raise PublicInputError(_CLEAN_OUTPUT) from None
+    if origins != DEMO_ORIGINS or bound:
+        raise PublicInputError(_CLEAN_OUTPUT)
+
+
+def _fixture_text(path: Path, text: str) -> None:
+    if path.resolve() != path.absolute() or (path.exists() and not path.is_file()):
+        raise PublicInputError(_CLEAN_OUTPUT)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        write_private_text(path, text, overwrite=False)
+    except FileExistsError:
+        expected = text.encode("utf-8")
+        if path.stat().st_size != len(expected) or path.read_bytes() != expected:
+            raise PublicInputError(_CLEAN_OUTPUT) from None
 
 
 def prepare_inputs(directory: Path) -> tuple[Path, Path]:
+    files = set()
+
+    def write_json(path, value):
+        _fixture_text(path, json.dumps(value, ensure_ascii=False))
+        files.add(path)
+
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     codex = directory / "codex" / "rollout-memory-demo.jsonl"
-    codex.parent.mkdir(exist_ok=True)
     records = [
         {
             "timestamp": "2026-11-10T08:00:00Z",
@@ -102,11 +147,10 @@ def prepare_inputs(directory: Path) -> tuple[Path, Path]:
             },
         },
     ]
-    codex.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8"
-    )
+    _fixture_text(codex, "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n")
+    files.add(codex)
     opencode = directory / "opencode"
-    _write_json(
+    write_json(
         opencode / "storage/session/project-demo/ses_memory.json",
         {
             "id": "ses_memory",
@@ -125,7 +169,7 @@ def prepare_inputs(directory: Path) -> tuple[Path, Path]:
             "Use one notebook: 49 Markdown segments and one spare slot. Verify a replacement is ready before deleting the old source.",
         ),
     ]:
-        _write_json(
+        write_json(
             opencode / f"storage/message/ses_memory/{mid}.json",
             {
                 "id": mid,
@@ -135,7 +179,7 @@ def prepare_inputs(directory: Path) -> tuple[Path, Path]:
                 **({"modelID": "demo-model"} if role == "assistant" else {}),
             },
         )
-        _write_json(
+        write_json(
             opencode / f"storage/part/{mid}/prt_001.json",
             {
                 "id": "prt_001",
@@ -145,33 +189,56 @@ def prepare_inputs(directory: Path) -> tuple[Path, Path]:
                 "text": text,
             },
         )
+    if any(p.is_symlink() or (not p.is_dir() and p not in files) for p in directory.rglob("*")):
+        raise PublicInputError(_CLEAN_OUTPUT)
     return codex, opencode
 
 
 def run_demo(output: Path) -> dict:
-    output = Path(output).expanduser().resolve()
+    raw = Path(output).expanduser().absolute()
+    output = raw.parent.resolve() / raw.name
+    if output.is_symlink():
+        raise PublicInputError(_CLEAN_OUTPUT)
     marker = output / ".ai-memory-demo"
     if output.exists() and any(output.iterdir()) and not marker.exists():
-        raise PublicInputError(
-            "Choose an empty output directory; existing non-demo files will not be overwritten"
-        )
+        raise PublicInputError(_CLEAN_OUTPUT)
+    db = output / "conversations.sqlite"
+    _require_retained_demo(db)
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker.write_text("Synthetic AI Memory demo data only\n")
+    _fixture_text(marker, "Synthetic AI Memory demo data only\n")
     start, cpu = time.perf_counter(), time.process_time()
     codex, opencode = prepare_inputs(output / "inputs")
-    with Store(output / "conversations.sqlite") as store:
-        ids = []
-        for platform, path in (("codex", codex), ("opencode", opencode)):
-            for c in collect(platform, path, account="synthetic-demo"):
-                ids.append(store.ingest(c, consent=True))
+    fixtures = [
+        c
+        for platform, path in (("codex", codex), ("opencode", opencode))
+        for c in collect(platform, path, account="synthetic-demo")
+    ]
+    expected = {(c["platform"], c["account"], c["external_id"]): c for c in fixtures}
+    with Store(db, existing=db.exists()) as store:
+        for row in store.connection.execute(
+            "SELECT id,platform,account,external_id FROM conversations"
+        ):
+            fixture = expected.get(tuple(row)[1:])
+            current = store.get_conversation(row["id"])
+            if (
+                not fixture
+                or not current["consent"]
+                or any(current.get(k) != v for k, v in fixture.items() if k != "messages")
+                or len(current["messages"]) != len(fixture["messages"])
+                or any(
+                    any(saved.get(k) != v for k, v in message.items())
+                    for saved, message in zip(current["messages"], fixture["messages"], strict=True)
+                )
+            ):
+                raise PublicInputError(_CLEAN_OUTPUT)
+        ids = [store.ingest(c, consent=True) for c in fixtures]
         builder = SegmentBuilder(store)
         builder.build()
         segment_dir = output / "segments"
         segment_dir.mkdir(exist_ok=True, mode=0o700)
         for row in store.connection.execute("SELECT id FROM segments WHERE state!='retired'"):
             path = segment_dir / f"{row[0]}.md"
-            path.write_text(builder.render(row[0]), encoding="utf-8", newline="")
-            path.chmod(0o600)
+            _fixture_text(path, builder.render(row[0]))
         status = store.status()
     stats = {
         "wall_seconds": round(time.perf_counter() - start, 4),

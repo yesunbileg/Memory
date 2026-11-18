@@ -12,9 +12,16 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+from .archive_files import workspace_for
 from .diagnostics import PublicInputError
 from .ingest import MAX_BODY_BYTES, ArchiveChanged, save_packet
 from .store import Store
+
+_BROWSER_DIRECTORIES = {
+    "brave": "BraveSoftware/Brave-Browser",
+    "chrome": "google-chrome",
+    "chromium": "chromium",
+}
 
 
 def _install(path: Path, content: bytes, mode: int):
@@ -48,7 +55,7 @@ def register(db_path: Path, extension_id: str, browser: str, user_data_dir: Path
         raise PublicInputError(
             "Automatic native host registration currently supports Linux Chrome/Chromium."
         )
-    if browser not in {"chrome", "chromium", "brave"}:
+    if browser not in _BROWSER_DIRECTORIES:
         raise PublicInputError("Choose brave, chrome or chromium.")
     db_path = Path(db_path).expanduser().resolve()
     with Store(db_path) as store:
@@ -57,19 +64,13 @@ def register(db_path: Path, extension_id: str, browser: str, user_data_dir: Path
         raise PublicInputError("Unsupported archive identity.")
     host_name = "org.ai_memory.archive_" + archive_id
     origin = f"chrome-extension://{extension_id}/"
-    from .archive_files import workspace_for
-
     directory = workspace_for(db_path) / "native" / extension_id
     if directory.resolve() != directory:
         raise PublicInputError("Use a private archive directory, not a symbolic link.")
     executable = directory / "host"
     descriptor = directory / "extension-connection.json"
     config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    folder = {
-        "chrome": "google-chrome",
-        "chromium": "chromium",
-        "brave": "BraveSoftware/Brave-Browser",
-    }[browser]
+    folder = _BROWSER_DIRECTORIES[browser]
     root = (
         user_data_dir.expanduser().resolve() if user_data_dir is not None else config_home / folder
     )

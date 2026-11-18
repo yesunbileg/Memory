@@ -287,3 +287,19 @@ def test_malformed_cli_arguments_do_not_echo_values(capsys):
     stderr = capsys.readouterr().err
     assert "usage:" in stderr and "--help" in stderr
     assert "synthetic" not in stderr
+
+
+def test_invalid_backup_does_not_publish_an_unusable_destination(tmp_path, capsys):
+    from ai_memory.archive_files import workspace_for
+
+    source = tmp_path / "original.sqlite"
+    with Store(source) as store:
+        store.ingest(conversation())
+    copy = tmp_path / "backup.sqlite"
+    cli(source, capsys, "backup", copy)
+    with sqlite3.connect(copy) as corrupt:
+        corrupt.execute("DROP TABLE source_receipts")
+    destination = tmp_path / "restored.sqlite"
+    cli(destination, capsys, "restore", copy, code=1)
+    assert not destination.exists()
+    assert not workspace_for(destination).exists()

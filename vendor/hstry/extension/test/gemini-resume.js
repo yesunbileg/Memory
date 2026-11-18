@@ -1,5 +1,4 @@
 // Regression test: large Gemini syncs resume in bounded service-worker chunks.
-// Usage: bun extension/test/gemini-resume.js
 
 import assert from 'node:assert/strict';
 import { syncGemini } from '../providers/gemini.js';

@@ -1,4 +1,6 @@
-"""Local, non-network view of committed NotebookLM revisions and consent."""
+"""Archive-local queries and inventory observations for NotebookLM publication state."""
+
+import time
 
 from .privacy import MASKING_POLICY
 
@@ -35,3 +37,44 @@ def publication_status(store):
         FROM source_map m LEFT JOIN source_receipts r USING(source_id) ORDER BY m.segment_id""")
     ]
     return {"managed_sources": inventory, "eligible_sources": len(allowed_sources(store))}
+
+
+def _missing(db, mapping):
+    """Hold all revisions of the segment, not just the one absent from the provider."""
+    db.execute(
+        """INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id,error)
+        VALUES(?,?,?,'missing',?,'remote_missing') ON CONFLICT(segment_id,revision)
+        DO UPDATE SET stage='missing',error='remote_missing',next_attempt=0""",
+        (
+            mapping["segment_id"],
+            mapping["revision"],
+            f"{mapping['segment_id']}-r{mapping['revision']}-missing.md",
+            mapping["source_id"],
+        ),
+    )
+    db.execute(
+        "UPDATE segments SET state='sealed' WHERE id=? AND state='open'", (mapping["segment_id"],)
+    )
+
+
+def observe_inventory(store, sources):
+    """Record only provider-confirmed inventory observations, never on network failure."""
+    db = store.connection
+    now = time.time()
+    available = {s["id"]: bool(s.get("ready")) for s in sources}
+    with db:
+        for mapping in db.execute(
+            "SELECT sm.* FROM source_map sm JOIN segments s ON s.id=sm.segment_id WHERE s.state!='retired'"
+        ).fetchall():
+            source_id = mapping["source_id"]
+            state = (
+                ("ready" if available[source_id] else "unready")
+                if source_id in available
+                else "missing"
+            )
+            db.execute(
+                "UPDATE source_receipts SET remote_state=?,verified_at=? WHERE source_id=?",
+                (state, now, source_id),
+            )
+            if state == "missing":
+                _missing(db, mapping)

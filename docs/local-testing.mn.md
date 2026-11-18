@@ -27,7 +27,7 @@ Google ашиглахгүй үндсэн шалгалт:
 1. Brave дээр `brave://extensions/` нээнэ (`chrome://extensions/` мөн болно).
 2. **Developer mode** асаана.
 3. **Load unpacked** → repository доторх `vendor/hstry/extension` хавтсыг сонгоно.
-4. Өмнө суулгасан бол **Reload** дарна. Settings дээр **0.6.1** харагдана.
+4. Өмнө суулгасан бол **Reload** дарна. Settings дээрх хувилбар `vendor/hstry/extension/manifest.json` дахь `version`-тай таарах ёстой.
 
 ZIP хэрэгтэй бол:
 
@@ -35,7 +35,7 @@ ZIP хэрэгтэй бол:
 .venv/bin/python scripts/package_extension.py
 ```
 
-`dist/ai-memory-extension-0.6.1.zip` үүснэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон төслийн ба upstream MIT лиценз орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
+Команд үүсгэсэн ZIP-ийн зам, хувилбар, SHA-256-г хэвлэнэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон төслийн ба upstream MIT лиценз орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
 
 ## 3. Компьютертэй холбох
 

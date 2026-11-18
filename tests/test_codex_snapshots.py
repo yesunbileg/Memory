@@ -193,3 +193,23 @@ def test_codex_directory_merges_snapshots_without_churning_stable_archive_state(
         second = store.get_conversation(conversation_id)
         assert second["revision"] == first["revision"]
         assert second["messages"] == first["messages"]
+
+
+def test_unbounded_codex_discovery_walks_each_native_directory_once(tmp_path, monkeypatch):
+    from ai_memory import collectors
+
+    for name in ("sessions", "archived_sessions"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "one.jsonl").touch()
+    visited = []
+    walk = collectors.os.walk
+
+    def count_walk(*args, **kwargs):
+        for row in walk(*args, **kwargs):
+            visited.append(row[0])
+            yield row
+
+    monkeypatch.setattr(collectors.os, "walk", count_walk)
+    assert len(collectors.codex_rollout_files(tmp_path)) == 2
+    assert len(visited) == len(set(visited))

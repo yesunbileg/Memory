@@ -1,5 +1,6 @@
 """Mongolian, synthetic-only workflow through real CLI and MCP entry points."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -14,10 +15,11 @@ from ai_memory.segments import SegmentBuilder
 from ai_memory.store import Store
 from ai_memory.sync import SyncEngine
 
+SYNTHETIC_PASSWORD = "SyntheticOnlyPass921!"
 ORIGINAL = (
     " \tСайн байна уу, санах ойн шийдвэр 🦦\r\n"
     "```python\r\nprint('Монгол')\r```\r\n"
-    "password = 'SyntheticOnlyPass921!'\r\n  "
+    f"password = '{SYNTHETIC_PASSWORD}'\r\n  "
 )
 EDITED = ORIGINAL.replace("санах ойн шийдвэр", "шинэчилсэн шийдвэр")
 ANSWER = "Эх хувийг SQLite-д хадгална. 🗂️"
@@ -183,25 +185,25 @@ async def verify_mcp_scope(db, remote_path, source_id):
         args=["-c", bootstrap, str(remote_path), "--db", str(db), "mcp"],
         env={"PYTHONPATH": pythonpath},
     )
-    async with stdio_client(parameters) as streams:
-        async with ClientSession(*streams) as client:
-            await client.initialize()
-            assert {tool.name for tool in (await client.list_tools()).tools} == {
-                "memory_ask",
-                "memory_status",
-            }
-            accepted = await client.call_tool("memory_ask", {"question": QUESTION})
-            assert not accepted.isError
-            response = decode_mcp(accepted)
-            assert ANSWER in response["answer"]
-            assert [source["source_id"] for source in response["sources"]] == [source_id]
+    async with stdio_client(parameters) as streams, ClientSession(*streams) as client:
+        await client.initialize()
+        assert {tool.name for tool in (await client.list_tools()).tools} == {
+            "memory_ask",
+            "memory_status",
+        }
+        accepted = await client.call_tool("memory_ask", {"question": QUESTION})
+        assert not accepted.isError
+        response = decode_mcp(accepted)
+        assert ANSWER in response["answer"]
+        assert [source["source_id"] for source in response["sources"]] == [source_id]
 
-            rejected = await client.call_tool("memory_ask", {"question": FOREIGN_QUESTION})
-            assert rejected.isError
-            assert decode_mcp(rejected)["error"]["code"] == "unverified_sources"
-            assert "answer" not in decode_mcp(rejected)
-            wire = rejected.model_dump_json()
-            assert FOREIGN_ANSWER not in wire and FOREIGN_PASSAGE not in wire
+        rejected = await client.call_tool("memory_ask", {"question": FOREIGN_QUESTION})
+        assert rejected.isError
+        response = decode_mcp(rejected)
+        assert response["error"]["code"] == "unverified_sources"
+        assert "answer" not in response
+        wire = rejected.model_dump_json()
+        assert FOREIGN_ANSWER not in wire and FOREIGN_PASSAGE not in wire
 
     assert FakeNotebook(remote_path).read()["questions"] == [
         [QUESTION, [source_id]],
@@ -270,12 +272,12 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
     source_id, remote_source = next(iter(remote["sources"].items()))
     assert not remote_source["ready"]
     outbound = remote_source["text"].encode()
-    assert (
-        ORIGINAL.replace("SyntheticOnlyPass921!", "*" * len("SyntheticOnlyPass921!")).encode()
-        in outbound
-    )
-    assert b"SyntheticOnlyPass921!" not in outbound
+    masked_password = "*" * len(SYNTHETIC_PASSWORD)
+    assert ORIGINAL.replace(SYNTHETIC_PASSWORD, masked_password).encode() in outbound
+    assert SYNTHETIC_PASSWORD.encode() not in outbound
     assert outbound == expected_outbound
+    outbound_digest = hashlib.sha256(outbound).hexdigest()
+    assert outbound_digest == expected_snapshots[0]["sha256"]
     assert any(outbound == path.read_bytes() for path in snapshot_dir.glob("*.md"))
     assert_original_text(rows_by_account(db)["alpha"])
 
@@ -303,7 +305,7 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
     assert remote["sources"][source_id]["ready"] is True
     evidence = archive_evidence(pending_archive)
     assert [mapping["source_id"] for mapping in evidence["source_map"]] == [source_id]
-    assert evidence["source_receipts"][0]["sha256"] == expected_snapshots[0]["sha256"]
+    assert evidence["source_receipts"][0]["sha256"] == outbound_digest
     finished_backup = tmp_path / "finished.sqlite"
     finished_archive = tmp_path / "restored-finished" / "memory.sqlite"
     cli(pending_archive, "backup", finished_backup)

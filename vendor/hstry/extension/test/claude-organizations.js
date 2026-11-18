@@ -1,5 +1,4 @@
 // Regression test: one inaccessible Claude organization must not abort others.
-// Usage: bun extension/test/claude-organizations.js
 
 import assert from 'node:assert/strict';
 import { syncClaude } from '../providers/claude.js';

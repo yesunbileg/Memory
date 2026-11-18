@@ -1,3 +1,5 @@
+import { isArchiveHost } from './connection-file.js';
+
 // Native Messaging launches only the OS-registered host with a matching allowed extension origin.
 // A loopback HTTP response (even with a matching archive ID) is never sufficient.
 const errors = {
@@ -11,11 +13,7 @@ const errors = {
 };
 
 export function validPair(settings) {
-  return (
-    typeof settings?.archiveId === 'string' &&
-    /^[a-f0-9]{32}$/.test(settings.archiveId) &&
-    settings.nativeHost === 'org.ai_memory.archive_' + settings.archiveId
-  );
+  return isArchiveHost(settings?.archiveId, settings?.nativeHost);
 }
 
 export async function checkConnection(

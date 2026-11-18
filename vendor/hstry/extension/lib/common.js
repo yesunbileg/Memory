@@ -10,14 +10,6 @@ export function thinkingPart(text) {
   return { id: `p-${++partCounter}`, type: 'thinking', text };
 }
 
-export function toolCallPart(toolCallId, name, input) {
-  return { id: `p-${++partCounter}`, type: 'tool_call', toolCallId, name, input };
-}
-
-export function toolResultPart(toolCallId, output) {
-  return { id: `p-${++partCounter}`, type: 'tool_result', toolCallId, output };
-}
-
 export class NotLoggedInError extends Error {
   constructor(service) {
     super(`${service}: not logged in`);

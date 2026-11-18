@@ -379,7 +379,7 @@ class Store:
             if platform == "codex" and codex_snapshot and messages:
                 from .collectors import _snapshot_rank
 
-                codex_rank = _snapshot_rank(c, None)
+                codex_rank = _snapshot_rank(c)
             reordered = (
                 self._reconcile_order(
                     key,
@@ -537,7 +537,8 @@ class Store:
         with archive_lock(self.path):
             return update_consent(self, ids, approved=False)
 
-    def get_conversation(self, conversation_id: str) -> dict:
+    def conversation_metadata(self, conversation_id: str) -> dict:
+        """Return the archive fields without loading any message bodies."""
         row = self.connection.execute(
             "SELECT * FROM conversations WHERE id=?", (conversation_id,)
         ).fetchone()
@@ -546,6 +547,10 @@ class Store:
         result = dict(row)
         result["models"] = json.loads(result["models"])
         result["consent"] = bool(result["consent"])
+        return result
+
+    def get_conversation(self, conversation_id: str) -> dict:
+        result = self.conversation_metadata(conversation_id)
         result["messages"] = [
             dict(r)
             for r in self.connection.execute(

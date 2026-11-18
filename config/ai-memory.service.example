@@ -1,5 +1,5 @@
 [Unit]
-Description=Collect approved AI conversations and sync NotebookLM segments
+Description=Collect selected local conversations and sync only approved content
 
 [Service]
 Type=simple

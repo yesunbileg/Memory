@@ -1,3 +1,4 @@
+import { connectionPresentation } from './connection-file.js';
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
 import {
   CAPTURE_TYPES,
@@ -34,7 +35,20 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
   },
 });
 
-export function normalizeSettings(values, defaults) {
+export const DEFAULT_SETTINGS = Object.freeze({
+  port: 41770,
+  token: '',
+  nativeHost: '',
+  archiveId: '',
+  account: 'browser-local',
+  intervalMinutes: 15,
+  autoPaused: false,
+  providers: DEFAULT_PROVIDER_SETTINGS,
+  captureTypes: DEFAULT_CAPTURE_TYPES,
+});
+
+export function normalizeSettings(values = {}, defaults = DEFAULT_SETTINGS) {
+  values ??= {};
   const port = Number(values.port);
   const intervalMinutes = Number(values.intervalMinutes);
   return {
@@ -50,7 +64,10 @@ export function normalizeSettings(values, defaults) {
         ? intervalMinutes
         : defaults.intervalMinutes,
     providers: Object.fromEntries(
-      Object.keys(PROVIDERS).map((id) => [id, Boolean(values.providers?.[id])]),
+      Object.keys(PROVIDERS).map((id) => [
+        id,
+        Boolean(values.providers?.[id] ?? defaults.providers?.[id]),
+      ]),
     ),
     captureTypes: normalizeCaptureTypes(values.captureTypes),
   };
@@ -77,6 +94,17 @@ export function formatDuration(ms) {
   const mins = Math.floor(seconds / 60);
   const rem = Math.round(seconds % 60);
   return rem ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+// Older profiles recorded unstructured loopback failures; newer workers record a code.
+function isOffline(error, code) {
+  const text = String(error ?? '');
+  return (
+    code === 'offline' ||
+    text.includes('cannot reach hstry-api') ||
+    text.includes('AI Memory is offline') ||
+    text.includes('Failed to fetch')
+  );
 }
 
 export function providerState(
@@ -148,14 +176,7 @@ export function providerState(
       label: 'Ready to sync',
       detail: 'Selected chat types will appear here.',
     };
-  if (
-    apiConnected &&
-    (entry.lastErrorCode === 'offline' ||
-      (entry.lastError &&
-        (entry.lastError.includes('cannot reach hstry-api') ||
-          entry.lastError.includes('AI Memory is offline') ||
-          entry.lastError.includes('Failed to fetch'))))
-  ) {
+  if (isOffline(entry.lastError, entry.lastErrorCode)) {
     return {
       tone: 'idle',
       label: 'Ready to retry',
@@ -208,19 +229,15 @@ export function friendlyError(error, code = null) {
     return 'Your selection changed. Capture again with your new checklist.';
   if (code === 'not_logged_in' || text.includes('not logged in') || text.includes('sign in'))
     return 'Open this provider and sign in, then sync again.';
-  if (
-    code === 'offline' ||
-    text.includes('cannot reach hstry-api') ||
-    text.includes('AI Memory is offline') ||
-    text.includes('Failed to fetch')
-  ) {
-    return 'Start AI Memory on this computer, then try again.';
+  if (code === 'offline') return connectionPresentation({ code }).detail;
+  if (isOffline(text, code)) return 'Start AI Memory on this computer, then try again.';
+  // Reuse the pairing instructions shown in Settings, including after a legacy
+  // bearer failure. Never interpolate raw errors into user-facing text.
+  if (['legacy_pairing', 'archive_changed', 'incompatible_server', 'unauthorized'].includes(code)) {
+    return connectionPresentation({ code }).detail;
   }
-  if (code === 'legacy_pairing' || code === 'native_unavailable' || code === 'archive_mismatch')
-    return 'Open Settings and pair this archive with its native connection file.';
-  if (code === 'unauthorized' || text.includes('rejected the token') || text.includes('401')) {
-    return 'The ingest token does not match the local API.';
-  }
+  if (text.includes('rejected the token') || text.includes('401'))
+    return connectionPresentation({ code: 'legacy_pairing' }).detail;
   if (code === 'rate_limited' || text.includes('429') || text.includes('RateLimited')) {
     return 'The provider is rate-limiting requests. Wait a few minutes and retry.';
   }
@@ -316,9 +333,7 @@ export function formatSyncBreakdown(entry) {
   const percent =
     entry.running && detected > 0
       ? Math.max(0, Math.min(100, Math.round((processed / detected) * 100)))
-      : entry.running
-        ? null
-        : null;
+      : null;
   return { chips, categoryChips, percent };
 }
 
@@ -390,12 +405,37 @@ export function enterToggles(input) {
   });
 }
 
-export function progressSemantics(element, name, percent) {
-  element.setAttribute('role', 'progressbar');
-  element.setAttribute('aria-label', `${name} local capture`);
-  element.setAttribute('aria-valuemin', '0');
-  element.setAttribute('aria-valuemax', '100');
-  if (percent !== null) element.setAttribute('aria-valuenow', String(percent));
+// Keep the visible fill and the announced percentage in agreement on both surfaces.
+export function progressBar(name, percent) {
+  const bar = document.createElement('div');
+  bar.className = `progress-track${percent === null ? ' indeterminate' : ''}`;
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-label', `${name} local capture`);
+  bar.setAttribute('aria-valuemin', '0');
+  bar.setAttribute('aria-valuemax', '100');
+  const fill = document.createElement('div');
+  fill.className = 'progress-fill';
+  if (percent !== null) {
+    bar.setAttribute('aria-valuenow', String(percent));
+    fill.style.width = `${percent}%`;
+  }
+  bar.appendChild(fill);
+  return bar;
+}
+
+export function resultChip(label, tone) {
+  const chip = document.createElement('span');
+  chip.className = `mini-chip ${tone}`;
+  chip.textContent = label;
+  return chip;
+}
+
+export function sameConnection(previous, next) {
+  return (
+    previous.nativeHost === next.nativeHost &&
+    previous.archiveId === next.archiveId &&
+    previous.token === next.token
+  );
 }
 
 // Rebuilt controls have stable IDs. If a focused action no longer exists,

@@ -1,15 +1,15 @@
 import { eligibleCapture } from './providers/selection.js';
 import {
   CAPTURE_TYPES,
-  DEFAULT_CAPTURE_TYPES,
-  DEFAULT_PROVIDER_SETTINGS,
   PROVIDERS,
   PROVIDER_CAPABILITIES,
   describeEffectivePlan,
   captureOutcome,
   statusForPairing,
   enterToggles,
-  progressSemantics,
+  progressBar,
+  resultChip,
+  sameConnection,
   restoreControl,
   formatDuration,
   formatSyncBreakdown,
@@ -21,14 +21,6 @@ import {
 import { connectionPresentation, parseConnectionFile } from './connection-file.js';
 import { CATEGORY_ICONS, PROVIDER_ICONS, UI_ICONS } from './icons.js';
 
-const DEFAULTS = {
-  port: 41770,
-  token: '',
-  account: 'browser-local',
-  intervalMinutes: 15,
-  providers: DEFAULT_PROVIDER_SETTINGS,
-  captureTypes: DEFAULT_CAPTURE_TYPES,
-};
 const el = (id) => document.getElementById(id);
 const typeCopy = {
   projects: ['Projects & folders', 'Chats organized inside a project or folder.'],
@@ -36,7 +28,7 @@ const typeCopy = {
   agents: ['GPTs & agents', 'Chats with a custom GPT or agent.'],
   recents: ['Ordinary Recents', 'Everyday chats outside your organized spaces.'],
 };
-let currentSettings = DEFAULTS;
+let currentSettings = normalizeSettings();
 let apiConnected = false;
 let checking = false;
 let connectionCheck = 0;
@@ -53,10 +45,6 @@ function updateCommand() {
   const id = /^[a-p]{32}$/.test(chrome.runtime.id) ? chrome.runtime.id : 'EXTENSION_ID';
   el('setup-command').textContent =
     `ai-memory --db /path/to/archive.sqlite connect --extension-id ${id} --browser ${browser}`;
-}
-
-function sameConnection(a, b) {
-  return a.archiveId === b.archiveId && a.nativeHost === b.nativeHost && a.token === b.token;
 }
 
 function feedback(id, text, error = false) {
@@ -95,21 +83,18 @@ function renderControls() {
 }
 
 function readSettings() {
-  return normalizeSettings(
-    {
-      ...currentSettings,
-      autoPaused: el('auto-paused').checked,
-      account: el('account').value,
-      intervalMinutes: el('interval').value,
-      providers: Object.fromEntries(
-        Object.keys(PROVIDERS).map((id) => [id, el(`provider-${id}`).checked]),
-      ),
-      captureTypes: Object.fromEntries(
-        Object.keys(CAPTURE_TYPES).map((id) => [id, el(`capture-${id}`).checked]),
-      ),
-    },
-    DEFAULTS,
-  );
+  return normalizeSettings({
+    ...currentSettings,
+    autoPaused: el('auto-paused').checked,
+    account: el('account').value,
+    intervalMinutes: el('interval').value,
+    providers: Object.fromEntries(
+      Object.keys(PROVIDERS).map((id) => [id, el(`provider-${id}`).checked]),
+    ),
+    captureTypes: Object.fromEntries(
+      Object.keys(CAPTURE_TYPES).map((id) => [id, el(`capture-${id}`).checked]),
+    ),
+  });
 }
 
 async function persist() {
@@ -270,12 +255,11 @@ function renderActivityLog(entries) {
 
 async function renderStatus() {
   const ticket = ++statusRender;
-  const statusResp = await chrome.storage.local.get('status');
-  const logResp = await chrome.storage.local.get('activityLog');
-  const activityLog = Array.isArray(logResp?.activityLog) ? logResp.activityLog : [];
+  const stored = await chrome.storage.local.get(['status', 'activityLog']);
+  const activityLog = Array.isArray(stored.activityLog) ? stored.activityLog : [];
 
   if (ticket !== statusRender) return;
-  const status = statusForPairing(statusResp?.status, currentSettings);
+  const status = statusForPairing(stored.status, currentSettings);
   const key = JSON.stringify([currentSettings.archiveId, currentSettings.account]);
   if (displayScope !== key) {
     displayScope = key;
@@ -317,31 +301,16 @@ async function renderStatus() {
     item.querySelector('.status-time').textContent =
       `${formatTime(entry?.lastSuccessMs ?? entry?.lastRunMs)}${durationText}`;
 
-    if (enabled && entry?.running) {
-      const bar = document.createElement('div');
-      bar.className = `progress-track${breakdown.percent === null ? ' indeterminate' : ''}`;
-      progressSemantics(bar, provider.name, breakdown.percent);
-      const fill = document.createElement('div');
-      fill.className = 'progress-fill';
-      if (breakdown.percent !== null) fill.style.width = `${breakdown.percent}%`;
-      bar.appendChild(fill);
-      item.appendChild(bar);
-    }
+    if (enabled && entry?.running) item.appendChild(progressBar(provider.name, breakdown.percent));
 
     if (enabled && (breakdown.chips.length > 0 || breakdown.categoryChips.length > 0)) {
       const chipsRow = document.createElement('div');
       chipsRow.className = 'status-chips';
       for (const chip of breakdown.chips) {
-        const badge = document.createElement('span');
-        badge.className = `mini-chip ${chip.tone}`;
-        badge.textContent = chip.label;
-        chipsRow.appendChild(badge);
+        chipsRow.appendChild(resultChip(chip.label, chip.tone));
       }
       for (const label of breakdown.categoryChips) {
-        const badge = document.createElement('span');
-        badge.className = 'mini-chip category';
-        badge.textContent = label;
-        chipsRow.appendChild(badge);
+        chipsRow.appendChild(resultChip(label, 'category'));
       }
       item.appendChild(chipsRow);
     }
@@ -541,18 +510,9 @@ el('resync-list').addEventListener('click', async (event) => {
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.settings?.newValue) {
     const values = changes.settings.newValue;
-    const next = normalizeSettings(
-      { ...DEFAULTS, ...values, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...values.providers } },
-      DEFAULTS,
-    );
+    const next = normalizeSettings(values);
     const authChanged = !sameConnection(currentSettings, next);
-    currentSettings = next;
-    el('account').value = next.account;
-    el('auto-paused').checked = next.autoPaused;
-    el('interval').value = next.intervalMinutes;
-    for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = next.providers[id];
-    for (const id of Object.keys(CAPTURE_TYPES))
-      el(`capture-${id}`).checked = next.captureTypes[id];
+    showSettings(next);
     if (authChanged) {
       connectionCheck++;
       apiConnected = false;
@@ -564,18 +524,17 @@ chrome.storage.onChanged.addListener((changes) => {
   }
   if (changes.status || changes.activityLog) renderStatus();
 });
-const { settings = {} } = await chrome.storage.local.get('settings');
-currentSettings = normalizeSettings(
-  { ...DEFAULTS, ...settings, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers } },
-  DEFAULTS,
-);
-el('account').value = currentSettings.account;
-el('auto-paused').checked = currentSettings.autoPaused;
-el('interval').value = currentSettings.intervalMinutes;
-for (const id of Object.keys(PROVIDERS))
-  el(`provider-${id}`).checked = currentSettings.providers[id];
-for (const id of Object.keys(CAPTURE_TYPES))
-  el(`capture-${id}`).checked = currentSettings.captureTypes[id];
+function showSettings(settings) {
+  currentSettings = settings;
+  el('account').value = settings.account;
+  el('auto-paused').checked = settings.autoPaused;
+  el('interval').value = settings.intervalMinutes;
+  for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = settings.providers[id];
+  for (const id of Object.keys(CAPTURE_TYPES))
+    el(`capture-${id}`).checked = settings.captureTypes[id];
+}
+
+showSettings(normalizeSettings((await chrome.storage.local.get('settings')).settings));
 const version = chrome.runtime.getManifest?.().version;
 el('app-version').textContent = version ? `v${version}` : 'Extension';
 updateSelection();

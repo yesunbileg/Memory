@@ -80,7 +80,7 @@ def _quoted_value(text: str, start: int) -> tuple[int, int, int, str] | None:
             tail = text[close_end:]
             if not tail or tail[0] in "\"'\r\n,;)}#":
                 return content_start, close_start, close_end, "\\" + quote
-            if tail[0].isspace() and (len(tail) == 1 or tail.lstrip()[0] in ",;)}#"):
+            if tail[0].isspace() and (not tail.strip() or tail.lstrip()[0] in ",;)}#"):
                 return content_start, close_start, close_end, "\\" + quote
         return None
 

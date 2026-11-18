@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { eligibleCapture } from '../providers/selection.js';
-import { captureOutcome, describeEffectivePlan, normalizeSettings } from '../ui.js';
+import {
+  captureOutcome,
+  describeEffectivePlan,
+  normalizeSettings,
+  statusForPairing,
+  formatSyncBreakdown,
+} from '../ui.js';
 
 const organized = { projects: true, pinned: true, agents: true, recents: false };
 const agentsOnly = { projects: false, pinned: false, agents: true, recents: false };
@@ -57,9 +63,7 @@ assert.match(
 );
 assert.match(captureOutcome({ claude: run({ running: true }) }, { claude: true }), /Capturing/);
 assert.equal(captureOutcome({ claude: run() }, { claude: true }, 21), '');
-console.log('PASS cross-surface capture eligibility, migration, and outcome states');
 
-const { statusForPairing, formatSyncBreakdown } = await import('../ui.js');
 const archive = 'a'.repeat(32);
 const otherArchive = 'b'.repeat(32);
 const scoped = (id, site, name) => ({
@@ -86,3 +90,5 @@ assert.equal(
   formatSyncBreakdown({ running: true, progress: { detected: 4, processed: 0 } }).percent,
   0,
 );
+
+console.log('PASS cross-surface capture eligibility, migration, scoped outcomes and progress');

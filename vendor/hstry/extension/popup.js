@@ -1,6 +1,4 @@
 import {
-  DEFAULT_CAPTURE_TYPES,
-  DEFAULT_PROVIDER_SETTINGS,
   PROVIDERS,
   PROVIDER_CAPABILITIES,
   formatSyncBreakdown,
@@ -8,7 +6,9 @@ import {
   captureOutcome,
   statusForPairing,
   enterToggles,
-  progressSemantics,
+  progressBar,
+  resultChip,
+  sameConnection,
   restoreControl,
   friendlyError,
   formatTime,
@@ -18,14 +18,6 @@ import {
 import { connectionPresentation } from './connection-file.js';
 import { PROVIDER_ICONS, UI_ICONS } from './icons.js';
 
-const DEFAULTS = {
-  port: 41770,
-  token: '',
-  account: 'browser-local',
-  intervalMinutes: 15,
-  providers: DEFAULT_PROVIDER_SETTINGS,
-  captureTypes: DEFAULT_CAPTURE_TYPES,
-};
 const el = (id) => document.getElementById(id);
 const filterLabels = {
   projects: 'Projects',
@@ -35,7 +27,7 @@ const filterLabels = {
 };
 
 let apiConnected = false;
-let current = DEFAULTS;
+let current = normalizeSettings();
 let busy = false;
 let connectionCheck = 0;
 let since = 0;
@@ -43,26 +35,31 @@ let generation = 0;
 let requestNotice = '';
 let displayScope = '';
 
-async function saveSettingsPatch(patch) {
-  const { settings = {} } = await chrome.storage.local.get('settings');
-  const next = normalizeSettings(
-    {
-      ...DEFAULTS,
-      ...settings,
-      ...patch,
-      providers: {
-        ...DEFAULT_PROVIDER_SETTINGS,
-        ...settings.providers,
-        ...(patch.providers ?? {}),
-      },
-      captureTypes: {
-        ...current.captureTypes,
-        ...(patch.captureTypes ?? {}),
-      },
-    },
-    DEFAULTS,
-  );
-  current = next;
+// Serialize popup read/modify/write operations. Starting two asynchronous
+// reads at once would let a rapid second choice overwrite the first.
+let settingsWrites = Promise.resolve();
+function queueSelection(group, key, value) {
+  settingsWrites = settingsWrites
+    .then(() => saveSelection(group, key, value))
+    .catch(async () => {
+      try {
+        await render();
+      } catch {
+        /* Storage may still be unavailable. */
+      }
+      el('notice').textContent = 'Your selection could not be saved. Try again.';
+    });
+  return settingsWrites;
+}
+
+async function saveSelection(group, key, value) {
+  const latest = normalizeSettings((await chrome.storage.local.get('settings')).settings);
+  // Another settings page may have saved changes before its notification arrived.
+  // Patch the persisted selections, not the stale copy used to render this popup.
+  const next = {
+    ...latest,
+    [group]: { ...latest[group], [key]: value ?? !latest[group][key] },
+  };
   await chrome.storage.local.set({ settings: next });
   try {
     await chrome.runtime.sendMessage({ type: 'settingsChanged' });
@@ -83,9 +80,7 @@ function renderFilters() {
     chip.className = `filter-chip${active ? ' active' : ''}${key === 'recents' ? ' is-recents' : ''}`;
     chip.setAttribute('aria-pressed', String(active));
     chip.textContent = label;
-    chip.addEventListener('click', () => {
-      saveSettingsPatch({ captureTypes: { [key]: !active } });
-    });
+    chip.addEventListener('click', () => queueSelection('captureTypes', key));
     container.appendChild(chip);
   }
 }
@@ -98,14 +93,7 @@ async function render() {
   ]);
   if (ticket !== generation) return;
   const focused = document.activeElement?.id;
-  current = normalizeSettings(
-    {
-      ...DEFAULTS,
-      ...settings,
-      providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers },
-    },
-    DEFAULTS,
-  );
+  current = normalizeSettings(settings);
 
   const status = statusForPairing(rawStatus, current);
   const key = JSON.stringify([current.archiveId, current.account]);
@@ -173,22 +161,11 @@ async function render() {
     toggle.setAttribute('role', 'switch');
     enterToggles(toggle);
     toggle.checked = enabled;
-    toggle.addEventListener('change', () => {
-      saveSettingsPatch({ providers: { [id]: toggle.checked } });
-    });
+    toggle.addEventListener('change', () => queueSelection('providers', id, toggle.checked));
 
     card.appendChild(top);
 
-    if (enabled && entry?.running) {
-      const bar = document.createElement('div');
-      bar.className = `progress-track${breakdown.percent === null ? ' indeterminate' : ''}`;
-      progressSemantics(bar, provider.name, breakdown.percent);
-      const fill = document.createElement('div');
-      fill.className = 'progress-fill';
-      if (breakdown.percent !== null) fill.style.width = `${breakdown.percent}%`;
-      bar.appendChild(fill);
-      card.appendChild(bar);
-    }
+    if (enabled && entry?.running) card.appendChild(progressBar(provider.name, breakdown.percent));
 
     const showMetaRow =
       enabled &&
@@ -206,10 +183,7 @@ async function render() {
         left.appendChild(timeSpan);
       }
       for (const chip of breakdown.chips.slice(0, 2)) {
-        const badge = document.createElement('span');
-        badge.className = `mini-chip ${chip.tone}`;
-        badge.textContent = chip.label;
-        left.appendChild(badge);
+        left.appendChild(resultChip(chip.label, chip.tone));
       }
       meta.appendChild(left);
 
@@ -265,13 +239,7 @@ async function checkApi() {
   } catch {
     result = { ok: false, code: 'offline' };
   }
-  if (
-    generation !== connectionCheck ||
-    requested.nativeHost !== current.nativeHost ||
-    requested.archiveId !== current.archiveId ||
-    requested.token !== current.token
-  )
-    return false;
+  if (generation !== connectionCheck || !sameConnection(requested, current)) return false;
   apiConnected = result?.ok === true;
   const state = connectionPresentation(result);
   el('api-title').textContent = apiConnected ? 'Connected to your computer' : state.label;
@@ -314,19 +282,15 @@ el('sync').addEventListener('click', async () => {
   }
 });
 
-for (const id of ['settings', 'edit-selection', 'open-setup']) {
-  el(id)?.addEventListener('click', () => chrome.runtime.openOptionsPage());
+for (const id of ['settings', 'edit-selection']) {
+  el(id).addEventListener('click', () => chrome.runtime.openOptionsPage());
 }
 el('retry').addEventListener('click', checkApi);
 
 chrome.storage.onChanged.addListener(async (changes) => {
   const previous = current;
   const values = changes.settings?.newValue;
-  const authChanged =
-    values &&
-    ((values.nativeHost ?? '') !== previous.nativeHost ||
-      (values.archiveId ?? '') !== previous.archiveId ||
-      (values.token ?? '') !== previous.token);
+  const authChanged = values && !sameConnection(previous, normalizeSettings(values));
   if (authChanged) {
     connectionCheck++;
     apiConnected = false;

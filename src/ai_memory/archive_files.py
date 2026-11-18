@@ -17,8 +17,8 @@ def workspace_for(path):
     return db.with_name(db.name + ".files")
 
 
-def _publish_database(connection, destination):
-    """Publish a consistent, private SQLite copy without replacing anything."""
+def _publish_database(connection, destination, *, inspect_copy=None):
+    """Check a complete private copy before making its destination visible."""
     path = Path(destination).expanduser().absolute()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, name = tempfile.mkstemp(prefix=".memory-db-", dir=path.parent)
@@ -33,6 +33,7 @@ def _publish_database(connection, destination):
                 raise PublicInputError("Archive integrity check failed")
         finally:
             dest.close()
+        result = inspect_copy(temporary) if inspect_copy else path
         with temporary.open("rb") as file:
             os.fsync(file.fileno())
         try:
@@ -41,7 +42,7 @@ def _publish_database(connection, destination):
             raise PublicInputError("Destination already exists; select a new path") from None
     finally:
         temporary.unlink(missing_ok=True)
-    return path
+    return result
 
 
 def _valid_title(title):
@@ -133,6 +134,11 @@ def backup_archive(store, destination):
 def restore_archive(destination, backup):
     from .store import Store
 
+    def restored_status(candidate):
+        # SQLite quick_check alone can't detect missing application tables.
+        with Store(candidate, existing=True) as restored:
+            return restored.status()
+
     path = Path(destination).expanduser().absolute()
     if path.exists() or path.is_symlink() or workspace_for(path).exists():
         raise PublicInputError("Restore requires a new archive path and workspace")
@@ -155,15 +161,14 @@ def restore_archive(destination, backup):
                 sync_dir = work / "sync"
                 sync_dir.mkdir(mode=0o700, exist_ok=True)
                 write_private_text(sync_dir / title, data.decode("utf-8"))
-            _publish_database(db, path)
+            status = _publish_database(db, path, inspect_copy=restored_status)
     except BaseException:
         if owned:
             shutil.rmtree(work)
         raise
     finally:
         db.close()
-    with Store(path) as restored:
-        return {"restored": str(path), "status": restored.status()}
+    return {"restored": str(path), "status": status}
 
 
 def export_segments(store, builder, destination=None):

@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from pathlib import Path
 from time import monotonic as _monotonic
 from time import sleep as _sleep
@@ -214,41 +214,30 @@ def _watch(args):
                 active_sync is None
                 and _monotonic() >= next_sync
                 and store.get_setting("notebook_id")
+                and (not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1))
             ):
-                if not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1):
-                    active_sync = Future()
-                    threading.Thread(target=run_remote, args=(active_sync,), daemon=True).start()
+                active_sync = Future()
+                threading.Thread(target=run_remote, args=(active_sync,), daemon=True).start()
 
-            if active_sync is not None:
+            # Observe completion separately from result retrieval: a task that
+            # finishes just after the wait deadline is not a provider timeout.
+            if active_sync is not None and wait([active_sync], timeout=0.075).done:
                 try:
-                    # Short local handoff lets fast completions register this scan.
-                    # Unbounded provider readiness waits never own the scan loop.
-                    result = active_sync.result(timeout=0.075)
-                except TimeoutError:
-                    if not active_sync.done():
-                        result = None
-                    else:
-                        result = {
-                            "blocked": [{"reason": "timeout"}],
-                            "status": {"sync_status": "pending"},
-                        }
+                    result = active_sync.result()
                 except Exception as error:
-                    result = {
-                        "blocked": [{"reason": failure_code(error)}],
-                        "status": {"sync_status": "pending"},
-                    }
-                if result is not None:
-                    active_sync = None
-                    errors = _preflight_errors(result)
-                    for blocker in errors:
-                        report(("sync", blocker["reason"]), blocker["reason"])
-                    delay = (
-                        args.interval
-                        if result["status"]["sync_status"] == "pending"
-                        else args.sync_interval
-                    )
-                    next_sync = _monotonic() + delay
-                    health.update(next_sync=_wall_time() + delay, remote_errors=errors)
+                    code = "timeout" if isinstance(error, TimeoutError) else failure_code(error)
+                    result = {"blocked": [{"reason": code}], "status": {"sync_status": "pending"}}
+                active_sync = None
+                errors = _preflight_errors(result)
+                for blocker in errors:
+                    report(("sync", blocker["reason"]), blocker["reason"])
+                delay = (
+                    args.interval
+                    if result["status"]["sync_status"] == "pending"
+                    else args.sync_interval
+                )
+                next_sync = _monotonic() + delay
+                health.update(next_sync=_wall_time() + delay, remote_errors=errors)
             health["remote_in_progress"] = active_sync is not None
             if active_sync is not None:
                 health["next_sync"] = None
@@ -259,11 +248,6 @@ def _watch(args):
 def execute(args):
     if args.command == "restore":
         return restore_archive(args.db, args.backup)
-    if (
-        args.command in {"pending", "preview", "backup", "approve", "revoke"}
-        and not args.db.expanduser().is_file()
-    ):
-        raise PublicInputError("Archive does not exist")
     if args.command == "demo":
         from .demo import run_demo
 
@@ -353,7 +337,11 @@ def execute(args):
         tool = "memory_ask" if args.command == "ask" else "memory_status"
         arguments = {"question": args.question} if args.command == "ask" else {}
         return asyncio.run(_gateway_call(args.db, tool, arguments))
-    with Store(args.db, existing=args.command in {"status", "republish"}) as store:
+    try:
+        archive = Store(args.db, existing=args.command not in {"init", "collect"})
+    except FileNotFoundError:
+        return {"error": {"code": "archive_not_found", "message": "Archive does not exist."}}
+    with archive as store:
         if args.command == "init":
             if args.notebook_id:
                 store.set_setting("notebook_id", args.notebook_id)

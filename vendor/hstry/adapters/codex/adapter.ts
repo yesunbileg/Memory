@@ -88,7 +88,6 @@ interface ThreadRow {
   id: string;
   title: string;
   model: string | null;
-  archived: number;
 }
 
 interface CodexResponseItem {
@@ -190,7 +189,7 @@ const adapter: Adapter = {
 };
 
 /**
- * Load thread metadata (titles, model, archived flag) from Codex's
+ * Load thread metadata (title and model) from Codex's
  * newest state_<N>.sqlite index. The desktop app and newer CLIs maintain it in
  * CODEX_HOME next to the sessions directory; rollout JSONL files stay
  * authoritative for message content.
@@ -246,7 +245,6 @@ async function parseRolloutFile(
     ? new TextDecoder('utf-8', { fatal: true }).decode(zstdDecompressSync(await readSource(filePath)))
     : await readUtf8(filePath);
   const lines = raw.split(/\r?\n/);
-  if (lines.length === 0) return null;
 
   let sessionMeta: CodexSessionMeta | undefined;
   let gitInfo: CodexSessionMetaLine['git'] | undefined;
@@ -317,7 +315,7 @@ async function parseRolloutFile(
         if (payload.type === 'agent_message') break;
 
         if (payload.type === 'message') {
-          if (!['user', 'assistant'].includes(payload.role ?? '')) break;
+          if (payload.role !== 'user' && payload.role !== 'assistant') break;
           if (payload.channel && !['final', 'commentary'].includes(payload.channel)) break;
           if (payload.recipient && payload.recipient !== 'all') break;
           const content = extractContent(payload.content);
@@ -328,7 +326,7 @@ async function parseRolloutFile(
           }
 
           messages.push({
-            role: mapRole(payload.role ?? 'assistant'),
+            role: payload.role,
             content,
             parts: textOnlyParts(content),
             createdAt: timestampMs,
@@ -476,7 +474,6 @@ async function parseRolloutFile(
     messages: reconciled,
     metadata: {
       file: filePath,
-      ...(thread?.archived ? { archived: true } : {}),
       forkedFromId: sessionMeta?.forked_from_id ?? undefined,
       originator: sessionMeta?.originator,
       cliVersion: sessionMeta?.cli_version,
@@ -601,23 +598,6 @@ function randomId(prefix: string): string {
   return `${prefix}-${uuid.replace(/-/g, '').slice(0, 12)}`;
 }
 
-function mapRole(role: string): Message['role'] {
-  switch (role.toLowerCase()) {
-    case 'user':
-    case 'human':
-      return 'user';
-    case 'assistant':
-    case 'ai':
-      return 'assistant';
-    case 'system':
-      return 'system';
-    case 'tool':
-      return 'tool';
-    default:
-      return 'assistant';
-  }
-}
-
 function safeParseJson(value?: string): unknown {
   if (!value) return undefined;
   try {
@@ -650,10 +630,14 @@ async function findRolloutFiles(
   const roots: string[] = [];
   if (stats.isDirectory()) {
     roots.push(path);
-    const sessionsDir = join(path, 'sessions');
-    const archivedDir = join(path, 'archived_sessions');
-    if (await existsDir(sessionsDir)) roots.push(sessionsDir);
-    if (await existsDir(archivedDir)) roots.push(archivedDir);
+    if (opts.shallowOnly) {
+      // Detection gives native subtrees a separate depth budget. A full parse
+      // already visits them when walking the selected directory.
+      for (const name of ['sessions', 'archived_sessions']) {
+        const directory = join(path, name);
+        if (await existsDir(directory)) roots.push(directory);
+      }
+    }
   }
 
   const files: string[] = [];

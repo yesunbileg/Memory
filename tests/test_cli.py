@@ -369,3 +369,12 @@ def test_connect_rejects_running_receiver_for_other_database_in_same_directory(t
     assert not (tmp_path / "second.sqlite.files" / "extension-connection.json").exists()
     # The authenticated probe persists only the logical receiver archive identity.
     assert first.exists() and not second.exists()
+
+
+@pytest.mark.parametrize("operation", [("build",), ("sync",), ("show", "missing")])
+def test_existing_archive_commands_do_not_create_an_archive_on_a_typo(tmp_path, operation):
+    db = tmp_path / "typo" / "absent.sqlite"
+    result = run_cli("--db", db, *operation)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"]["code"] == "archive_not_found"
+    assert not db.parent.exists()

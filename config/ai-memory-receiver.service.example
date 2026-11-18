@@ -1,5 +1,6 @@
 [Unit]
-Description=Receive selected browser conversations into the local AI Memory archive
+# Optional legacy HTTP clients only. Browser capture uses registered native messaging.
+Description=Receive authenticated legacy HTTP imports into the local AI Memory archive
 
 [Service]
 Type=simple

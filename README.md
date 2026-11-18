@@ -25,7 +25,7 @@ For an existing checkout, update it with `git pull --ff-only` after saving local
 changes. See [development](docs/development.md) for formatting and tests. Managed
 cloud executor setup is separate and documented in [config/cloud-start.md](config/cloud-start.md).
 
-The demo imports **synthetic** Codex and OpenCode histories through the actual donor adapters. It creates `data/demo/conversations.sqlite` and `data/demo/segments/SEG-001.md`, prints conversation IDs and process resource measurements, and can be repeated without duplicate messages. No data is sent to Google. MCP smoke testing starts a real stdio server and calls `memory_status`; it does not invent a NotebookLM answer.
+The demo imports **synthetic** Codex and OpenCode histories through the actual donor adapters. It creates `data/demo/conversations.sqlite` and `data/demo/segments/SEG-001.md`, prints conversation IDs and process resource measurements, and can be repeated without duplicate messages. A changed fixture, a symlink or non-demo archive contents are not overwritten; choose a new empty directory instead. No data is sent to Google. MCP smoke testing starts a real stdio server and calls `memory_status`; it does not invent a NotebookLM answer.
 
 ## Collect your conversations
 
@@ -106,7 +106,7 @@ Load `vendor/hstry/extension` as an unpacked Chromium/Brave/Chrome extension on 
 .venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-For a standalone extension, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.6.1.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and both project/upstream MIT notices; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
+For a standalone extension, run `.venv/bin/python scripts/package_extension.py`. Extract the ZIP named by the command’s `output` field into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and both project/upstream MIT notices; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
 
 Open extension Settings → **Choose connection file** and select the `connection_file` path printed by the command. The browser now launches its registered native host as needed; no receiver terminal stays open. A v1 bearer file cannot authenticate the receiver. To migrate, pair again using the v2 file. See [native pairing](docs/native-pairing.md) for custom browser data directories and supported platforms.
 

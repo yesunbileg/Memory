@@ -1,5 +1,5 @@
 // Only principal-bound, selected IDs are durable. Session secrets and message text never enter the queue.
-import { sleep } from '../lib/common.js';
+import { fetchJson, sleep } from '../lib/common.js';
 
 export async function drainSelected({
   run,
@@ -142,16 +142,7 @@ function projectSummary(data) {
   return result;
 }
 
-export function discoveryPages({
-  state,
-  signature,
-  canResume,
-  guard,
-  checkpoint,
-  report,
-  selection,
-  fetchPage,
-}) {
+function discoveryPages({ state, signature, canResume, guard, checkpoint, report, selection }) {
   const cache =
     canResume && state.discovery?.signature === signature
       ? structuredClone(state.discovery)
@@ -167,7 +158,7 @@ export function discoveryPages({
       const key = JSON.stringify([init?.headers?.['chatgpt-account-id'] ?? null, String(url)]);
       if (Object.hasOwn(cache.pages, key)) return cache.pages[key];
       if (count++ >= 4) throw pause;
-      const value = projectSummary(await fetchPage(url, init));
+      const value = projectSummary(await fetchJson(url, init));
       cache.pages[key] = value;
       if (canResume) {
         await guard();
@@ -190,4 +181,26 @@ export function discoveryPages({
       return { state: next, conversations: 0, hasMore: canResume, selection, selectionWarning };
     },
   };
+}
+
+// A principal change invalidates both listing pages and the detail queue.
+// Do not resume using only the shortened source labels displayed by the UI.
+export function preparePrincipalRun(principals, state, hooks) {
+  const ids = principals.map((p) => p.id);
+  const signature = JSON.stringify(ids.sort());
+  const canResume = ids.every((id) => typeof id === 'string' && id.length);
+  const pager = discoveryPages({ state, signature, canResume, ...hooks });
+  const prior = canResume && state.pending?.signature === signature ? state.pending : null;
+  const run = prior
+    ? structuredClone(prior)
+    : {
+        signature,
+        started: pager.started,
+        groups: [],
+        processed: 0,
+        detected: 0,
+        selection: hooks.selection,
+        warnings: [],
+      };
+  return { pager, canResume, resumed: Boolean(prior), run };
 }

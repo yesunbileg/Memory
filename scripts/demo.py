@@ -1,5 +1,8 @@
-"""Run from the repository: .venv/bin/python scripts/demo.py."""
+"""Compatibility entry point for ai-memory demo."""
+
+import sys
 
 from ai_memory.cli import main
 
-raise SystemExit(main(["demo"]))
+if __name__ == "__main__":
+    raise SystemExit(main(["demo", *sys.argv[1:]]))

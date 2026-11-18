@@ -54,11 +54,13 @@ def _is_codex_internal_context(text: str) -> bool:
     return not _CODEX_CONTEXT_TAG.search(body) and _is_codex_context_tag(opening["attributes"])
 
 
+def _native_message_id(message: dict, meta: dict) -> str | None:
+    return _string(message.get("clientId")) or _string(meta.get("id")) or _string(message.get("id"))
+
+
 def _message_id(message: dict, fallback_counts: dict[str, int], *, consume: bool = True) -> str:
     meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    native_id = (
-        _string(message.get("clientId")) or _string(meta.get("id")) or _string(message.get("id"))
-    )
+    native_id = _native_message_id(message, meta)
     if not native_id:
         parts = message.get("parts")
         stable_parts = (
@@ -134,6 +136,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
     messages: list[dict] = []
     models: list[str] = []
     fallback_counts: dict[str, int] = {}
+    platform = platform.lower()
     for message in raw["messages"]:
         if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
             continue
@@ -146,7 +149,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
         if meta.get("channel") in {"analysis", "justify", "confidence"}:
             continue
         model = _string(message.get("model"))
-        mirror = meta.get("mirror") if platform.lower() == "codex" else None
+        mirror = meta.get("mirror") if platform == "codex" else None
         mirror_id = (
             _message_id(mirror, fallback_counts, consume=False)
             if isinstance(mirror, dict)
@@ -154,12 +157,8 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
         )
         native_id = _message_id(message, fallback_counts)
         aliases: list[str] = []
-        if platform.lower() == "codex":
-            has_native = (
-                _string(message.get("clientId"))
-                or _string(meta.get("id"))
-                or _string(message.get("id"))
-            )
+        if platform == "codex":
+            has_native = _native_message_id(message, meta)
             record_alias = _codex_record_alias(message) if not has_native or mirror_id else None
             if record_alias:
                 aliases.append(record_alias)
@@ -205,13 +204,13 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
                     groups.append((kind, part["text"], _timestamp(part.get("updatedAt"))))
         elif isinstance(message.get("content"), str) and message["content"]:
             kind = meta.get("kind", "text")
-            if kind in {"text", "progress"}:
-                groups.append((kind, message["content"], None))
-            elif kind == "thinking_summary" and meta.get("visibility") == "ui":
+            if kind in {"text", "progress"} or (
+                kind == "thinking_summary" and meta.get("visibility") == "ui"
+            ):
                 groups.append((kind, message["content"], None))
 
         if (
-            platform.lower() == "codex"
+            platform == "codex"
             and message["role"] == "user"
             and len(groups) == 1
             and groups[0][0] == "text"
@@ -223,13 +222,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
         for kind, content, part_update in groups:
             ordinal = kind_counts.get(kind, 0)
             kind_counts[kind] = ordinal + 1
-            if kind in {"text", "progress"} and ordinal == 0:
-                group_id = native_id
-            elif (
-                kind == "thinking_summary"
-                and meta.get("kind") == "thinking_summary"
-                and ordinal == 0
-            ):
+            if ordinal == 0 and (kind in {"text", "progress"} or kind == meta.get("kind")):
                 group_id = native_id
             else:
                 group_id = f"{native_id}:{kind}:{ordinal}"
@@ -264,7 +257,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
     if conversation_model and conversation_model not in models:
         models.append(conversation_model)
     title = _string(raw.get("title"))
-    opening = _CODEX_CONTEXT_OPENING.match(title or "") if platform.lower() == "codex" else None
+    opening = _CODEX_CONTEXT_OPENING.match(title or "") if platform == "codex" else None
     if opening and _is_codex_context_tag(opening["attributes"]):
         first_user = next(
             (m["text"] for m in messages if m["role"] == "user" and m["text"].strip()), None
@@ -273,7 +266,7 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
         if title and len(title) > 80:
             title = title[:77] + "..."
     return {
-        "platform": platform.lower(),
+        "platform": platform,
         "account": account,
         "external_id": external_id,
         "title": title,

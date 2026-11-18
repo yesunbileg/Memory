@@ -10,6 +10,7 @@ from .diagnostics import failure_code
 from .notebook import NotebookLMError
 from .privacy import MASKING_POLICY, find_sensitive, redact_sensitive, snapshot_sha256
 from .private_io import write_private_text
+from .publication import observe_inventory
 from .segments import CapacityError, SegmentBuilder, SourceBudgetError
 from .store import Store, digest
 
@@ -36,7 +37,7 @@ class UploadUncertain(RuntimeError):
     pass
 
 
-def _filename(segment_id, revision, text):
+def _filename(segment_id: str, revision: int, text: str) -> str:
     return f"{segment_id}-r{revision}-{snapshot_sha256(text)[:16]}.md"
 
 
@@ -65,53 +66,12 @@ def republish(store, segment_id):
     }
 
 
-def _missing(db, mapping):
-    """Hold all revisions of the segment, not just the one absent from the provider."""
-    db.execute(
-        """INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id,error)
-        VALUES(?,?,?,'missing',?,'remote_missing') ON CONFLICT(segment_id,revision)
-        DO UPDATE SET stage='missing',error='remote_missing',next_attempt=0""",
-        (
-            mapping["segment_id"],
-            mapping["revision"],
-            f"{mapping['segment_id']}-r{mapping['revision']}-missing.md",
-            mapping["source_id"],
-        ),
-    )
-    db.execute(
-        "UPDATE segments SET state='sealed' WHERE id=? AND state='open'", (mapping["segment_id"],)
-    )
-
-
-def observe_inventory(store, sources):
-    """Record only provider-confirmed inventory observations, never on network failure."""
-    db = store.connection
-    now = time.time()
-    available = {s["id"]: bool(s.get("ready")) for s in sources}
-    with db:
-        for mapping in db.execute(
-            "SELECT sm.* FROM source_map sm JOIN segments s ON s.id=sm.segment_id WHERE s.state!='retired'"
-        ).fetchall():
-            source_id = mapping["source_id"]
-            state = (
-                ("ready" if available[source_id] else "unready")
-                if source_id in available
-                else "missing"
-            )
-            db.execute(
-                "UPDATE source_receipts SET remote_state=?,verified_at=? WHERE source_id=?",
-                (state, now, source_id),
-            )
-            if state == "missing":
-                _missing(db, mapping)
-
-
 class SyncEngine:
     def __init__(self, store: Store, builder: SegmentBuilder, adapter, output_dir: Path):
         self.store, self.builder, self.adapter = store, builder, adapter
         self.output_dir = Path(output_dir)
 
-    def _prepare_snapshot(self, segment_id, revision):
+    def _prepare_snapshot(self, segment_id: str, revision: int) -> tuple[str, str, str]:
         """Validate the local render, then make its upload-only redacted snapshot."""
         segment = self.store.connection.execute(
             "SELECT revision,content_hash FROM segments WHERE id=?", (segment_id,)
@@ -127,7 +87,7 @@ class SyncEngine:
         title = _filename(segment_id, revision, text)
         return original, text, title
 
-    def _write_snapshot(self, title, text):
+    def _write_snapshot(self, title: str, text: str) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.output_dir / title
         write_private_text(path, text)
@@ -149,29 +109,14 @@ class SyncEngine:
             if saved:
                 self._write_snapshot(old_title, bytes(saved[0]).decode("utf-8"))
         self.store.save_outbound(job["segment_id"], job["revision"], safe_text)
-        if old_title == safe_title and old_path.exists():
-            current_text = old_path.read_bytes().decode("utf-8")
-            if current_text == safe_text:
-                return
         if old_path.exists():
             current_text = old_path.read_bytes().decode("utf-8")
-            current_digest_title = (
-                f"{job['segment_id']}-r{job['revision']}-{digest(current_text)[:16]}.md"
-            )
             if current_text == safe_text:
-                if old_title != safe_title:
-                    raise SnapshotError(
-                        "Pending redacted snapshot title does not match its content"
-                    )
-            elif current_text == original and old_title == old_title_for_original:
-                pass
-            else:
+                if old_title == safe_title:
+                    return
+                raise SnapshotError("Pending redacted snapshot title does not match its content")
+            if current_text != original or old_title != old_title_for_original:
                 raise SnapshotError("Pending snapshot differs from its validated revision")
-            if (
-                current_digest_title != old_title
-                and _filename(job["segment_id"], job["revision"], current_text) != old_title
-            ):
-                raise SnapshotError("Pending snapshot title does not match its content")
 
         safe_path = self.output_dir / safe_title
         if safe_path.exists() and safe_path != old_path:
@@ -241,7 +186,7 @@ class SyncEngine:
             path = self.output_dir / job["title"]
             if not path.exists():
                 self._write_snapshot(job["title"], bytes(saved[0]).decode("utf-8"))
-            return False
+            return
         old_ids = json.loads(job["old_source_ids"])
         if job["new_source_id"]:
             # A persisted registration ID, not a filename, proves ownership of old content.
@@ -269,9 +214,9 @@ class SyncEngine:
                     "UPDATE sync_jobs SET stage='superseded',error=NULL WHERE id=?", (job["id"],)
                 )
             job["stage"] = "superseded"
-            return False
+            return
         _, safe_text, safe_title = self._prepare_snapshot(job["segment_id"], job["revision"])
-        safe_path = self._write_snapshot(safe_title, safe_text)
+        self._write_snapshot(safe_title, safe_text)
         with db:
             self.store.save_outbound(job["segment_id"], job["revision"], safe_text)
             db.execute(
@@ -287,7 +232,6 @@ class SyncEngine:
             new_source_id=None,
             old_source_ids=json.dumps(old_ids),
         )
-        return safe_path
 
     def _migrate_mapped_sources(self):
         """Schedule a replacement when an older archive mapped an unredacted source."""
@@ -389,8 +333,8 @@ class SyncEngine:
             )
         ]
 
-    def _repair_missing_mapping(self, mapping):
-        """Requeue a confirmed absent/failed source without losing cleanup IDs."""
+    def _requeue_failed_mapping(self, mapping):
+        """Requeue a confirmed processing failure without losing cleanup obligations."""
         db = self.store.connection
         with db:
             db.execute("DELETE FROM source_map WHERE source_id=?", (mapping["source_id"],))
@@ -405,7 +349,7 @@ class SyncEngine:
                     (job["id"],),
                 )
         self._enqueue()
-        # Keep the absent ID as an obligation if it later becomes visible again.
+        # Keep the failed ID until its replacement is verified.
         self._carry_old_sources(mapping["segment_id"], [mapping["source_id"]])
 
     async def _reconcile_mapped_sources(self):
@@ -443,6 +387,23 @@ class SyncEngine:
                         (mapping["source_id"], mapping["segment_id"], mapping["revision"]),
                     )
 
+    async def _prove_uncertain_registration(
+        self, job, sources, text: str, excluded_ids: set[str]
+    ) -> str:
+        """A title selects candidates; only newly observed IDs with exact content prove a match."""
+        matches = []
+        if job["prior_source_ids"] is not None:
+            before = set(json.loads(job["prior_source_ids"])) | excluded_ids
+            for source in sources:
+                source_id = source["id"]
+                if source_id in before or source["title"] != job["title"]:
+                    continue
+                if await self.adapter.get_source_text(source_id) == text:
+                    matches.append(source_id)
+        if len(matches) != 1:
+            raise UploadUncertain("Could not prove exactly one upload; no retry or deletion")
+        return matches[0]
+
     async def _process(self, job):
         db = self.store.connection
         job = dict(job)
@@ -463,11 +424,10 @@ class SyncEngine:
             path.unlink(missing_ok=True)
             return
         if job["stage"] in ("uploading", "processing", "uncertain"):
-            migrated = await self._migrate_inflight_snapshot(job)
+            await self._migrate_inflight_snapshot(job)
             if job["stage"] == "superseded":
                 return
-            if migrated:
-                path = self.output_dir / job["title"]
+            path = self.output_dir / job["title"]
         await self._recover_terminal_upload_failure(job)
         if job["stage"] != "cleanup":
             if job["stage"] not in {"registered", "processing", "ready"}:
@@ -500,30 +460,15 @@ class SyncEngine:
                 if not job["new_source_id"]:
                     sources = await self.adapter.list_sources()
                     excluded_ids = set(json.loads(job["old_source_ids"]))
-                    candidates = []
-                    if job["stage"] in {"uploading", "uncertain"}:
-                        before = set(json.loads(job["prior_source_ids"] or "[]"))
-                        if job["prior_source_ids"] is not None:
-                            for source in sources:
-                                if (
-                                    source["title"] != job["title"]
-                                    or source["id"] in before | excluded_ids
-                                ):
-                                    continue
-                                content = await self.adapter.get_source_text(source["id"])
-                                if content == text:
-                                    candidates.append(source["id"])
-                        if len(candidates) != 1:
-                            raise UploadUncertain(
-                                "Could not prove exactly one upload; no retry or deletion"
-                            )
                     old = list(
                         dict.fromkeys(
                             json.loads(job["old_source_ids"]) + self._old_sources(job["segment_id"])
                         )
                     )
-                    if candidates:
-                        new_id = candidates[0]
+                    if job["stage"] in {"uploading", "uncertain"}:
+                        new_id = await self._prove_uncertain_registration(
+                            job, sources, text, excluded_ids
+                        )
                     else:
                         # Account for foreign sources too, and reserve the 50th slot for replacement.
                         if len(sources) >= 50 and job["error"] in {"network_error", "timeout"}:
@@ -659,7 +604,7 @@ class SyncEngine:
                 if failure_code(exc) == "processing_failed":
                     # A confirmed failed replacement is not a valid mapping.
                     # Retain it and every predecessor until a new source is ready.
-                    self._repair_missing_mapping(
+                    self._requeue_failed_mapping(
                         {"segment_id": job["segment_id"], "source_id": job["new_source_id"]}
                     )
                 raise
@@ -697,8 +642,6 @@ class SyncEngine:
                 continue
             if job["next_attempt"] > time.time():
                 result["deferred"] += 1
-                if job["stage"] == "blocked" and not job["new_source_id"]:
-                    continue
                 continue
             try:
                 await self._process(job)
@@ -756,9 +699,8 @@ class SyncEngine:
                     next_attempt,
                     failure["attempts"],
                 )
-                if isinstance(exc, (SpareSlotNeeded, SourceQuota)):
+                if isinstance(exc, SourceQuota):
                     return "blocked"
-                continue
         return (
             "blocked"
             if any(

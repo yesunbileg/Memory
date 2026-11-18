@@ -8,6 +8,12 @@ from ai_memory.store import Store, digest
 from ai_memory.sync import SyncEngine
 
 
+def make_retries_due(store):
+    """Simulate reaching persisted retry deadlines without sleeping in a test."""
+    with store.connection:
+        store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+
+
 class Remote:
     """Explicit in-memory service simulator; not a NotebookLM retrieval engine."""
 
@@ -77,8 +83,7 @@ async def test_replace_waits_for_ready_and_unchanged_sync_is_noop(tmp_path):
         assert old_id in remote.sources
         assert store.connection.execute("SELECT source_id FROM source_map").fetchone()[0] == old_id
         remote.fail_ready = False
-        store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
-        store.connection.commit()
+        make_retries_due(store)
         await engine.run_once()
         assert old_id not in remote.sources
         assert len(remote.sources) == 1
@@ -100,8 +105,7 @@ async def test_ambiguous_upload_reconciles_after_restart_without_duplicate(tmp_p
         assert job["next_attempt"] > time.time()
         assert len(remote.sources) == 1
     with Store(path) as store:
-        store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
-        store.connection.commit()
+        make_retries_due(store)
         await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
         assert len([o for o in remote.operations if o[0] == "upload"]) == 1
         assert store.status()["sync_status"] == "up_to_date"
@@ -120,8 +124,7 @@ async def test_offline_retry_and_cleanup_persist(tmp_path):
         attempts = len(remote.operations)
         await engine.run_once()
         assert len(remote.operations) == attempts
-        store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
-        store.connection.commit()
+        make_retries_due(store)
         remote.fail_upload = False
         await engine.run_once()
         assert store.status()["sync_status"] == "up_to_date"
@@ -132,8 +135,7 @@ async def test_offline_retry_and_cleanup_persist(tmp_path):
         assert len(remote.sources) == 2
         assert store.status()["pending_jobs"] == 1
         uploads = len([o for o in remote.operations if o[0] == "upload"])
-        store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
-        store.connection.commit()
+        make_retries_due(store)
         remote.fail_delete = False
         await engine.run_once()
         assert len(remote.sources) == 1
@@ -300,8 +302,7 @@ async def test_terminal_partial_upload_can_recover_without_deleting_old_source(t
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
         for _ in range(2):
-            with store.connection:
-                store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+            make_retries_due(store)
             await engine.run_once()
         assert remote.partial_id not in remote.sources
         assert len(remote.sources) == 1
@@ -354,8 +355,7 @@ async def test_known_body_upload_failure_reuploads_partial_and_keeps_mapping_unt
             == original_source
         )
 
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         remote.fail_ready_once = "source-4"
         await engine.run_once()
         retry_job = store.connection.execute("SELECT * FROM sync_jobs ORDER BY id DESC").fetchone()
@@ -371,8 +371,7 @@ async def test_known_body_upload_failure_reuploads_partial_and_keeps_mapping_unt
 
         uploads = [op for op in remote.operations if op[0] == "upload"]
         assert len(uploads) == 3  # original source, failed body, safe retry
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         await engine.run_once()
         assert len([op for op in remote.operations if op[0] == "upload"]) == 3
         assert (
@@ -419,8 +418,7 @@ async def test_known_upload_failure_reconciles_partial_that_is_already_ready(tmp
         assert failed_job["error"] == "network_error"
         assert remote.sources[partial_id]["ready"]
 
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         await engine.run_once()
         assert len([op for op in remote.operations if op[0] == "upload"]) == 2
         assert (
@@ -510,8 +508,7 @@ async def test_failed_partial_at_notebook_quota_yields_only_its_uncommitted_slot
             store.connection.execute("SELECT source_id FROM source_map").fetchone()[0] == old_source
         )
 
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         await engine.run_once()
         new_source = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
         assert new_source != old_source
@@ -556,8 +553,7 @@ async def test_tampered_pending_snapshot_is_never_uploaded(tmp_path):
         await engine.run_once()
         snapshot = next((tmp_path / "md").glob("*.md"))
         snapshot.write_text("unvalidated altered source")
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         remote.fail_upload = False
         result = await engine.run_once()
         assert result["blocked"]
@@ -815,8 +811,7 @@ async def test_failed_unregistered_upload_then_edit_recovers_without_losing_revi
         c["messages"][0]["text"] = "new exact content"
         store.ingest(c)
         remote.fail_upload = False
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         result = await engine.run_once()
         assert not result["blocked"]
         assert result["status"]["sync_status"] == "up_to_date"
@@ -864,8 +859,7 @@ async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
             remote.rejected_id = replacement
         remote.fail_delete = False
         before = len(remote.operations)
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         result = await engine.run_once()
         if replacement_state == "missing" and predecessor not in remote.sources:
             # A repaired replacement may authorize cleanup, but only after ready.
@@ -877,8 +871,7 @@ async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
             assert predecessor in remote.sources
             assert result["status"]["sync_status"] == "pending"
             if replacement_state == "failed":
-                with store.connection:
-                    store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+                make_retries_due(store)
                 recovered = await engine.run_once()
                 assert not recovered["blocked"]
                 assert recovered["status"]["sync_status"] == "up_to_date"
@@ -985,8 +978,7 @@ async def test_missing_cleanup_replacement_after_another_edit_transfers_obligati
         c["messages"][0]["text"] = "newest replacement exact text"
         store.ingest(c)
         remote.fail_delete = False
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         result = await engine.run_once()
         assert not result["blocked"]
         assert result["status"]["sync_status"] == "pending"
@@ -1032,8 +1024,7 @@ async def test_unready_current_mapping_uses_queue_backoff_and_can_recover(tmp_pa
         await engine.run_once()
         assert remote.checks == 1
         assert source_id in remote.sources
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         if code == "not_ready":
             remote.rejected_id = None
         result = await engine.run_once()
@@ -1075,8 +1066,7 @@ async def test_full_budget_failed_upload_then_edit_and_new_conversation_recovers
         extra = conversation(external_id="overflow")
         extra["messages"][0]["text"] = "overflow message"
         store.ingest(extra, consent=True)
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
 
         # Capacity pressure cannot invalidate the in-flight revision's hash or
         # delete the committed predecessor while the network is still down.
@@ -1086,8 +1076,7 @@ async def test_full_budget_failed_upload_then_edit_and_new_conversation_recovers
         assert not any(op == ("delete", original_source) for op in remote.operations)
 
         remote.fail_upload = False
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         recovered = await engine.run_once()
         assert not recovered["blocked"]
         assert recovered["status"]["sync_status"] == "up_to_date"

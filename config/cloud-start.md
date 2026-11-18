@@ -1,15 +1,24 @@
-# Cloud startup instructions
+# Cloud checkout setup
 
-Use the existing `/workspace/Memory` checkout. Cloud tasks already run in an isolated environment; do not create a Git worktree unless explicitly requested.
+Use a checkout of this repository, Python 3.12+, Node 24+ and uv. From any directory,
+run `bash /path/to/Memory/config/cloud-install.sh` to install locked dependencies
+and run the offline tests, synthetic demo and real stdio MCP smoke check. The script
+locates its own checkout. If the cloud image supplies a writable dependency cache,
+set `UV_CACHE_DIR` to its path. A browser session or Google login is not needed.
 
-Run commands from `/workspace/Memory`. Refresh retained dependencies with `UV_CACHE_DIR=/workspace/.cache/uv uv sync --frozen`. The cloud home is read-only; use `export NOTEBOOKLM_HOME=/workspace/Memory/data/notebooklm` for notebooklm-py login/CLI. Do not change `HOME` or `CODEX_HOME`.
+Configure Codex or OpenCode with the examples in this directory and the archive’s
+absolute path. The client launches `ai-memory --db PATH mcp` over stdio. Do not
+start a separate background stdio process. Optional local history collection runs
+only for explicitly selected paths, e.g. `ai-memory watch --codex-path PATH`.
+Neither local collection nor browser capture grants upload consent.
 
-For the local demo, run `.venv/bin/ai-memory demo --output data/demo`, then `.venv/bin/python scripts/mcp_smoke.py`. Readiness means two synthetic conversations, five messages, one Markdown segment, and a successful real MCP stdio handshake exposing `memory_ask` and `memory_status`. There are no required detached services for the local demo.
+If a live NotebookLM test is explicitly intended, use a writable `NOTEBOOKLM_HOME`
+or storage file dedicated to the authorized test account. See [NotebookLM setup](../README.md#connect-notebooklm).
+A Google service account is not a substitute for NotebookLM browser authentication.
+Use `scripts/live_demo.py --notebook-id YOUR_EMPTY_DEMO_NOTEBOOK_ID --output data/new-live-demo`
+with an empty output directory. Offline tests are not evidence of a working remote session.
 
-For agent memory, configure Codex/OpenCode using the examples in this directory. The client starts `/workspace/Memory/.venv/bin/ai-memory --db /workspace/Memory/data/conversations.sqlite mcp` over stdio; do not background a separate stdio process.
-
-Real NotebookLM use requires a Google browser session and one notebook ID. Follow README for optional browser login dependencies and `ai-memory init --notebook-id ID`. If using a saved auth file, specify `--storage PATH` without printing its contents. Never treat `GOOGLE_APPLICATION_CREDENTIALS` as NotebookLM browser authentication. The initial live check was blocked by absent auth and a proxy CONNECT 403 for `notebooklm.google.com`. Required domain additions are `notebooklm.google.com` and `accounts.google.com`; preserve existing package access. Browser sign-in may report additional Google static/redirect hosts. After changes, retry `ai-memory check` and `scripts/live_demo.py --notebook-id YOUR_EMPTY_DEMO_NOTEBOOK_ID --output data/new-live-demo`. A live answer must be inspected; simulated tests do not establish retrieval quality.
-
-Only collect personal histories at explicitly selected paths. Imported conversations default to no upload consent; approve reviewed IDs explicitly. Optional collection worker: `ai-memory watch --codex-path PATH --opencode-path PATH`. For web capture, configure the native host on the same Linux desktop as the browser, not inside an unrelated remote checkout. Load the extension, copy its installed ID, then run `ai-memory --db PATH connect --extension-id YOUR_EXTENSION_ID --browser brave` and choose the printed v2 file. No port, token entry or persistent receiver terminal is needed. See [native pairing](../docs/native-pairing.md).
-
-Run `bash config/cloud-install.sh` for complete local readiness verification. See `docs/validation.md` for what passed, what was simulated, and the external blockers. Configuration persistence/publication is separate from these working local files.
+Pair web capture on the same Linux desktop as the browser, not on an unrelated
+remote host. Load the extension, copy its installed ID, register its native host,
+and choose the printed v2 file. See [native pairing](../docs/native-pairing.md)
+and the [verification guide](../docs/validation.md).

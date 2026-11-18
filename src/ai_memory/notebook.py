@@ -11,7 +11,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 if TYPE_CHECKING:
     from notebooklm import NotebookLMClient
@@ -138,6 +138,15 @@ def _stored_client(storage_path: Path | None) -> AbstractAsyncContextManager[Not
 MAX_QUESTION_LENGTH = 4000
 
 
+def valid_question(question: object) -> TypeGuard[str]:
+    """The gateway and direct adapter enforce the same bounded input contract."""
+    return (
+        isinstance(question, str)
+        and bool(question.strip())
+        and len(question) <= MAX_QUESTION_LENGTH
+    )
+
+
 class NotebookLMAdapter:
     def __init__(
         self,
@@ -259,11 +268,7 @@ class NotebookLMAdapter:
             raise _safe_error(error) from None
 
     async def ask(self, question: str, source_ids: list[str] | None = None) -> dict:
-        if (
-            not isinstance(question, str)
-            or not question.strip()
-            or len(question) > MAX_QUESTION_LENGTH
-        ):
+        if not valid_question(question):
             raise ValueError("A nonempty memory question is required")
         if not source_ids or any(not isinstance(s, str) or not s for s in source_ids):
             raise ValueError("Explicit source IDs must contain at least one valid source")

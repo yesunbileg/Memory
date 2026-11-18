@@ -418,3 +418,30 @@ async def test_mcp_missing_archive_never_creates_file(tmp_path):
             res = await client.call_tool(tool, args)
             assert decode(res)["error"]["code"] == "archive_missing"
     assert not db.parent.exists()
+
+
+def test_one_segment_scan_for_multiple_citations(tmp_path):
+    from ai_memory.gateway import _reference_sources
+    from ai_memory.store import Store
+
+    db = tmp_path / "memory.sqlite"
+    cid, sid, mids = seed_archive(db)
+    questions = [
+        f"### {cid} · 0001 · User · 2026-11-10T10:00:00Z",
+        f"### {cid} · 0002 · Assistant · 2026-11-10T10:01:00Z",
+        "A citation without a message heading",
+    ]
+    statements = []
+    with Store(db) as store:
+        store.connection.set_trace_callback(statements.append)
+        sources = _reference_sources(
+            store,
+            [
+                {"source_id": "owned-source", "citation_number": number, "cited_text": passage}
+                for number, passage in enumerate(questions, 1)
+            ],
+        )
+    assert [source["segment_id"] for source in sources] == [sid] * 3
+    assert [source.get("message_ids") for source in sources] == [[mids[0]], [mids[1]], None]
+    scans = [sql for sql in statements if "FROM messages m JOIN segment_messages" in sql]
+    assert len(scans) == 1

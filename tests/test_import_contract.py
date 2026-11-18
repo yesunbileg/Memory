@@ -381,3 +381,52 @@ def test_demo_watch_and_collect_entrypoints_agree_on_ids_order_and_text(tmp_path
                                 ORDER BY conversation_id,sequence""").fetchall()
 
     assert visible(watched) == visible(imported) == visible(output / "conversations.sqlite")
+
+
+def test_explicit_opencode_session_skips_an_unchanged_native_dependency_set(tmp_path, monkeypatch):
+    info, _, _ = session_files(tmp_path / "selected", "new", "ses_once", "unchanged")
+    with Store(tmp_path / "archive.sqlite") as store:
+        assert collect_into(store, "opencode", info)["imported_conversations"] == 1
+
+        def unexpected_reparse(*args, **kwargs):
+            pytest.fail("unchanged session and dependencies must use their success checkpoint")
+
+        monkeypatch.setattr("ai_memory.collectors.collect", unexpected_reparse)
+        assert collect_into(store, "opencode", info)["unchanged"]
+
+
+def test_unsupported_opencode_path_does_not_enumerate_guessed_dependencies(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    info = tmp_path / "not-storage" / "misc" / "project" / "ses_unknown.json"
+    info.parent.mkdir(parents=True)
+    info.write_text("{}")
+    unrelated = tmp_path / "not-storage" / "message" / info.stem
+    unrelated.mkdir(parents=True)
+    touched = []
+    glob = Path.glob
+
+    def track(directory, *args, **kwargs):
+        touched.append(directory)
+        return glob(directory, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", track)
+    with Store(tmp_path / "archive.sqlite") as store:
+        result = collect_into(store, "opencode", info)
+        assert result["failed_files"] == 1
+        assert result["conversation_ids"] == []
+    assert unrelated not in touched
+
+
+def test_collect_into_joins_existing_archive_transaction(tmp_path):
+    source = tmp_path / "one.jsonl"
+    turns(source, [("u", "same transaction", 1)])
+    with Store(tmp_path / "archive.sqlite") as store:
+        with (
+            pytest.raises(RuntimeError, match="simulated caller failure"),
+            store.import_transaction(),
+        ):
+            assert collect_into(store, "codex", source)["imported_conversations"] == 1
+            raise RuntimeError("simulated caller failure")
+        assert store.status()["conversations"] == 0
+        assert not store.connection.execute("SELECT 1 FROM checkpoints").fetchone()

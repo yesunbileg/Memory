@@ -8,15 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from ai_memory.collectors import collect
+
 FIXTURES = Path(__file__).parent / "fixtures"
 RAW_USER = " \tСайн уу — café\n```python\nprint('漢字 🦦')\n```\n  "
 RAW_FINAL = "  Done.\n\n```js\n  console.log('✓');\n```\n\t"
-
-
-def collect(*args, **kwargs):
-    from ai_memory.collectors import collect as real_collect
-
-    return real_collect(*args, **kwargs)
 
 
 def write_json(path, value):

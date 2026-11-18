@@ -489,8 +489,7 @@ button svg,
 
 .button-primary,
 .button-secondary,
-.button-quiet,
-.button-chip {
+.button-quiet {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -547,15 +546,6 @@ button svg,
   background: var(--blue-soft);
 }
 
-.button-chip {
-  background: var(--panel);
-  border-color: var(--border);
-  color: var(--ink);
-  padding: 5px 10px;
-  min-height: 28px;
-  font-size: 12px;
-}
-
 .inline-feedback {
   font-size: 12.5px;
   margin-top: 8px;
@@ -580,41 +570,6 @@ button svg,
   border-top: 1px solid var(--rule);
   padding: 10px 22px;
   background: var(--soft);
-}
-
-.connection-footer details {
-  flex: 1;
-  min-width: 0;
-}
-
-.connection-footer summary {
-  padding: 5px 0;
-  font-size: 12.5px;
-  font-weight: 550;
-  color: var(--muted);
-  cursor: pointer;
-  width: max-content;
-}
-
-.manual-fields {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px 0 8px;
-  flex-wrap: wrap;
-}
-
-.manual-fields label:first-child {
-  width: 100px;
-}
-
-.manual-fields label:nth-child(2) {
-  flex: 1;
-  min-width: 180px;
-}
-
-.manual-fields button {
-  margin-top: 23px;
 }
 
 .connection-ready {
@@ -998,10 +953,6 @@ button svg,
   align-items: start;
   border-top: 1px solid var(--rule);
   padding: 15px 0;
-}
-
-.status-item.is-off {
-  opacity: 0.72;
 }
 
 .status-item .status-dot {
@@ -1455,10 +1406,6 @@ input::placeholder {
   border-bottom: 0;
 }
 
-.popup-provider.is-off {
-  opacity: 0.78;
-}
-
 .popup-provider-top {
   display: flex;
   align-items: center;
@@ -1740,19 +1687,6 @@ input::placeholder {
     align-items: flex-start;
     gap: 4px;
   }
-
-  .manual-fields {
-    flex-direction: column;
-  }
-
-  .manual-fields label:first-child,
-  .manual-fields label:nth-child(2) {
-    width: 100%;
-  }
-
-  .manual-fields button {
-    margin-top: 0;
-  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1818,10 +1752,6 @@ input::placeholder {
 }
 .popup-page .switch-sm input:after {
   top: 5px;
-}
-.popup-provider.is-off,
-.status-item.is-off {
-  opacity: 1;
 }
 .popup-shell > #notice {
   margin: 4px 0 12px;

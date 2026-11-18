@@ -21,12 +21,10 @@ const previousResult = {
     progress: { phase: 'complete', created: 7 },
   },
 };
-chrome.storage.local.get = async (key) =>
-  key === 'settings'
-    ? { settings: structuredClone(settings) }
-    : key === 'status'
-      ? { status: previousResult }
-      : {};
+chrome.storage.local.get = async (keys) => {
+  const stored = { settings, status: previousResult, activityLog: [] };
+  return Object.fromEntries([].concat(keys).map((key) => [key, structuredClone(stored[key])]));
+};
 chrome.storage.local.set = async (value) => {
   if (value.settings) settings = structuredClone(value.settings);
 };

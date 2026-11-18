@@ -5,6 +5,24 @@ from ai_memory.segments import CapacityError, SegmentBuilder
 from ai_memory.store import Store, digest
 
 
+def test_build_does_not_expand_whole_conversation_for_metadata_or_rescan_idle_open_body(tmp_path):
+    with Store(tmp_path / "archive.db") as store:
+        store.ingest(conversation(), consent=True)
+        builder = SegmentBuilder(store)
+        queries = []
+        store.connection.set_trace_callback(
+            lambda sql: queries.append(" ".join(sql.lower().split()))
+        )
+        changed = builder.build()
+        assert len(changed) == 1
+        assert not any("select * from messages where conversation_id=" in sql for sql in queries)
+        queries.clear()
+        assert builder.build() == []
+        assert not any(
+            "select text from messages m join segment_messages" in sql for sql in queries
+        )
+
+
 def test_only_approved_messages_and_exact_markdown_are_packaged(tmp_path):
     with Store(tmp_path / "db") as store:
         key = store.ingest(conversation())

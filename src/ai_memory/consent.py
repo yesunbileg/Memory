@@ -78,32 +78,34 @@ def preview(store, key):
 
     if not store.connection.execute("SELECT 1 FROM conversations WHERE id=?", (key,)).fetchone():
         raise PublicInputError("Conversation does not exist")
-    with tempfile.TemporaryDirectory(prefix="ai-memory-preview-") as temp:
-        with Store(Path(temp) / "preview.sqlite") as sim:
-            store.connection.backup(sim.connection)
-            sim.approve(key)
-            builder = SegmentBuilder(sim)
-            builder.build()
-            segments = []
-            for row in sim.connection.execute(
-                """SELECT DISTINCT s.id,s.revision FROM segments s
-                JOIN segment_messages sm ON sm.segment_id=s.id JOIN messages m ON m.id=sm.message_id
-                WHERE s.state!='retired' AND m.conversation_id=? ORDER BY s.id""",
-                (key,),
-            ):
-                text = builder.render_outbound(row["id"])
-                # A residual credential must not appear in the preview/error output.
-                blocked = bool(find_sensitive(text))
-                segments.append(
-                    {
-                        "segment_id": row["id"],
-                        "revision": row["revision"],
-                        "masking_policy": MASKING_POLICY,
-                        "sha256": snapshot_sha256(text),
-                        "text": None if blocked else text,
-                        "blocked": blocked,
-                    }
-                )
+    with (
+        tempfile.TemporaryDirectory(prefix="ai-memory-preview-") as temp,
+        Store(Path(temp) / "preview.sqlite") as sim,
+    ):
+        store.connection.backup(sim.connection)
+        sim.approve(key)
+        builder = SegmentBuilder(sim)
+        builder.build()
+        segments = []
+        for row in sim.connection.execute(
+            """SELECT DISTINCT s.id,s.revision FROM segments s
+            JOIN segment_messages sm ON sm.segment_id=s.id JOIN messages m ON m.id=sm.message_id
+            WHERE s.state!='retired' AND m.conversation_id=? ORDER BY s.id""",
+            (key,),
+        ):
+            text = builder.render_outbound(row["id"])
+            # A residual credential must not appear in the preview/error output.
+            blocked = bool(find_sensitive(text))
+            segments.append(
+                {
+                    "segment_id": row["id"],
+                    "revision": row["revision"],
+                    "masking_policy": MASKING_POLICY,
+                    "sha256": snapshot_sha256(text),
+                    "text": None if blocked else text,
+                    "blocked": blocked,
+                }
+            )
     return {
         "conversation_id": key,
         "segments": segments,

@@ -80,6 +80,29 @@ assert.ok(
   providerReads >= 2,
   'temporary storage failure never poisons the provider lock or next capture',
 );
+const logKeys = [
+  'id',
+  'timestampMs',
+  'provider',
+  'trigger',
+  'outcome',
+  'errorCode',
+  'durationMs',
+  'counts',
+].sort();
+assert.ok(mem.activityLog.length > 0);
+for (const record of mem.activityLog) {
+  assert.deepEqual(Object.keys(record).sort(), logKeys);
+  assert.deepEqual(record.counts, {
+    detected: 0,
+    processed: 0,
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+    skipped: 0,
+    unknown: 0,
+  });
+}
 mem.settings.providers = { gemini: true };
 mem.settings.captureTypes = { recents: false, projects: true, agents: true, pinned: true };
 const before = nativeReads;

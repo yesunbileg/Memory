@@ -1,4 +1,4 @@
-import { drainSelected, discoveryPages } from './queue.js';
+import { drainSelected, preparePrincipalRun } from './queue.js';
 // ChatGPT provider: syncs conversations (personal + Teams workspaces) via the
 // chatgpt.com backend API, authenticated with the browser session cookies.
 
@@ -387,32 +387,14 @@ export async function syncChatGPT({
     );
   const missingTypes = new Set();
   let missingMetadata = 0;
-  const signature = JSON.stringify(accounts.map((p) => p.id).sort());
-  const canResume = accounts.every((p) => typeof p.id === 'string' && p.id.length);
-  const pager = discoveryPages({
-    state,
-    signature,
-    canResume,
+  delete newState.discovery;
+  const { pager, canResume, resumed, run } = preparePrincipalRun(accounts, state, {
     guard,
     checkpoint,
     report,
     selection,
-    fetchPage: fetchJson,
   });
-  delete newState.discovery;
-  const prior = canResume && state.pending?.signature === signature ? state.pending : null;
-  const run = prior
-    ? structuredClone(prior)
-    : {
-        signature,
-        started: pager.started,
-        groups: [],
-        processed: 0,
-        detected: 0,
-        selection,
-        warnings: [],
-      };
-  if (!prior)
+  if (!resumed)
     for (const account of accounts) {
       await guard();
       const key = account.id ? shortId(account.id) : 'default';
@@ -543,7 +525,7 @@ export async function syncChatGPT({
     warnings.add(
       `ChatGPT category metadata unavailable for ${missingMetadata} conversation(s) (${[...missingTypes].join(', ')}); those unverified chats were skipped.`,
     );
-  if (!prior) run.warnings = [...warnings];
+  if (!resumed) run.warnings = [...warnings];
   for (const group of run.groups)
     newState.accounts[group.key] =
       state.accounts?.[group.key]?.principalId === group.principalId

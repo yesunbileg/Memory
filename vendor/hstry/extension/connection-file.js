@@ -1,4 +1,12 @@
 // Private connection files are read locally, never uploaded or echoed in errors.
+export function isArchiveHost(archiveId, nativeHost) {
+  return (
+    typeof archiveId === 'string' &&
+    /^[a-f0-9]{32}$/.test(archiveId) &&
+    nativeHost === 'org.ai_memory.archive_' + archiveId
+  );
+}
+
 export function parseConnectionFile(text) {
   const invalid = () => new Error('Choose a valid AI Memory connection file from your computer.');
   if (typeof text !== 'string' || text.length > 16_384) throw invalid();
@@ -17,9 +25,7 @@ export function parseConnectionFile(text) {
     file.schema !== 2 ||
     file.application !== 'ai-memory' ||
     file.transport !== 'native' ||
-    typeof file.archive_instance_id !== 'string' ||
-    !/^[a-f0-9]{32}$/.test(file.archive_instance_id) ||
-    file.native_host !== 'org.ai_memory.archive_' + file.archive_instance_id ||
+    !isArchiveHost(file.archive_instance_id, file.native_host) ||
     Object.keys(file).length !== 5
   )
     throw invalid();

@@ -152,7 +152,6 @@ export interface ExportOptions {
   format: ExportFormat;
   pretty?: boolean;
   includeTools?: boolean;
-  skipThreadIndex?: boolean; // Caller already resolved metadata inside the selected scope.
   includeAttachments?: boolean;
 }
 

@@ -193,3 +193,107 @@ def test_status_does_not_initialize_or_modify_a_nonarchive(tmp_path, kind, capsy
     assert path.read_bytes() == original
     assert path.stat().st_mode & 0o777 == 0o644
     assert sorted(tmp_path.iterdir()) == [path]
+
+
+def test_repeat_demo_does_not_replace_user_edits(tmp_path):
+    output = tmp_path / "demo"
+    run_demo(output)
+    note = "User editing this generated sample."
+    for target in [
+        output / "segments" / "SEG-001.md",
+        output / "inputs/codex/rollout-memory-demo.jsonl",
+    ]:
+        original = target.read_bytes()
+        target.write_text(note)
+        with pytest.raises(ValueError, match="empty"):
+            run_demo(output)
+        assert target.read_text() == note
+        target.write_bytes(original)
+
+
+def test_repeat_demo_does_not_follow_replaced_links(tmp_path):
+    output = tmp_path / "demo"
+    run_demo(output)
+    target = output / "segments" / "SEG-001.md"
+    target.unlink()
+    note = tmp_path / "unrelated"
+    note.write_text("Leave this file alone")
+    target.symlink_to(note)
+    with pytest.raises(ValueError, match="empty"):
+        run_demo(output)
+    assert note.read_text() == "Leave this file alone"
+
+
+def test_demo_script_respects_explicit_destination(tmp_path):
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/demo.py"), "--output", str(tmp_path / "chosen")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "chosen/conversations.sqlite").is_file()
+    assert not (tmp_path / "data").exists()
+
+
+def test_local_demo_refuses_nonfixture_conversations_in_retained_database(tmp_path):
+    output = tmp_path / "demo"
+    run_demo(output)
+    with Store(output / "conversations.sqlite") as store:
+        store.ingest(conversation(), consent=True)
+    before = (output / "segments/SEG-001.md").read_bytes()
+    with pytest.raises(ValueError, match="empty"):
+        run_demo(output)
+    assert (output / "segments/SEG-001.md").read_bytes() == before
+    with Store(output / "conversations.sqlite") as store:
+        assert store.connection.execute("SELECT COUNT(*) FROM segment_messages").fetchone()[0] == 5
+
+
+def test_archive_private_workspace_is_ignored_by_git(tmp_path):
+    import subprocess
+
+    path = "arbitrary-name.sqlite.files/exports/segment.md"
+    (tmp_path / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", path], cwd=tmp_path, capture_output=True
+    )
+    assert result.returncode == 0
+
+
+def test_live_demo_cli_never_exposes_untrusted_provider_errors(monkeypatch, capsys):
+    import sys
+
+    from ai_memory.notebook import NotebookLMError
+
+    module = live_module()
+
+    async def fail(*args, **kwargs):
+        raise NotebookLMError("SYNTHETIC_PRIVATE_PROVIDER_DETAIL", "network_error")
+
+    monkeypatch.setattr(module, "live_demo", fail)
+    monkeypatch.setattr(sys, "argv", ["live_demo.py", "--notebook-id", "chosen-id"])
+    assert module.main() == 1
+    out = capsys.readouterr().out
+    assert json.loads(out)["error"]["code"] == "network_error"
+    assert "SYNTHETIC_PRIVATE_PROVIDER_DETAIL" not in out
+
+
+def test_marked_empty_but_configured_archive_is_not_a_demo(tmp_path):
+    output = tmp_path / "existing"
+    output.mkdir()
+    (output / ".ai-memory-demo").write_text("Synthetic AI Memory demo data only\n")
+    archive = output / "conversations.sqlite"
+    with Store(archive) as store:
+        store.set_setting("notebook_id", "unrelated-synthetic-notebook")
+    archive.chmod(0o640)
+    prior_bytes = archive.read_bytes()
+    with pytest.raises(ValueError, match="empty"):
+        run_demo(output)
+    assert archive.read_bytes() == prior_bytes
+    assert archive.stat().st_mode & 0o777 == 0o640
+    assert not (output / "inputs").exists()

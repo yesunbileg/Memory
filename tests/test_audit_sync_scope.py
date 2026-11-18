@@ -3,7 +3,7 @@
 import time
 
 from test_store import conversation
-from test_sync import Remote
+from test_sync import Remote, make_retries_due
 
 from ai_memory.segments import SegmentBuilder
 from ai_memory.store import Store
@@ -29,8 +29,7 @@ async def test_registered_source_readiness_timeout_polls_only(tmp_path):
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         result = await engine.run_once()
         assert result["blocked"][0]["reason"] == "timeout"
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         remote.slow = False
         assert not (await engine.run_once())["blocked"]
         assert len([op for op in remote.operations if op[0] == "upload"]) == 1
@@ -49,8 +48,7 @@ async def test_wrong_body_after_lost_response_never_disclosed_or_deleted(tmp_pat
         foreign = next(iter(remote.sources))
         remote.sources[foreign]["text"] = "synthetic foreign data, same filename"
         store.ingest(conversation(external_id="independent"), consent=True)
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         await engine.run_once()
         assert foreign in remote.sources
         assert remote.sources[foreign]["text"].startswith("synthetic foreign")
@@ -160,8 +158,7 @@ async def test_uncertain_finalize_with_registration_id_polls_only(tmp_path):
         store.ingest(conversation(), consent=True)
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
-        with store.connection:
-            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        make_retries_due(store)
         await engine.run_once()
         assert len([op for op in remote.operations if op[0] == "upload"]) == 1
         assert store.status()["sync_status"] == "up_to_date"
@@ -189,8 +186,7 @@ async def test_late_proof_cleans_stale_attempt_after_new_mapping_finished(tmp_pa
         assert mapped != late and set(remote.sources) == {late, mapped}
         remote.indexed = True
         for _ in range(2):
-            with store.connection:
-                store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+            make_retries_due(store)
             await engine.run_once()
         assert set(remote.sources) == {mapped}
         assert store.status()["sync_status"] == "up_to_date"

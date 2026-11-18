@@ -1,4 +1,4 @@
-// AI Memory boundary: supported providers, local-only destination, required token.
+// AI Memory boundary: supported providers and a verified, local native archive.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from '../providers/index.js';
@@ -86,10 +86,27 @@ globalThis.fetch = async (url) => {
   calls.push(url);
   return new Response(JSON.stringify({ status: 'ok' }));
 };
+assert.deepEqual(
+  await send({ type: 'settingsChanged' }),
+  {
+    ok: true,
+    sources: { chatgpt: { source: 'chatgpt-web', adapter: 'chatgpt-web' } },
+  },
+  'configured sources are descriptors only: no network, registration or consent change',
+);
+assert.equal(calls.length, 0);
 const missing = await send({ type: 'checkApi' });
 assert.equal(missing.ok, false, 'public health cannot establish a connection without a token');
 assert.equal(missing.code, 'missing_token');
 assert.equal(calls.length, 0);
+const originalUnpairedSettings = settings;
+settings = { ...settings, archiveId: [archiveId], nativeHost: [nativeHost] };
+assert.equal(
+  (await send({ type: 'checkApi' })).code,
+  'incompatible_server',
+  'coercible values in storage are not a valid native pairing',
+);
+settings = originalUnpairedSettings;
 const blockedFull = await send({ type: 'fullSyncProvider', provider: 'chatgpt' });
 assert.equal(blockedFull.ok, false, 'blocked sync must not acknowledge a successful start');
 assert.equal(blockedFull.code, 'missing_token');

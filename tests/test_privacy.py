@@ -3,6 +3,15 @@ import pytest
 from ai_memory.privacy import find_sensitive, redact_sensitive
 
 
+@pytest.mark.parametrize("padding", ["  ", " \t ", "\u2003\u2003"])
+def test_json_escaped_credential_at_end_preserves_trailing_whitespace(padding):
+    text = r"password = \"synthetic-value\"" + padding
+    expected = r"password = \"***************\"" + padding
+    assert find_sensitive(text) == ["credential_assignment"]
+    assert redact_sensitive(text) == expected
+    assert find_sensitive(expected) == []
+
+
 @pytest.mark.parametrize("following", ["\n\n---\n", "\n+ next item", "\r\nif needed"])
 def test_next_line_markdown_cannot_disguise_a_literal_credential(following):
     text = 'password="synthetic-secret"' + following

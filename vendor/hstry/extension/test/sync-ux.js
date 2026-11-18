@@ -222,7 +222,7 @@ const popupSent = [];
 globalThis.chrome.storage.onChanged = { addListener() {} };
 globalThis.chrome.runtime.sendMessage = async (msg) => {
   popupSent.push(msg.type);
-  return msg.type === 'checkApi' ? { ok: true } : { ok: true };
+  return { ok: true };
 };
 globalThis.chrome.runtime.openOptionsPage = async () => {};
 
@@ -231,14 +231,42 @@ assert.equal(popupElements.get('api-title').textContent, 'Connected to your comp
 assert.equal(popupElements.get('providers').children.length, 3);
 assert.equal(popupElements.get('quick-filters').children.length, 4);
 
+// A Settings tab can persist a change before this popup sees its storage event.
+settings = { ...settings, captureTypes: { ...settings.captureTypes, agents: false } };
 // Toggle Recents chip in popup
 const recentsChip = popupElements.get('quick-filters').children[3];
-recentsChip.listeners.get('click')();
-for (let i = 0; i < 50 && !popupSent.includes('settingsChanged'); i++) {
-  await new Promise((r) => setTimeout(r, 2));
-}
+await recentsChip.listeners.get('click')();
 assert.equal(settings.captureTypes.recents, true);
+assert.equal(
+  settings.captureTypes.agents,
+  false,
+  'the popup patch must preserve newer stored choices',
+);
 assert.ok(popupSent.includes('settingsChanged'));
+
+const filters = popupElements.get('quick-filters').children;
+await Promise.all([filters[0].listeners.get('click')(), filters[1].listeners.get('click')()]);
+assert.equal(settings.captureTypes.projects, false, 'two rapid clicks must save both categories');
+assert.equal(settings.captureTypes.pinned, false);
+
+const sameFilter = popupElements.get('quick-filters').children[0];
+await Promise.all([sameFilter.listeners.get('click')(), sameFilter.listeners.get('click')()]);
+assert.equal(
+  settings.captureTypes.projects,
+  false,
+  'two rapid toggles of the same chip must cancel',
+);
+
+const set = chrome.storage.local.set;
+chrome.storage.local.set = async () => {
+  throw new Error('Synthetic storage failure');
+};
+await popupElements.get('quick-filters').children[0].listeners.get('click')();
+assert.equal(settings.captureTypes.projects, false);
+assert.match(popupElements.get('notice').textContent, /could not be saved/);
+chrome.storage.local.set = set;
+await popupElements.get('quick-filters').children[0].listeners.get('click')();
+assert.equal(settings.captureTypes.projects, true, 'a failed save must not block later changes');
 
 console.log(
   'PASS web sync UX: offline recovery, capability plans, single-provider sync, safe log, popup controls',

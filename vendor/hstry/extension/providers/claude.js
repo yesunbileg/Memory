@@ -1,4 +1,4 @@
-import { drainSelected, discoveryPages } from './queue.js';
+import { drainSelected, preparePrincipalRun } from './queue.js';
 // Claude provider: syncs conversations from claude.ai via its web API,
 // authenticated with the browser session cookies (no bearer token needed).
 
@@ -226,32 +226,14 @@ export async function syncClaude({
   const warnings = new Set();
   const missingTypes = new Set();
   let missingMetadata = 0;
-  const signature = JSON.stringify(orgs.map((p) => p.id).sort());
-  const canResume = orgs.every((p) => typeof p.id === 'string' && p.id.length);
-  const pager = discoveryPages({
-    state,
-    signature,
-    canResume,
+  delete newState.discovery;
+  const { pager, canResume, resumed, run } = preparePrincipalRun(orgs, state, {
     guard,
     checkpoint,
     report,
     selection,
-    fetchPage: fetchJson,
   });
-  delete newState.discovery;
-  const prior = canResume && state.pending?.signature === signature ? state.pending : null;
-  const run = prior
-    ? structuredClone(prior)
-    : {
-        signature,
-        started: pager.started,
-        groups: [],
-        processed: 0,
-        detected: 0,
-        selection,
-        warnings: [],
-      };
-  if (!prior)
+  if (!resumed)
     for (const org of orgs) {
       await guard();
       const key = shortId(org.id);
@@ -362,7 +344,7 @@ export async function syncClaude({
     warnings.add(
       `Claude category metadata unavailable for ${missingMetadata} conversation(s) (${[...missingTypes].join(', ')}); those unverified chats were skipped.`,
     );
-  if (!prior) run.warnings = [...warnings];
+  if (!resumed) run.warnings = [...warnings];
   for (const group of run.groups)
     newState.orgs[group.key] =
       state.orgs?.[group.key]?.principalId === group.principalId

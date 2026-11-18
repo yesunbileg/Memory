@@ -355,22 +355,6 @@ export async function syncGemini({
   // Do not interpret opaque booleans/indices or a suggestive title as consent.
   for (const _summary of summaries)
     recordSelection(selection, selectConversation(null, policy, { recents: true }));
-  if (!policy.recents) {
-    await report({
-      phase: 'complete',
-      detected: summaries.length,
-      processed: 0,
-      selection,
-      selectionWarning,
-    });
-    return {
-      state: { lastSyncMs, sessionFingerprint: fingerprint },
-      conversations: 0,
-      hasMore: false,
-      selection,
-      selectionWarning,
-    };
-  }
   const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
   await report({
@@ -384,7 +368,7 @@ export async function syncGemini({
   const retrySummaries = [...(pending?.retrySummaries ?? [])];
   let failures = discovery.incomplete ? 1 : 0;
   let processed = startIndex;
-  let batch = [];
+  const batch = [];
   for (const summary of summaries.slice(startIndex, endIndex)) {
     await guard();
     try {
@@ -404,19 +388,6 @@ export async function syncGemini({
     }
     processed++;
     await report({ processed });
-    if (batch.length >= 10) {
-      const accepted = await push('gemini-web', 'gemini', batch);
-      total += accepted;
-      if (accepted !== batch.length)
-        return {
-          state,
-          conversations: total,
-          hasMore: false,
-          selection,
-          selectionWarning: 'Local archive receipt incomplete. Retry capture.',
-        };
-      batch = [];
-    }
   }
   if (batch.length) {
     const accepted = await push('gemini-web', 'gemini', batch);
@@ -479,5 +450,3 @@ export async function syncGemini({
     selectionWarning,
   };
 }
-
-export const geminiInternals = { extractSession, parseRpcResponse };

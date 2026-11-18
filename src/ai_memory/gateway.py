@@ -12,10 +12,16 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .diagnostics import failure_code
-from .notebook import MAX_QUESTION_LENGTH, NotebookLMAdapter, NotebookLMError, _private_sdk_logging
-from .publication import allowed_sources
+from .notebook import (
+    MAX_QUESTION_LENGTH,
+    NotebookLMAdapter,
+    NotebookLMError,
+    _private_sdk_logging,
+    valid_question,
+)
+from .publication import allowed_sources, observe_inventory
+from .segments import message_heading
 from .store import Store
-from .sync import observe_inventory
 
 
 class MemoryNotebook(Protocol):
@@ -28,9 +34,31 @@ def _error(code: str, message: str) -> dict:
     return {"error": {"code": code, "message": message}}
 
 
+def _citable_headings(store: Store, segment_id: str) -> dict[str, tuple[int, str, str]]:
+    """Index unambiguous message headings in the segment's original citation order."""
+    messages = store.connection.execute(
+        """SELECT m.id,m.conversation_id,m.sequence,m.role,m.kind,m.timestamp,m.text
+           FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
+           WHERE sm.segment_id=? ORDER BY sm.position""",
+        (segment_id,),
+    ).fetchall()
+    headings = {
+        message_heading(m): (position, m["conversation_id"], m["id"])
+        for position, m in enumerate(messages)
+    }
+    # A passage carries no trustworthy offsets. A heading quoted in any message
+    # body cannot distinguish the quoted text from the structural heading.
+    for message in messages:
+        for line in message["text"].splitlines():
+            if line.startswith("### "):
+                headings.pop(line, None)
+    return headings
+
+
 def _reference_sources(store: Store, references: list[dict], frozen=None) -> list[dict]:
     """Map passages to IDs only when their exact archive heading is verified."""
     result = []
+    indexes = {}
     frozen = allowed_sources(store) if frozen is None else frozen
     for reference in references:
         source = {
@@ -50,27 +78,15 @@ def _reference_sources(store: Store, references: list[dict], frozen=None) -> lis
         passage = reference.get("cited_text")
         lines = set(passage.splitlines()) if isinstance(passage, str) else set()
         verified: dict[str, list[str]] = {}
-        messages = list(
-            store.connection.execute(
-                """SELECT m.* FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
-               WHERE sm.segment_id=? ORDER BY sm.position""",
-                (mapping["segment_id"],),
-            )
-        )
-        # A message body can quote a structural heading verbatim. References
-        # expose cited text but no trustworthy source offsets, so that line is
-        # ambiguous and must not authorize message IDs.
-        body_lines = {line for message in messages for line in message["text"].splitlines()}
-        for message in messages:
-            kind = {"progress": " · Progress", "thinking_summary": " · Thinking Summary"}.get(
-                message["kind"], ""
-            )
-            heading = (
-                f"### {message['conversation_id']} · {message['sequence']:04d} · "
-                f"{message['role'].title()}{kind} · {message['timestamp'] or 'Unknown'}"
-            )
-            if heading in lines and heading not in body_lines:
-                verified.setdefault(message["conversation_id"], []).append(message["id"])
+        segment_id = mapping["segment_id"]
+        if lines:
+            if segment_id not in indexes:
+                indexes[segment_id] = _citable_headings(store, segment_id)
+            headings = indexes[segment_id]
+            for _, conversation_id, message_id in sorted(
+                headings[line] for line in lines if line in headings
+            ):
+                verified.setdefault(conversation_id, []).append(message_id)
         if verified:
             for conversation_id, message_ids in verified.items():
                 result.append(
@@ -119,12 +135,7 @@ class MemoryApplication:
         if name != "memory_ask":
             return _error("unknown_tool", "Unknown memory tool.")
         question = arguments.get("question")
-        if (
-            set(arguments) != {"question"}
-            or not isinstance(question, str)
-            or not question.strip()
-            or len(question) > MAX_QUESTION_LENGTH
-        ):
+        if set(arguments) != {"question"} or not valid_question(question):
             return _error(
                 "invalid_question", f"Provide a question of 1 to {MAX_QUESTION_LENGTH} characters."
             )
@@ -168,12 +179,7 @@ class MemoryApplication:
             for r in last["managed_sources"]
             if r["state"] == "missing"
         )
-        return {
-            **status,
-            "notebook": notebook,
-            "last_verified_remote": last,
-            "next_actions": actions,
-        }
+        return {**status, "notebook": notebook, "next_actions": actions}
 
     async def ask(self, question):
         with Store(self.db_path, existing=True) as store:
@@ -192,10 +198,7 @@ class MemoryApplication:
                     )
                 try:
                     observe_inventory(store, await remote.list_sources())
-                    confirmed = allowed_sources(store)
-                    frozen = {
-                        k: m for k, m in frozen.items() if _same_revision(m, confirmed.get(k))
-                    }
+                    frozen = _still_allowed(frozen, allowed_sources(store))
                     if not frozen:
                         return failed(
                             "no_synced_sources",
@@ -203,46 +206,18 @@ class MemoryApplication:
                         )
                     result = await remote.ask(question, source_ids=list(frozen))
                     references = result.get("references")
-                    current = allowed_sources(store)
+                    verified_scope = _still_allowed(frozen, allowed_sources(store))
                     if (
                         not isinstance(result.get("answer"), str)
                         or not isinstance(references, list)
                         or not references
-                        or any(
-                            not isinstance(r, dict)
-                            or not isinstance(r.get("source_id"), str)
-                            or (
-                                r.get("cited_text") is not None
-                                and not isinstance(r["cited_text"], str)
-                            )
-                            or (
-                                r.get("citation_number") is not None
-                                and type(r["citation_number"]) is not int
-                            )
-                            or r["source_id"] not in frozen
-                            or not _same_revision(
-                                frozen[r["source_id"]], current.get(r["source_id"])
-                            )
-                            for r in references
-                        )
+                        or not all(_valid_reference(ref, verified_scope) for ref in references)
                     ):
                         return failed(
                             "unverified_sources",
                             "The answer could not be verified against the selected revisions and was withheld.",
                         )
-                    sources = _reference_sources(
-                        store,
-                        references,
-                        {
-                            sid: {
-                                **m,
-                                "revision": current[sid]["revision"],
-                                "content_hash": current[sid]["content_hash"],
-                            }
-                            for sid, m in frozen.items()
-                            if sid in current
-                        },
-                    )
+                    sources = _reference_sources(store, references, verified_scope)
                     return {
                         "answer": result["answer"],
                         "sources": sources,
@@ -257,8 +232,24 @@ class MemoryApplication:
                     )
 
 
-def _same_revision(frozen, now):
-    return now and all(now[k] == frozen[k] for k in ("source_revision", "segment_id", "sha256"))
+def _still_allowed(frozen: dict, current: dict) -> dict:
+    """Keep current metadata only for revisions originally selected for this query."""
+    return {
+        sid: current[sid]
+        for sid, mapping in frozen.items()
+        if sid in current
+        and all(mapping[k] == current[sid][k] for k in ("source_revision", "segment_id", "sha256"))
+    }
+
+
+def _valid_reference(reference, scope: dict) -> bool:
+    return (
+        isinstance(reference, dict)
+        and isinstance(reference.get("source_id"), str)
+        and reference["source_id"] in scope
+        and (reference.get("cited_text") is None or isinstance(reference["cited_text"], str))
+        and (reference.get("citation_number") is None or type(reference["citation_number"]) is int)
+    )
 
 
 def _safe_remote_error(exc):

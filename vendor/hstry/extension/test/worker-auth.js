@@ -22,6 +22,16 @@ assert.equal(
   (await checkConnection({ ...settings, nativeHost: 'com.other.app' }, { sendNative })).code,
   'incompatible_server',
 );
+for (const broken of [
+  { archiveId: [archiveId] },
+  { nativeHost: [nativeHost] },
+  { archiveId: archiveId.toUpperCase() },
+]) {
+  assert.equal(
+    (await checkConnection({ ...settings, ...broken }, { sendNative })).code,
+    'incompatible_server',
+  );
+}
 assert.equal(calls.length, 0);
 assert.equal((await checkConnection(settings, { sendNative })).ok, true);
 assert.deepEqual(calls, [[nativeHost, { op: 'check', archive_instance_id: archiveId }]]);

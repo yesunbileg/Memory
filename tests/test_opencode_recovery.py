@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_memory.cli import collect_into
 from ai_memory.collectors import collect
+from ai_memory.importer import collect_into
 from ai_memory.store import Store
 
 

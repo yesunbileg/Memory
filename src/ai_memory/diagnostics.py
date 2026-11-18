@@ -5,32 +5,28 @@ class PublicInputError(ValueError):
     """Actionable application validation with no private data in its message."""
 
 
+_PROVIDER_MESSAGES = {
+    "auth_required": "NotebookLM authentication is missing or expired. Check your configured browser login.",
+    "rate_limited": "NotebookLM rate limit reached. Retry later.",
+    "processing_failed": "NotebookLM source processing failed.",
+    "not_ready": "NotebookLM source is not ready. Retry sync later.",
+    "timeout": "NotebookLM request timed out. Retry later.",
+    "network_error": "NotebookLM connection failed. Check connectivity and retry.",
+    "notebooklm_error": "NotebookLM request failed. Check login and retry.",
+}
+
+
 def provider_failure(error):
     """Never reflect a provider-supplied message or unknown code."""
-    messages = {
-        "auth_required": "NotebookLM authentication is missing or expired. Check your configured browser login.",
-        "rate_limited": "NotebookLM rate limit reached. Retry later.",
-        "processing_failed": "NotebookLM source processing failed.",
-        "not_ready": "NotebookLM source is not ready. Retry sync later.",
-        "timeout": "NotebookLM request timed out. Retry later.",
-        "network_error": "NotebookLM connection failed. Check connectivity and retry.",
-        "notebooklm_error": "NotebookLM request failed. Check login and retry.",
-    }
     code = getattr(error, "code", None)
-    if not isinstance(code, str) or code not in messages:
+    if not isinstance(code, str) or code not in _PROVIDER_MESSAGES:
         code = "notebooklm_error"
-    return {"code": code, "message": messages[code]}
+    return {"code": code, "message": _PROVIDER_MESSAGES[code]}
 
 
 SAFE_FAILURES = frozenset(
     {
-        "auth_required",
-        "rate_limited",
-        "processing_failed",
-        "not_ready",
-        "timeout",
-        "network_error",
-        "notebooklm_error",
+        *_PROVIDER_MESSAGES,
         "failed_source_cleanup",
         "SensitiveData",
         "SnapshotError",

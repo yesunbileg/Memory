@@ -23,6 +23,14 @@ def yaml_value(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def message_heading(row) -> str:
+    """Exact structural line shared by the renderer and citation verifier."""
+    kind = {"progress": " · Progress", "thinking_summary": " · Thinking Summary"}.get(
+        row["kind"], ""
+    )
+    return f"### {row['conversation_id']} · {row['sequence']:04d} · {row['role'].title()}{kind} · {row['timestamp'] or 'Unknown'}"
+
+
 class SegmentBuilder:
     def __init__(self, store: Store, target_words=150_000, max_words=450_000, max_active=49):
         if not 0 < target_words <= max_words or not 2 <= max_active <= 49:
@@ -109,7 +117,7 @@ class SegmentBuilder:
                 c = (
                     json.loads(metadata[0])
                     if metadata
-                    else self.store.get_conversation(m["conversation_id"])
+                    else self.store.conversation_metadata(m["conversation_id"])
                 )
                 # Title remains fully represented in quoted YAML; heading is structural only.
                 lines.extend([f"## {c['id']}", "", "```yaml"])
@@ -146,11 +154,7 @@ class SegmentBuilder:
                     lines.append(f"{name}: {yaml_value(value)}")
                 lines.extend(["```", ""])
                 previous = m["conversation_id"]
-            kind = {"progress": " · Progress", "thinking_summary": " · Thinking Summary"}.get(
-                m["kind"], ""
-            )
-            heading = f"### {m['conversation_id']} · {m['sequence']:04d} · {m['role'].title()}{kind} · {m['timestamp'] or 'Unknown'}"
-            lines.extend([heading, "", m["text"], "", "---", ""])
+            lines.extend([message_heading(m), "", m["text"], "", "---", ""])
         return "\n".join(lines)
 
     def _refresh(self, segment_id: str) -> bool:
@@ -163,8 +167,7 @@ class SegmentBuilder:
                 "SELECT DISTINCT m.conversation_id FROM messages m JOIN segment_messages sm ON m.id=sm.message_id WHERE sm.segment_id=?",
                 (segment_id,),
             ).fetchall():
-                c = self.store.get_conversation(row[0])
-                del c["messages"]
+                c = self.store.conversation_metadata(row[0])
                 db.execute(
                     "INSERT OR REPLACE INTO segment_metadata VALUES(?,?,?)",
                     (segment_id, row[0], json.dumps(c, ensure_ascii=False)),
@@ -175,10 +178,7 @@ class SegmentBuilder:
                 "Rendered segment exceeds the 500000-word source ceiling; archive retained"
             )
         value = digest(text)
-        old = db.execute("SELECT content_hash FROM segments WHERE id=?", (segment_id,)).fetchone()[
-            0
-        ]
-        if value == old:
+        if value == state["content_hash"]:
             return False
         words = db.execute(
             """SELECT m.text FROM segment_messages sm JOIN messages m ON m.id=sm.message_id
@@ -281,7 +281,7 @@ class SegmentBuilder:
             assigned = 0
             touched = set()
             row = db.execute("SELECT * FROM segments WHERE state='open'").fetchone()
-            if row:
+            if row and pending:
                 used = sum(
                     len(r[0].split())
                     for r in db.execute(
@@ -297,10 +297,9 @@ class SegmentBuilder:
                 used = position = 0
             for m in pending:
                 words = len(m["text"].split())
-                if row:
-                    if used and used + words > self.target_words:
-                        db.execute("UPDATE segments SET state='sealed' WHERE id=?", (row["id"],))
-                        row = None
+                if row and used and used + words > self.target_words:
+                    db.execute("UPDATE segments SET state='sealed' WHERE id=?", (row["id"],))
+                    row = None
                 if row is None:
                     count = db.execute(
                         "SELECT COUNT(*) FROM segments WHERE state!='retired'"

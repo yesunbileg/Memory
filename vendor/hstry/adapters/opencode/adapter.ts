@@ -175,58 +175,6 @@ async function optionalEntries(dir: string) {
   }
 }
 
-// Detect which layout is being used
-type LayoutType = 'sqlite' | 'new' | 'old' | 'none';
-
-async function detectLayout(basePath: string): Promise<LayoutType> {
-  // Check SQLite layout first (newest, v1.1.45+)
-  if (openDb && existsSync(join(basePath, 'opencode.db'))) {
-    return 'sqlite';
-  }
-
-  // Check new layout: storage/session/<project-id>/
-  const newStoragePath = join(basePath, 'storage', 'session');
-  try {
-    const stats = await stat(newStoragePath);
-    if (stats.isDirectory()) {
-      const dirs = await readdir(newStoragePath);
-      for (const dir of dirs) {
-        const projectPath = join(newStoragePath, dir);
-        const projectStats = await stat(projectPath);
-        if (projectStats.isDirectory()) {
-          const sessions = await readdir(projectPath);
-          if (sessions.some(s => s.startsWith('ses_') && s.endsWith('.json'))) {
-            return 'new';
-          }
-        }
-      }
-    }
-  } catch { /* ignore */ }
-
-  // Check old layout: project/<name>/storage/session/info/
-  const oldProjectPath = join(basePath, 'project');
-  try {
-    const stats = await stat(oldProjectPath);
-    if (stats.isDirectory()) {
-      const projects = await readdir(oldProjectPath);
-      for (const project of projects) {
-        const infoPath = join(oldProjectPath, project, 'storage/session/info');
-        try {
-          const infoStats = await stat(infoPath);
-          if (infoStats.isDirectory()) {
-            const sessions = await readdir(infoPath);
-            if (sessions.some(s => s.startsWith('ses_') && s.endsWith('.json'))) {
-              return 'old';
-            }
-          }
-        } catch { /* continue */ }
-      }
-    }
-  } catch { /* ignore */ }
-
-  return 'none';
-}
-
 const adapter: Adapter = {
   info(): AdapterInfo {
     return {
@@ -242,8 +190,13 @@ const adapter: Adapter = {
     if (!isUnderCanonicalRoot(path, DEFAULT_OPENCODE_PATH)) {
       return null;
     }
-    const layout = await detectLayout(path);
-    return layout !== 'none' ? 0.95 : null;
+    try {
+      if (existsSync(join(checkedSource(path), 'opencode.db'))) return 0.95;
+      return (await enumerateSessionRefs(path)).length > 0 ? 0.95 : null;
+    } catch {
+      // Detection is advisory. Parsing reports actual source errors.
+      return null;
+    }
   },
 
   async parse(path: string, opts?: ParseOptions): Promise<Conversation[]> {
@@ -278,7 +231,6 @@ const adapter: Adapter = {
       if (conv) conversations.push(conv);
     }
     return conversations.sort((a, b) => b.createdAt - a.createdAt || (a.externalId ?? '').localeCompare(b.externalId ?? ''));
-
   },
 
   supportsIncremental: true,
@@ -288,10 +240,8 @@ const adapter: Adapter = {
   },
 
   async parseStream(path: string, opts?: ParseOptions): Promise<ParseStreamResult> {
-    const layout = await detectLayout(path);
-
-    // SQLite layout: use LIMIT/OFFSET for efficient batching
-    if (layout === 'sqlite') {
+    // Do not walk every JSON session first just to distinguish it from SQLite.
+    if (existsSync(join(path, 'opencode.db'))) {
       return parseSqliteStream(path, opts);
     }
 
@@ -309,13 +259,9 @@ const adapter: Adapter = {
 
     for (let i = startIndex; i < endIndex; i++) {
       const ref = refs[i];
-      try {
-        const conv = await parseSingleSession(path, ref, opts);
-        if (conv) {
-          conversations.push(conv);
-        }
-      } catch (err) {
-        throw err; // Do not report a partial transcript as a complete import.
+      const conv = await parseSingleSession(path, ref, opts);
+      if (conv) {
+        conversations.push(conv);
       }
     }
 
@@ -574,18 +520,14 @@ function sqlitePage(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
     // Build conversations
     const conversations: Conversation[] = [];
     for (const session of rows) {
-      try {
-        const conv = buildSqliteConversation(
-          session,
-          messagesBySession.get(session.id) ?? [],
-          partsByMessage,
-          projectMap.get(session.project_id),
-          opts,
-        );
-        if (conv) conversations.push(conv);
-      } catch (err) {
-        throw err;
-      }
+      const conv = buildSqliteConversation(
+        session,
+        messagesBySession.get(session.id) ?? [],
+        partsByMessage,
+        projectMap.get(session.project_id),
+        opts,
+      );
+      if (conv) conversations.push(conv);
     }
 
     const done = !hasMore;
@@ -610,86 +552,59 @@ function buildSqliteConversation(
   const messages: Message[] = [];
 
   for (const msgRow of messageRows) {
-    try {
-      const msgData = JSON.parse(msgRow.data);
-      const role = msgData.role;
-      if (msgData.sessionID !== undefined && msgData.sessionID !== session.id) throw new Error('Invalid message parent');
-      if (msgData.id !== undefined && msgData.id !== msgRow.id) throw new Error('Invalid message identity');
-      if (typeof role !== 'string' || hidden(msgData) || !['user','assistant'].includes(mapRole(role))) continue;
+    const msgData = JSON.parse(msgRow.data);
+    const role = msgData.role;
+    if (msgData.sessionID !== undefined && msgData.sessionID !== session.id) throw new Error('Invalid message parent');
+    if (msgData.id !== undefined && msgData.id !== msgRow.id) throw new Error('Invalid message identity');
+    if (typeof role !== 'string' || hidden(msgData) || !['user','assistant'].includes(mapRole(role))) continue;
 
-      // Reconstruct parts from the part table
-      const partRows = partsByMessage.get(msgRow.id) ?? [];
-      const parts: PartInfo[] = [];
+    // Reconstruct parts from the part table
+    const partRows = partsByMessage.get(msgRow.id) ?? [];
+    const parts: PartInfo[] = [];
 
-      for (const partRow of partRows) {
-        try {
-          const partData = JSON.parse(partRow.data);
-          if (partRow.session_id !== session.id || (partData.sessionID !== undefined && partData.sessionID !== session.id)
-              || (partData.messageID !== undefined && partData.messageID !== msgRow.id)
-              || (partData.id !== undefined && partData.id !== partRow.id)) throw new Error('Invalid part parent');
-          // The data blob stores type/text/tool/state etc. directly
-          parts.push({
-            id: partRow.id,
-            messageID: msgRow.id,
-            sessionID: msgRow.session_id,
-            type: partData.type,
-            text: partData.text,
-            updatedAt: latestUpdate(partData.time?.updated, partRow.time_updated),
-            visibility: partData.visibility,
-            synthetic: partData.synthetic,
-            ignored: partData.ignored,
-            tool: partData.tool,
-            state: partData.state,
-            files: Array.isArray(partData.files) ? partData.files : undefined,
-            hash: typeof partData.hash === 'string' ? partData.hash : undefined,
-          });
-        } catch (error) {
-          throw error;
-        }
-      }
-
-      const textParts = parts.filter(p => p.type === 'text' && p.text && !p.synthetic && !p.ignored && p.visibility !== 'hidden');
-      const content = textParts.map(p => p.text).join('');
-
-      let toolCalls: ToolCall[] | undefined;
-      if (opts?.includeTools !== false) {
-        const toolParts = parts.filter(p => p.type === 'tool' && p.tool);
-        if (toolParts.length > 0) {
-          toolCalls = toolParts.map(p => ({
-            toolName: p.tool!,
-            input: p.state?.input,
-            output: p.state?.output ?? p.state?.error,
-            status: mapToolStatus(p.state?.status),
-          }));
-        }
-      }
-
-      const canonParts = buildCanonParts(parts, role, opts?.includeTools !== false) ?? textOnlyParts(content);
-      const effectiveContent = content || projectPartsToContent(canonParts);
-
-      // Extract token info from assistant message data
-      const tokens = (msgData.tokens?.input || 0) + (msgData.tokens?.output || 0) + (msgData.tokens?.reasoning || 0);
-
-      messages.push({
-        role: mapRole(role),
-        content: effectiveContent,
-        parts: canonParts,
-        createdAt: msgData.time?.created ?? msgRow.time_created,
-        updatedAt: latestUpdate(msgData.time?.updated, msgRow.time_updated),
-        model: msgData.modelID || undefined,
-        tokens: tokens > 0 ? tokens : undefined,
-        costUsd: msgData.cost || undefined,
-        toolCalls,
-        metadata: {
-          id: msgRow.id,
-          parentId: msgData.parentID,
-          provider: msgData.providerID,
-          agent: msgData.agent,
-        },
+    for (const partRow of partRows) {
+      const partData = JSON.parse(partRow.data);
+      if (partRow.session_id !== session.id || (partData.sessionID !== undefined && partData.sessionID !== session.id)
+          || (partData.messageID !== undefined && partData.messageID !== msgRow.id)
+          || (partData.id !== undefined && partData.id !== partRow.id)) throw new Error('Invalid part parent');
+      // The data blob stores type/text/tool/state etc. directly
+      parts.push({
+        id: partRow.id,
+        messageID: msgRow.id,
+        sessionID: msgRow.session_id,
+        type: partData.type,
+        text: partData.text,
+        updatedAt: latestUpdate(partData.time?.updated, partRow.time_updated),
+        visibility: partData.visibility,
+        synthetic: partData.synthetic,
+        ignored: partData.ignored,
+        tool: partData.tool,
+        state: partData.state,
+        files: Array.isArray(partData.files) ? partData.files : undefined,
+        hash: typeof partData.hash === 'string' ? partData.hash : undefined,
       });
-    } catch (err) {
-      throw err;
     }
+
+    const projection = projectMessageParts(parts, opts?.includeTools !== false);
+
+    // Extract token info from assistant message data
+    const tokens = (msgData.tokens?.input || 0) + (msgData.tokens?.output || 0) + (msgData.tokens?.reasoning || 0);
+
+    messages.push({
+      role: mapRole(role),
+      ...projection,
+      createdAt: msgData.time?.created ?? msgRow.time_created,
+      updatedAt: latestUpdate(msgData.time?.updated, msgRow.time_updated),
+      model: msgData.modelID || undefined,
+      tokens: tokens > 0 ? tokens : undefined,
+      costUsd: msgData.cost || undefined,
+      metadata: {
+        id: msgRow.id,
+        parentId: msgData.parentID,
+        provider: msgData.providerID,
+        agent: msgData.agent,
+      },
+    });
   }
 
   return buildConversation(
@@ -776,12 +691,8 @@ function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResu
 
   const conversations: Conversation[] = [];
   for (const session of rows) {
-    try {
-      const conv = buildSqliteV2Conversation(session, messagesBySession.get(session.id) ?? [], projectMap.get(session.project_id), opts);
-      if (conv) conversations.push(conv);
-    } catch (err) {
-      throw err;
-    }
+    const conv = buildSqliteV2Conversation(session, messagesBySession.get(session.id) ?? [], projectMap.get(session.project_id), opts);
+    if (conv) conversations.push(conv);
   }
 
   return { conversations, cursor: hasMore ? { offset: offset + batchSize } : undefined, done: !hasMore };
@@ -798,12 +709,7 @@ function buildSqliteV2Conversation(
   const modelRef = parseModelRef(session.model);
 
   for (const row of messageRows) {
-    let data: Record<string, any>;
-    try {
-      data = JSON.parse(row.data);
-    } catch (error) {
-      throw error;
-    }
+    const data: Record<string, any> = JSON.parse(row.data);
     if ((data.sessionID !== undefined && data.sessionID !== session.id) ||
         (data.id !== undefined && data.id !== row.id)) throw new Error('Invalid message parent');
     if (hidden(data)) continue;
@@ -1087,106 +993,70 @@ async function loadMessages(
   const sessionMessagePath = join(messageDir, sessionId);
   const messages: Message[] = [];
 
-  try {
-    const messageFiles = (await optionalEntries(sessionMessagePath)).map(entry => entry.name);
+  const messageFiles = (await optionalEntries(sessionMessagePath)).map(entry => entry.name);
 
-    for (const messageFile of messageFiles) {
-      if (!messageFile.startsWith('msg_') || !messageFile.endsWith('.json')) {
-        continue;
-      }
-
-      const messagePath = join(sessionMessagePath, messageFile);
-      try {
-        const messageContent = await readUtf8(messagePath);
-        if (!messageContent.trim()) throw new Error('Empty source message file');
-        const msgInfo: MessageInfo = JSON.parse(messageContent);
-        if (msgInfo.id !== basename(messageFile, '.json') || msgInfo.sessionID !== sessionId)
-          throw new Error('Invalid message parent or identity');
-        if (hidden(msgInfo) || !['user','assistant'].includes(mapRole(msgInfo.role))) continue;
-
-        // Load parts - in new layout: part/<msg-id>/<part-id>.json
-        const msgPartDir = join(partDir, msgInfo.id);
-        const parts = await loadParts(msgPartDir, sessionId, msgInfo.id);
-
-        const textParts = parts.filter(p => p.type === 'text' && p.text && !p.synthetic && !p.ignored && p.visibility !== 'hidden');
-        const content = textParts.map(p => p.text).join('');
-
-        let toolCalls: ToolCall[] | undefined;
-        if (opts?.includeTools !== false) {
-          const toolParts = parts.filter(p => p.type === 'tool' && p.tool);
-          if (toolParts.length > 0) {
-            toolCalls = toolParts.map(p => ({
-              toolName: p.tool!,
-              input: p.state?.input,
-              output: p.state?.output ?? p.state?.error,
-              status: mapToolStatus(p.state?.status),
-            }));
-          }
-        }
-
-        const tokens = (msgInfo.tokens?.input || 0) + (msgInfo.tokens?.output || 0) + (msgInfo.tokens?.reasoning || 0);
-        const canonParts = buildCanonParts(parts, msgInfo.role, opts?.includeTools !== false) ?? textOnlyParts(content);
-
-        messages.push({
-          role: mapRole(msgInfo.role),
-          content: content || projectPartsToContent(canonParts),
-          parts: canonParts,
-          createdAt: msgInfo.time.created,
-          updatedAt: msgInfo.time.updated,
-          model: msgInfo.modelID || undefined,
-          tokens: tokens > 0 ? tokens : undefined,
-          costUsd: msgInfo.cost || undefined,
-          toolCalls,
-          metadata: {
-            id: msgInfo.id,
-            parentId: msgInfo.parentID,
-            provider: msgInfo.providerID,
-            agent: msgInfo.agent,
-            summaryTitle: msgInfo.summary?.title,
-          },
-        });
-      } catch (msgErr) {
-        throw msgErr;
-      }
+  for (const messageFile of messageFiles) {
+    if (!messageFile.startsWith('msg_') || !messageFile.endsWith('.json')) {
+      continue;
     }
-  } catch (err) {
-    throw err;
+
+    const messagePath = join(sessionMessagePath, messageFile);
+    const messageContent = await readUtf8(messagePath);
+    if (!messageContent.trim()) throw new Error('Empty source message file');
+    const msgInfo: MessageInfo = JSON.parse(messageContent);
+    if (msgInfo.id !== basename(messageFile, '.json') || msgInfo.sessionID !== sessionId)
+      throw new Error('Invalid message parent or identity');
+    if (hidden(msgInfo) || !['user','assistant'].includes(mapRole(msgInfo.role))) continue;
+
+    // Load parts - in new layout: part/<msg-id>/<part-id>.json
+    const msgPartDir = join(partDir, msgInfo.id);
+    const parts = await loadParts(msgPartDir, sessionId, msgInfo.id);
+
+    const projection = projectMessageParts(parts, opts?.includeTools !== false);
+    const tokens = (msgInfo.tokens?.input || 0) + (msgInfo.tokens?.output || 0) + (msgInfo.tokens?.reasoning || 0);
+
+    messages.push({
+      role: mapRole(msgInfo.role),
+      ...projection,
+      createdAt: msgInfo.time.created,
+      updatedAt: msgInfo.time.updated,
+      model: msgInfo.modelID || undefined,
+      tokens: tokens > 0 ? tokens : undefined,
+      costUsd: msgInfo.cost || undefined,
+      metadata: {
+        id: msgInfo.id,
+        parentId: msgInfo.parentID,
+        provider: msgInfo.providerID,
+        agent: msgInfo.agent,
+        summaryTitle: msgInfo.summary?.title,
+      },
+    });
   }
 
   messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   return messages;
 }
 
-/**
- * Load parts for NEW layout
- */
+/** Read one message's parts from its already-resolved native layout. */
 async function loadParts(msgPartDir: string, sessionId: string, messageId: string): Promise<PartInfo[]> {
   const parts: PartInfo[] = [];
 
-  try {
-    const partFiles = (await optionalEntries(msgPartDir)).map(entry => entry.name);
+  const partFiles = (await optionalEntries(msgPartDir)).map(entry => entry.name);
 
-    for (const partFile of partFiles) {
-      if (!partFile.startsWith('prt_') || !partFile.endsWith('.json')) {
-        continue;
-      }
-
-      const partPath = join(msgPartDir, partFile);
-      try {
-        const partContent = await readUtf8(partPath);
-        if (!partContent.trim()) throw new Error('Empty source part file');
-        const part: PartInfo = JSON.parse(partContent);
-        if (part.id !== basename(partFile, '.json') ||
-            (part.messageID !== undefined && part.messageID !== messageId) ||
-            (part.sessionID !== undefined && part.sessionID !== sessionId))
-          throw new Error('Invalid part parent or identity');
-        parts.push(part);
-      } catch (partErr) {
-        throw partErr;
-      }
+  for (const partFile of partFiles) {
+    if (!partFile.startsWith('prt_') || !partFile.endsWith('.json')) {
+      continue;
     }
-  } catch (err) {
-    throw err;
+
+    const partPath = join(msgPartDir, partFile);
+    const partContent = await readUtf8(partPath);
+    if (!partContent.trim()) throw new Error('Empty source part file');
+    const part: PartInfo = JSON.parse(partContent);
+    if (part.id !== basename(partFile, '.json') ||
+        (part.messageID !== undefined && part.messageID !== messageId) ||
+        (part.sessionID !== undefined && part.sessionID !== sessionId))
+      throw new Error('Invalid part parent or identity');
+    parts.push(part);
   }
 
   parts.sort((a, b) => a.id.localeCompare(b.id));
@@ -1208,8 +1078,30 @@ function latestUpdate(...values: unknown[]): number | undefined {
   return times.length ? Math.max(...times) : undefined;
 }
 
+/** JSON and v1 SQLite messages share exactly the same ordered part projection. */
+function projectMessageParts(parts: PartInfo[], includeTools: boolean) {
+  const textParts = parts.filter(p => p.type === 'text' && p.text && !p.synthetic && !p.ignored && p.visibility !== 'hidden');
+  const content = textParts.map(p => p.text).join('');
+
+  let toolCalls: ToolCall[] | undefined;
+  if (includeTools) {
+    const toolParts = parts.filter(p => p.type === 'tool' && p.tool);
+    if (toolParts.length > 0) {
+      toolCalls = toolParts.map(p => ({
+        toolName: p.tool!,
+        input: p.state?.input,
+        output: p.state?.output ?? p.state?.error,
+        status: mapToolStatus(p.state?.status),
+      }));
+    }
+  }
+
+  const canonParts = buildCanonParts(parts, includeTools) ?? textOnlyParts(content);
+  return { content: content || projectPartsToContent(canonParts), parts: canonParts, toolCalls };
+}
+
 /** Build CanonPart[] from opencode PartInfo[]. */
-function buildCanonParts(oparts: PartInfo[], role: string, includeTools: boolean): CanonPart[] | undefined {
+function buildCanonParts(oparts: PartInfo[], includeTools: boolean): CanonPart[] | undefined {
   const canon: CanonPart[] = [];
   for (const p of oparts) {
     if (p.synthetic || p.ignored || p.visibility === 'hidden') continue;

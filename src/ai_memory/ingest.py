@@ -1,4 +1,4 @@
-"""Small authenticated, loopback-only receiver for the hstry extension.
+"""Atomic browser ingestion and the legacy loopback HTTP receiver.
 
 Public health, authenticated connection checks, and hstry ``POST /ingest`` are exposed.
 Capture archives locally with upload consent disabled; cloud sync is separate.
@@ -15,7 +15,7 @@ import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from .connection import archive_identity
+from .connection import archive_identity, receiver_proof
 from .normalization import normalize_conversation
 from .store import Store
 
@@ -83,7 +83,7 @@ def _normalize_packet(packet: object) -> list[dict]:
             ):
                 raise ValueError("invalid part text")
         conversation = normalize_conversation(raw, _PLATFORMS[adapter], account)
-        # Validate the complete batch before Store.ingest can commit any row.
+        # Validate the complete batch before entering the archive write transaction.
         # Escaped unpaired surrogates are JSON strings but cannot be stored as
         # lossless UTF-8 text.
         json.dumps(conversation, ensure_ascii=False).encode("utf-8")
@@ -282,11 +282,7 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                     with Store(db_path) as store:
                         instance = store.archive_instance_id()
                     location = archive_identity(db_path)
-                    proof = hmac.digest(
-                        token.encode(),
-                        json.dumps([challenge, location, instance]).encode(),
-                        "sha256",
-                    ).hex()
+                    proof = receiver_proof(token, challenge, location, instance)
                     self._reply(
                         200,
                         {

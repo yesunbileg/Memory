@@ -11,7 +11,7 @@ License: MIT; [LICENSE](LICENSE) is unchanged.
 the tested boundary. The retained files are an intentionally small subset of
 hstry; they do not include its Rust services or search/memory implementation.
 
-Patch groups:
+Patch history:
 
 1. Node 24 runtime and read-only `node:sqlite`; strict UTF-8/Unicode validation.
 2. Exact text, stable source IDs, counted Codex mirror reconciliation, source
@@ -48,9 +48,16 @@ Patch groups:
     identity reconciliation and no longer treats plain heading-like user text
     as bootstrap instructions. Incremental Codex imports can refresh matching
     titles directly from the selected source's index without reparsing rollouts.
-
 12. Codex title shortening counts Unicode code points, whole envelopes and source
     flags control visibility, and per-session index lookups include model-only rows.
     OpenCode JSON layouts use one parent-checked reader. SQLite v1/v2 page through
     one read snapshot, refuse crossed parents, and keep native visibility flags.
     Explicit roots and dependency reads refuse symlinks.
+13. The browser extension uses a registered local Native Messaging host.
+    Token/HTTP notes above describe older versions, not the current transport.
+    ChatGPT and Claude share account-bound capture startup; the selection and
+    supported provider capabilities are unchanged.
+14. Full Codex scans visit each native sessions subtree once. OpenCode JSON
+    and v1 SQLite use one ordered part projection. Incremental JSON checkpoints
+    cover the native session, messages and parts before skipping an unchanged
+    session. The normalized text, IDs, order and edit clocks are unchanged.

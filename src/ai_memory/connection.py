@@ -1,4 +1,4 @@
-"""Private connection files for the loopback browser receiver."""
+"""Private connection files and authentication for the legacy loopback receiver."""
 
 from __future__ import annotations
 
@@ -184,6 +184,12 @@ def archive_identity(db_path: Path) -> str:
     return hashlib.sha256(str(Path(db_path).expanduser().resolve()).encode()).hexdigest()
 
 
+def receiver_proof(token: str, challenge: str, location: str, instance: object) -> str:
+    """Sign the v1 probe fields in their original order and JSON encoding."""
+    fields = json.dumps([challenge, location, instance]).encode()
+    return hmac.digest(token.encode(), fields, "sha256").hex()
+
+
 def check_running_receiver(port: int, token: str, db_path: Path) -> str:
     """Classify an occupied loopback port without exposing credentials or replies."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
@@ -215,8 +221,9 @@ def check_running_receiver(port: int, token: str, db_path: Path) -> str:
         if not isinstance(data.get("archive_id"), str):
             return "incompatible"
         proof = data.get("proof")
-        payload = [challenge, data["archive_id"], data.get("archive_instance_id")]
-        expected = hmac.digest(token.encode(), json.dumps(payload).encode(), "sha256").hex()
+        expected = receiver_proof(
+            token, challenge, data["archive_id"], data.get("archive_instance_id")
+        )
         if not isinstance(proof, str) or not hmac.compare_digest(proof, expected):
             return "unauthorized"
         if not hmac.compare_digest(data["archive_id"], archive_identity(db_path)):

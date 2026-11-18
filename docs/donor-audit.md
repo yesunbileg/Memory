@@ -80,35 +80,25 @@ update timestamp to every message or invents a model name. Unknown timestamps
 and models remain unknown. Known timestamps convert from hstry milliseconds to
 UTC ISO 8601 strings at the Python boundary.
 
-The extension sends the original hstry
-`{source, adapter, conversations}` packet, with an optional local `account`
-namespace, to `http://127.0.0.1:<port>/ingest`. `/sources` registration is a local
-no-op because this receiver exposes health, an authenticated connection probe,
-and ingest, plus the necessary CORS preflights. All providers start disabled. The configured ingest token
-is required before any provider fetch. The namespace distinguishes Gemini
-accounts/browser profiles; ChatGPT account IDs and Claude organization IDs take
-precedence. Capture adds no Google upload consent.
+The extension keeps hstry’s `{source, adapter, conversations}` shape and adds the
+archive and account scope. On Linux, the browser delivers packets to its
+registered native host. The v2 connection file selects an archive and the
+registration allows only the installed extension’s origin. Neither an HTTP
+bearer token nor an archive ID returned by an HTTP server authenticates a
+browser connection. See [native pairing](native-pairing.md).
 
-The authenticated probe identifies the logical archive with a persistent, opaque
-instance ID. Capture checkpoints are reused only for the matching archive, account
-namespace, provider principal where known, and selection policy. Older state
-without that scope is replayed rather than trusted. The worker binds new ingest
-requests to the probed archive to catch a receiver change between probe and send.
-A receiver without an instance ID can still answer the low-level connection
-probe for compatibility. Popup/Settings checks and capture share the stricter
-archive-identity requirement, so a legacy receiver is shown as incompatible before
-any provider reads occur.
+All providers start disabled. Checkpoints belong to the archive, provider,
+profile namespace, capture selection and available account evidence. The worker
+stores accepted progress only after an ingest acknowledgement. It bounds the
+serialized UTF-8 payload and can split a long conversation at stable message
+boundaries. An indivisible oversized item is reported, not truncated. The
+receiver reports new, updated and unchanged records. Capture does not grant
+permission to publish to Google.
 
-The receiver requires constant-time Bearer authentication, checks Host/Origin,
-permits recognized extension and exact loopback origins without wildcard CORS,
-bounds input to 16 MiB/100 conversations, and validates the complete packet before
-writing. The worker caps the serialized UTF-8 body and can split an oversized
-conversation at stable message boundaries. An indivisible oversized item is
-reported rather than truncated. Repeated native message IDs update existing
-records, and identical replays are counted as `unchanged`. Partial snapshots
-retain absent archive history, preserve known sequences, and append newly seen
-IDs. No search, dashboard, transcript-read, cloud-upload, or source-deletion API
-is exposed.
+Explicit legacy HTTP clients can use the separate authenticated loopback receiver.
+It validates Host, Origin and bearer credentials, bounds the payload (16 MiB,
+100 conversations), and uses the same archive ingest boundary. The browser
+extension does not fall back to this endpoint.
 
 ## Selective browser capture (2026-11-11)
 
@@ -194,8 +184,7 @@ Synthetic fixtures exercise multilingual whitespace, code, multipart text,
 mirrored events, repeated replies, stable IDs, hidden reasoning, synthetic
 messages, out-of-order clocks, all supported OpenCode schemas, strict source
 decoding, native account isolation, edits, partial snapshots, required token,
-body bounds, CORS, DNS-rebinding Host checks, and real provider → loopback HTTP →
-SQLite roundtrips. Selected upstream Node tests also cover backoff, inaccessible
+native registration and framed ingest, plus body limits, CORS and Host checks for the separate legacy HTTP client. Selected upstream Node tests also cover backoff, inaccessible
 Claude organizations, Gemini continuation, and settings initialization.
 
 These tests stub provider network responses. They prove local parsing and ingest

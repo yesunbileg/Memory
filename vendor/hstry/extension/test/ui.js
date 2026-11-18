@@ -182,4 +182,24 @@ check(
   'Selection updated',
 );
 
+check(
+  'fresh settings need no caller-provided defaults',
+  normalizeSettings(),
+  normalizeSettings(null),
+);
+check(
+  'fresh settings preserve the historical browser schedule',
+  normalizeSettings().intervalMinutes,
+  15,
+);
+check(
+  'changed native archive is actionable',
+  /archive/i.test(friendlyError('', 'archive_changed')),
+  true,
+);
+check(
+  'denied native origin requests new registration',
+  /register/i.test(friendlyError('', 'unauthorized')),
+  true,
+);
 process.exit(failures ? 1 : 0);

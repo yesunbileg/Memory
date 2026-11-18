@@ -1,24 +1,11 @@
 // Poll selected AI conversations and save them to the local AI Memory receiver.
 
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
-import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from './providers/index.js';
-import {
-  DEFAULT_CAPTURE_TYPES,
-  normalizeCaptureTypes,
-  eligibleCapture,
-} from './providers/selection.js';
+import { PROVIDERS } from './providers/index.js';
+import { eligibleCapture } from './providers/selection.js';
 import { normalizeSettings } from './ui.js';
 import { checkConnection } from './worker-auth.js';
 import { requestGroups } from './transport.js';
-
-const DEFAULT_SETTINGS = {
-  port: 41770,
-  token: '',
-  account: 'browser-local',
-  intervalMinutes: 15,
-  providers: DEFAULT_PROVIDER_SETTINGS,
-  captureTypes: DEFAULT_CAPTURE_TYPES,
-};
 
 const ALARM_NAME = 'hstry-sync';
 const CONTINUE_ALARM_PREFIX = 'hstry-sync-continue-';
@@ -59,27 +46,19 @@ function observeSettings(settings) {
   return captureEpoch;
 }
 
-async function assertCurrentCapture(settings, epoch) {
+async function assertCurrentCapture(epoch) {
   observeSettings(await getSettings());
   if (epoch !== captureEpoch) throw localError('selection_changed');
 }
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  const normalized = normalizeSettings(
-    {
-      ...DEFAULT_SETTINGS,
-      ...settings,
-      providers: { ...DEFAULT_SETTINGS.providers, ...settings?.providers },
-    },
-    DEFAULT_SETTINGS,
-  );
+  // Keep raw pairing fields: an array or other malformed value must never
+  // become a valid host name through display-oriented string normalization.
   return {
-    ...normalized,
+    ...normalizeSettings(settings),
     nativeHost: settings?.nativeHost,
     archiveId: settings?.archiveId,
-    autoPaused: settings?.autoPaused === true,
-    captureTypes: normalizeCaptureTypes(settings?.captureTypes),
   };
 }
 
@@ -101,6 +80,29 @@ function setStatusEntry(name, entry) {
       await setStatus(status);
     });
   return statusWriteQueue;
+}
+
+// Only these explicit fields may enter the persistent activity log.
+function recordActivity(name, entry, outcome) {
+  const p = entry.progress;
+  return appendActivityLog({
+    id: `${name}-${entry.lastRunMs}`,
+    timestampMs: Date.now(),
+    provider: name,
+    trigger: entry.trigger,
+    outcome,
+    errorCode: entry.lastErrorCode,
+    durationMs: entry.durationMs,
+    counts: {
+      detected: p.detected ?? 0,
+      processed: p.processed ?? 0,
+      created: p.created ?? 0,
+      updated: p.updated ?? 0,
+      unchanged: p.unchanged ?? 0,
+      skipped: entry.selection?.skipped ?? 0,
+      unknown: entry.selection?.unknown ?? 0,
+    },
+  });
 }
 
 function appendActivityLog(record) {
@@ -168,9 +170,9 @@ function makePush(
           counts.reduce((a, b) => a + b, 0) !== group.count
         )
           throw localError('archive_unavailable');
-        created += data?.created ?? 0;
-        updated += data?.updated ?? 0;
-        unchanged += data?.unchanged ?? 0;
+        created += data.created;
+        updated += data.updated;
+        unchanged += data.unchanged;
       }
       // A chunked snapshot is still one logical conversation receipt.
       created = Math.min(group.count, created);
@@ -182,29 +184,17 @@ function makePush(
   };
 }
 
-function makeRegister(_settings) {
-  // AI Memory registers no remote sources. /ingest carries provider identity;
-  // uploaded NotebookLM sources are created only by the separately approved sync.
-  return async (source, adapter) => ({ source, adapter });
-}
-
-async function registerEnabledSources(settings) {
-  settings ??= await getSettings();
-  const register = makeRegister(settings);
-  const results = {};
-  for (const [id, provider] of Object.entries(PROVIDERS)) {
-    if (!settings.providers[id]) continue;
-    try {
-      results[id] = await register(provider.sourceId, provider.adapter);
-    } catch (error) {
-      results[id] = { error: error.message };
-    }
-  }
-  return results;
+// This describes local packet sources; it does not register anything remotely.
+function configuredSources(settings) {
+  return Object.fromEntries(
+    Object.entries(PROVIDERS)
+      .filter(([id]) => settings.providers[id])
+      .map(([id, provider]) => [id, { source: provider.sourceId, adapter: provider.adapter }]),
+  );
 }
 
 async function checkApi() {
-  return checkConnection(await getSettings(), { requireArchive: true });
+  return checkConnection(await getSettings());
 }
 
 const LOCAL_ERRORS = {
@@ -324,7 +314,7 @@ async function runSync(
     await chrome.action.setBadgeText({ text: '…' });
 
     // Verify local credentials before any provider makes remote account or chat reads.
-    const connection = await checkConnection(settings, { requireArchive: true });
+    const connection = await checkConnection(settings);
     if (!connection.ok) {
       for (const [name] of selected) {
         await setStatusEntry(name, {
@@ -438,21 +428,19 @@ async function runSync(
               unchanged: (entry.progress.unchanged ?? 0) + result.unchanged,
             });
           },
-          () => assertCurrentCapture(settings, epoch),
+          () => assertCurrentCapture(epoch),
           connection.archiveId,
         );
-        const register = makeRegister(settings);
         try {
-          await assertCurrentCapture(settings, epoch);
+          await assertCurrentCapture(epoch);
           const result = await provider.sync({
             state: entry.state ?? {},
             captureTypes: { ...settings.captureTypes },
             push,
-            register,
             report,
-            guard: () => assertCurrentCapture(settings, epoch),
+            guard: () => assertCurrentCapture(epoch),
             checkpoint: async (state) => {
-              await assertCurrentCapture(settings, epoch);
+              await assertCurrentCapture(epoch);
               entry.state = state;
               entry.continuationPending = Boolean(state?.pending || state?.discovery);
               await setStatusEntry(name, entry);
@@ -460,7 +448,7 @@ async function runSync(
             // Provider diagnostics can contain account or conversation text.
             log: () => {},
           });
-          await assertCurrentCapture(settings, epoch);
+          await assertCurrentCapture(epoch);
           entry.state = result.state;
           entry.selection = Object.hasOwn(result, 'selection')
             ? result.selection
@@ -487,24 +475,11 @@ async function runSync(
             await setStatusEntry(name, entry);
             await scheduleContinuation(name);
           }
-          await appendActivityLog({
-            id: `${name}-${startedAt}`,
-            timestampMs: Date.now(),
-            provider: name,
-            trigger,
-            outcome: result.hasMore ? 'queued' : entry.selectionWarning ? 'warning' : 'success',
-            errorCode: null,
-            durationMs: entry.durationMs,
-            counts: {
-              detected: entry.progress.detected ?? 0,
-              processed: entry.progress.processed ?? 0,
-              created: entry.progress.created ?? 0,
-              updated: entry.progress.updated ?? 0,
-              unchanged: entry.progress.unchanged ?? 0,
-              skipped: entry.selection?.skipped ?? 0,
-              unknown: entry.selection?.unknown ?? 0,
-            },
-          });
+          await recordActivity(
+            name,
+            entry,
+            result.hasMore ? 'queued' : entry.selectionWarning ? 'warning' : 'success',
+          );
         } catch (err) {
           anyError = true;
           const failure = safeSyncFailure(err);
@@ -526,24 +501,11 @@ async function runSync(
             ...entry.progress,
             phase: failure.code === 'selection_changed' ? 'cancelled' : 'failed',
           };
-          await appendActivityLog({
-            id: `${name}-${startedAt}`,
-            timestampMs: Date.now(),
-            provider: name,
-            trigger,
-            outcome: failure.code === 'selection_changed' ? 'cancelled' : 'error',
-            errorCode: failure.code,
-            durationMs: entry.durationMs,
-            counts: {
-              detected: entry.progress.detected ?? 0,
-              processed: entry.progress.processed ?? 0,
-              created: entry.progress.created ?? 0,
-              updated: entry.progress.updated ?? 0,
-              unchanged: entry.progress.unchanged ?? 0,
-              skipped: entry.selection?.skipped ?? 0,
-              unknown: entry.selection?.unknown ?? 0,
-            },
-          });
+          await recordActivity(
+            name,
+            entry,
+            failure.code === 'selection_changed' ? 'cancelled' : 'error',
+          );
         } finally {
           release(name);
           await setStatusEntry(name, entry);
@@ -567,14 +529,8 @@ async function runSync(
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  ensureAlarm();
-  registerEnabledSources();
-});
-chrome.runtime.onStartup.addListener(() => {
-  ensureAlarm();
-  registerEnabledSources();
-});
+chrome.runtime.onInstalled.addListener(() => ensureAlarm());
+chrome.runtime.onStartup.addListener(() => ensureAlarm());
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
@@ -652,14 +608,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'settingsChanged') {
-    getSettings()
-      .then((settings) => {
-        observeSettings(settings);
-        return Promise.all([ensureAlarm(), registerEnabledSources(settings)]);
-      })
-      .then(([, sources]) => {
-        sendResponse({ ok: true, sources });
-      });
+    getSettings().then(async (settings) => {
+      observeSettings(settings);
+      await ensureAlarm();
+      sendResponse({ ok: true, sources: configuredSources(settings) });
+    });
     return true;
   }
   if (message?.type === 'clearActivityLog') {

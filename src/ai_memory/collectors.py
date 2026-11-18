@@ -44,11 +44,14 @@ def codex_rollout_files(path: Path, *, max_depth: int | None = None) -> list[Pat
         raise error
 
     roots = [path]
-    roots.extend(
-        candidate
-        for name in ("sessions", "archived_sessions")
-        if (candidate := path / name).is_dir() and not candidate.is_symlink()
-    )
+    # Native subtree roots get their own depth budget only for bounded discovery.
+    # An unrestricted walk from the selected root already covers them.
+    if max_depth is not None:
+        roots.extend(
+            candidate
+            for name in ("sessions", "archived_sessions")
+            if (candidate := path / name).is_dir() and not candidate.is_symlink()
+        )
     files: set[Path] = set()
     for root in roots:
         for directory, directories, filenames in os.walk(
@@ -230,16 +233,13 @@ def _collect_codex_files(path: Path, account: str) -> list[dict]:
     conversations: list[dict] = []
     index = codex_thread_metadata(path)
     for rollout in codex_rollout_files(path):
-        snapshot = collect("codex", rollout, account, _index=index)
-        rank = _snapshot_rank(snapshot[0], rollout) if snapshot else None
-        for conversation in snapshot:
-            if rank is not None:
-                conversation["_snapshot_rank"] = rank
+        for conversation in collect("codex", rollout, account, _index=index):
+            conversation["_snapshot_rank"] = _snapshot_rank(conversation)
             conversations.append(conversation)
     return _merge_codex_snapshots(conversations)
 
 
-def _snapshot_rank(conversation: dict, source_file: Path | None) -> tuple[str, int, str]:
+def _snapshot_rank(conversation: dict) -> tuple[str, int, str]:
     timestamp = conversation.get("updated_at") or conversation.get("created_at") or ""
     # Wall-clock ties carry no source precedence. Break them by content, never
     # by the rollout filename, filesystem mtime, or discovery/import order.
@@ -309,10 +309,6 @@ def collect(
                     raw[field] = row[field]
         conversation = normalize_conversation(raw, platform, account)
         if platform == "codex":
-            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-            source_file = metadata.get("file")
-            conversation["_snapshot_rank"] = _snapshot_rank(
-                conversation, Path(source_file) if isinstance(source_file, str) else None
-            )
+            conversation["_snapshot_rank"] = _snapshot_rank(conversation)
         conversations.append(conversation)
     return _merge_codex_snapshots(conversations) if platform == "codex" else conversations

@@ -1,5 +1,6 @@
 """Real loopback HTTP requests and SQLite, using only synthetic transcripts."""
 
+import hmac
 import http.client
 import json
 import subprocess
@@ -335,6 +336,30 @@ def test_invalid_unicode_batch_is_rejected_before_any_conversation_is_written(ru
 def test_extreme_body_length_header_is_rejected_without_parsing_large_integer(running_server):
     server, database = running_server
     assert request(server, headers={"Content-Length": "9" * 5000})[0] == 413
+    assert archived(database) == []
+
+
+def test_legacy_receiver_challenge_proof_wire_format(running_server):
+    server, database = running_server
+    challenge = "a1" * 32
+    status, _, body = request(
+        server, path="/auth/probe", data={"challenge": challenge}, headers={"Authorization": ""}
+    )
+    assert status == 200
+    reply = json.loads(body)
+    assert set(reply) == {
+        "status",
+        "service",
+        "schema",
+        "archive_id",
+        "archive_instance_id",
+        "proof",
+    }
+    assert (reply["status"], reply["service"], reply["schema"]) == ("ok", "ai-memory", 1)
+    # Use the v1 wire bytes independently of the production encoder. An earlier
+    # CLI or receiver must still agree on field order and JSON separators.
+    signed = f'["{challenge}", "{reply["archive_id"]}", "{reply["archive_instance_id"]}"]'.encode()
+    assert hmac.compare_digest(reply["proof"], hmac.digest(TOKEN.encode(), signed, "sha256").hex())
     assert archived(database) == []
 
 

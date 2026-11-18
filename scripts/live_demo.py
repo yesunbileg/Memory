@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from ai_memory.cli import _gateway_call, sync_archive
-from ai_memory.demo import run_demo
+from ai_memory.demo import DEMO_ORIGINS, run_demo
+from ai_memory.diagnostics import provider_failure
 from ai_memory.notebook import NotebookLMAdapter, NotebookLMError
 from ai_memory.store import Store
 
@@ -29,12 +30,9 @@ async def live_demo(output: Path, *, notebook_id: str):
         rows = store.connection.execute(
             "SELECT id,platform,account,external_id,consent FROM conversations"
         ).fetchall()
-        expected = {
-            ("codex", "synthetic-demo", "memory-demo-codex", 1),
-            ("opencode", "synthetic-demo", "ses_memory", 1),
-        }
         if (
-            {tuple(row)[1:] for row in rows} != expected
+            {tuple(row)[1:4] for row in rows} != DEMO_ORIGINS
+            or not all(row["consent"] for row in rows)
             or {row["id"] for row in rows} != set(result["conversation_ids"])
             or store.get_setting("notebook_id")
             or store.get_setting("storage_path")
@@ -71,7 +69,7 @@ def main():
     except NotebookLMError as exc:
         result = {
             "live_notebooklm_test": "blocked",
-            "error": {"code": exc.code, "message": str(exc)},
+            "error": provider_failure(exc),
         }
     except Exception:
         result = {
