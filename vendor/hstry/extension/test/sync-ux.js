@@ -74,7 +74,11 @@ assert.equal(formatDuration(75_000), '1m 15s');
 
 // 4. Single-provider sync & safe activityLog in background.js
 const token = 'synthetic-ux-private-token-123456';
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
 let settings = {
+  archiveId,
+  nativeHost,
   port: 41770,
   token,
   providers: { chatgpt: true, claude: true, gemini: false },
@@ -138,20 +142,12 @@ PROVIDERS.claude.sync = async () => {
   claudeSynced = true;
   return { state: {}, conversations: 0 };
 };
-globalThis.fetch = async (url) => {
-  if (new URL(url).pathname === '/auth/check') {
-    return new Response(
-      JSON.stringify({
-        status: 'ok',
-        service: 'ai-memory',
-        schema: 1,
-        archive_instance_id: 'synthetic-ux-archive',
-      }),
-    );
-  }
-  return new Response(JSON.stringify({ conversations: 1, created: 1, updated: 0 }));
+chrome.runtime.sendNativeMessage = async (host, packet) => {
+  assert.equal(host, nativeHost);
+  if (packet.op === 'check')
+    return { status: 'ok', service: 'ai-memory', schema: 2, archive_instance_id: archiveId };
+  return { conversations: 1, created: 1, updated: 0, unchanged: 0 };
 };
-
 await import(`../background.js?ux-test=${Date.now()}`);
 const send = (msg) =>
   new Promise((resolve) => {

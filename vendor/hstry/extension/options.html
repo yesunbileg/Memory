@@ -74,18 +74,27 @@
           <div class="setup-step">
             <span class="step-number">1</span>
             <div>
-              <h3>Start local receiver</h3>
+              <h3>Pair a local archive</h3>
               <p>
-                Run this once in your <strong>Memory</strong> folder and keep that terminal open
-                while syncing.
+                Run this in your <strong>Memory</strong> folder with your archive path. Choose the
+                browser where this extension is installed.
               </p>
+              <label for="browser-family">Browser</label>
+              <select id="browser-family">
+                <option value="chrome">Google Chrome</option>
+                <option value="chromium">Chromium</option>
+                <option value="brave">Brave</option>
+              </select>
               <div class="command-box">
-                <code id="setup-command">.venv/bin/ai-memory connect</code>
+                <code id="setup-command"
+                  >ai-memory --db /path/to/archive.sqlite connect --extension-id EXTENSION_ID
+                  --browser chrome</code
+                >
                 <button
                   id="copy-command"
                   class="icon-button"
                   type="button"
-                  aria-label="Copy startup command"
+                  aria-label="Copy pairing command"
                   title="Copy command"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -102,8 +111,8 @@
             <div>
               <h3>Import connection file</h3>
               <p>
-                Select or drop <code>data/extension-connection.json</code> (or the file path printed
-                in your terminal).
+                Select or drop the connection JSON printed by the command. Old port-and-token files
+                must be replaced. Your site choices and schedule are kept.
               </p>
               <div id="dropzone" class="dropzone">
                 <button id="import-connection" class="button-primary" type="button">
@@ -135,33 +144,6 @@
         </div>
 
         <div class="connection-footer">
-          <details id="manual-connection">
-            <summary>Manual port &amp; token</summary>
-            <div class="manual-fields">
-              <label for="port">
-                Port
-                <input
-                  id="port"
-                  type="number"
-                  min="1"
-                  max="65535"
-                  value="41770"
-                  inputmode="numeric"
-                />
-              </label>
-              <label for="token">
-                Connection token
-                <input
-                  id="token"
-                  type="password"
-                  autocomplete="off"
-                  spellcheck="false"
-                  placeholder="Paste your local connection token"
-                />
-              </label>
-              <button id="save" class="button-secondary" type="button">Save &amp; verify</button>
-            </div>
-          </details>
           <button id="test-connection" class="button-quiet" type="button">Check connection</button>
         </div>
       </section>
@@ -221,9 +203,12 @@
       <section class="card activity-card" aria-labelledby="status-heading">
         <div class="activity-header">
           <div>
-            <span class="section-kicker">03 · SYNC &amp; DIAGNOSTICS</span>
-            <h2 id="status-heading">Web Sync Status</h2>
-            <p>Live progress, category counts, and safe diagnostics for each web source.</p>
+            <span class="section-kicker">03 · REVIEW &amp; CAPTURE</span>
+            <h2 id="status-heading">Capture to this computer</h2>
+            <p>
+              Review the selection above. Capture now starts one local run, even when automatic
+              checks are paused.
+            </p>
           </div>
           <button id="sync-now" class="button-primary" type="button" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -232,12 +217,25 @@
             Capture selected chats
           </button>
         </div>
-        <div id="status-list" class="status-list" aria-live="polite"></div>
+        <div class="capture-schedule">
+          <label><input id="auto-paused" type="checkbox" /> Pause automatic checks</label>
+          <label for="interval">
+            Auto-check interval (minutes)
+            <input id="interval" type="number" min="1" max="720" value="15" />
+            <span class="field-hint">Background check cadence (1–720 minutes).</span>
+          </label>
+          <p id="schedule-detail" class="field-hint"></p>
+        </div>
+        <p id="capture-outcome" class="inline-feedback" role="status" aria-live="polite"></p>
+        <div id="status-list" class="status-list"></div>
         <p id="saved" class="inline-feedback" role="status" aria-live="polite"></p>
 
         <div class="activity-log-section">
           <div class="activity-log-header">
-            <h3>Recent sync runs</h3>
+            <h3>Recent runs in this browser profile</h3>
+            <p class="field-hint">
+              Includes past archives. The capture result above is only for the current pairing.
+            </p>
             <button id="clear-log" class="button-quiet" type="button">Clear history</button>
           </div>
           <div id="activity-log" class="activity-log"></div>
@@ -255,13 +253,9 @@
               Browser profile name
               <input id="account" type="text" value="browser-local" autocomplete="off" />
               <span class="field-hint"
-                >Fallback namespace when a site doesn’t report an account ID.</span
+                >When a site does not identify the account, account changes cannot reliably be
+                detected. Use a separate browser profile and name for each account.</span
               >
-            </label>
-            <label for="interval">
-              Auto-check interval (minutes)
-              <input id="interval" type="number" min="1" max="720" value="15" />
-              <span class="field-hint">Background check cadence (1–720 minutes).</span>
             </label>
           </div>
           <p class="field-hint">
@@ -280,7 +274,10 @@
       </details>
 
       <footer class="app-footer">
-        <span>All captured chats stay in your local SQLite archive until explicitly approved.</span>
+        <span
+          >Local capture does not grant Google permission. CLI approval covers future updates until
+          revoked.</span
+        >
         <span>NotebookLM sync: <code>ai-memory approve</code> → <code>ai-memory sync</code></span>
       </footer>
     </main>

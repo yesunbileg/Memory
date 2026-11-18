@@ -103,7 +103,10 @@ test('discovery safety ceiling retains captured data without declaring success',
   do {
     captured = await capture({
       state,
-      list: (page) => [null, `next-${page}`, [summary(String(page))]],
+      list: (_call, arg) => {
+        const page = arg[1] === undefined ? 0 : Number(arg[1].slice(5)) + 1;
+        return [null, `next-${page}`, [summary(String(page))]];
+      },
     });
     state = captured.result.state;
     pushed += captured.pushed.length;

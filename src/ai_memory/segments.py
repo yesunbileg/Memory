@@ -5,6 +5,8 @@ from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .privacy import MASKING_POLICY, find_sensitive, redact_sensitive
+from .revisions import receipt_marker
 from .store import Store, digest
 
 
@@ -42,15 +44,39 @@ class SegmentBuilder:
         return segment_id
 
     def render(self, segment_id: str) -> str:
+        return self._render(segment_id, outbound=False)
+
+    def render_outbound(self, segment_id: str) -> str:
+        """Serialize only reviewed cloud fields; local exports retain full originals."""
+        return redact_sensitive(self._render(segment_id, outbound=True))
+
+    def _render(self, segment_id: str, *, outbound: bool) -> str:
         db = self.store.connection
         segment = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
         if segment is None:
             raise ValueError("Segment does not exist")
+        if outbound and (
+            segment["state"] == "retired"
+            or db.execute(
+                """SELECT 1 FROM segment_messages sm JOIN messages m ON m.id=sm.message_id
+                JOIN conversations c ON c.id=m.conversation_id WHERE sm.segment_id=? AND c.consent=0 LIMIT 1""",
+                (segment_id,),
+            ).fetchone()
+        ):
+            raise ValueError("Segment is not approved for upload")
+        metadata_lines = (
+            [
+                f"masking_policy: {MASKING_POLICY}",
+                f"archive_receipt: {receipt_marker(self.store, segment_id, segment['revision'])}",
+            ]
+            if outbound
+            else [f"created_at: {yaml_value(segment['created_at'])}"]
+        )
         lines = [
             "---",
             "schema: 1",
             f"segment_id: {segment_id}",
-            f"created_at: {yaml_value(segment['created_at'])}",
+            *metadata_lines,
             "timezone: Asia/Ulaanbaatar",
             "---",
             "",
@@ -99,8 +125,25 @@ class SegmentBuilder:
                     "updated_at",
                     "source_url",
                 ):
+                    if outbound and field not in {
+                        "id",
+                        "platform",
+                        "title",
+                        "models",
+                        "created_at",
+                        "updated_at",
+                    }:
+                        continue
                     name = "conversation_id" if field == "id" else field
-                    lines.append(f"{name}: {yaml_value(c[field])}")
+                    value = c[field]
+                    if outbound and field == "title" and isinstance(value, str):
+                        # Adapters may derive a clipped title from a message, cutting
+                        # through a credential. The required visible body still passes
+                        # the full gate; optional metadata with unknowable bounds stays local.
+                        value = redact_sensitive(value)
+                        if find_sensitive(value) or find_sensitive(yaml_value(value)):
+                            continue
+                    lines.append(f"{name}: {yaml_value(value)}")
                 lines.extend(["```", ""])
                 previous = m["conversation_id"]
             kind = {"progress": " · Progress", "thinking_summary": " · Thinking Summary"}.get(
@@ -127,7 +170,7 @@ class SegmentBuilder:
                     (segment_id, row[0], json.dumps(c, ensure_ascii=False)),
                 )
         text = self.render(segment_id)
-        if len(text.split()) > 500_000:
+        if len(self.render_outbound(segment_id).split()) > 500_000:
             raise CapacityError(
                 "Rendered segment exceeds the 500000-word source ceiling; archive retained"
             )
@@ -154,19 +197,89 @@ class SegmentBuilder:
         return True
 
     def build(self) -> list[dict]:
+        """Fast batch path; on capacity failure isolate each unsendable unit."""
+        self.blocked = []
+        try:
+            return self._build()
+        except SourceBudgetError:
+            raise
+        except CapacityError:
+            return self._isolate_capacity()
+
+    def _isolate_capacity(self):
+        db = self.store.connection
+        changed = []
+        # First isolate dirty existing revisions, so an edited oversized open
+        # segment cannot absorb and block unrelated conversations.
+        for row in db.execute(
+            "SELECT id FROM segments WHERE state!='retired' AND content_hash='' ORDER BY rowid"
+        ).fetchall():
+            try:
+                with db:
+                    if self._refresh(row[0]):
+                        changed.append(
+                            dict(
+                                db.execute(
+                                    "SELECT * FROM segments WHERE id=?", (row[0],)
+                                ).fetchone()
+                            )
+                        )
+            except CapacityError:
+                with db:
+                    db.execute(
+                        "UPDATE segments SET state='sealed' WHERE id=? AND state='open'", (row[0],)
+                    )
+                self.blocked.append({"reason": "CapacityError", "segment_id": row[0]})
+        pending = db.execute("""SELECT m.id,m.conversation_id FROM messages m JOIN conversations c
+            ON c.id=m.conversation_id WHERE c.consent=1 AND NOT EXISTS(
+            SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
+            WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""").fetchall()
+        for row in pending:
+            try:
+                changed.extend(self._build(row["id"]))
+            except SourceBudgetError:
+                break
+            except CapacityError:
+                # Retry in a fresh segment when combined metadata, not this unit, overflowed.
+                with db:
+                    db.execute("UPDATE segments SET state='sealed' WHERE state='open'")
+                try:
+                    changed.extend(self._build(row["id"]))
+                    continue
+                except SourceBudgetError:
+                    break
+                except CapacityError:
+                    self.blocked.append(
+                        {
+                            "reason": "CapacityError",
+                            "conversation_id": row["conversation_id"],
+                            "message_id": row["id"],
+                        }
+                    )
+        if self.blocked and not changed:
+            raise CapacityError(
+                "An approved unit exceeds the rendered or body limit; originals retained"
+            )
+        return changed
+
+    def _build(self, only_message_id=None) -> list[dict]:
         db = self.store.connection
         changed = []
         budget_exhausted = False
         with db:
-            pending = db.execute("""SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id
-                WHERE c.consent=1 AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
-                WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""").fetchall()
+            pending = db.execute(
+                """SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id
+                WHERE c.consent=1 AND (? IS NULL OR m.id=?) AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
+                WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""",
+                (only_message_id, only_message_id),
+            ).fetchall()
             # Validate before assigning anything: an oversized message is always retained locally.
             if any(len(m["text"].split()) > self.max_words for m in pending):
                 raise CapacityError(
                     "A message exceeds the maximum segment size; archive retained without truncation"
                 )
             assigned = 0
+            touched = set()
             row = db.execute("SELECT * FROM segments WHERE state='open'").fetchone()
             if row:
                 used = sum(
@@ -205,12 +318,17 @@ class SegmentBuilder:
                 else:
                     sid = row["id"]
                 db.execute("INSERT INTO segment_messages VALUES(?,?,?)", (sid, m["id"], position))
+                touched.add(sid)
                 position += 1
                 used += words
                 assigned += 1
             for row in db.execute(
-                "SELECT id FROM segments WHERE state!='retired' ORDER BY id"
+                "SELECT id,content_hash FROM segments WHERE state!='retired' ORDER BY id"
             ).fetchall():
+                if row["id"] not in touched and (
+                    row["content_hash"] or only_message_id is not None
+                ):
+                    continue
                 if self._refresh(row["id"]):
                     changed.append(
                         dict(
@@ -230,7 +348,8 @@ class SegmentBuilder:
             candidates = db.execute(
                 """SELECT s.*,MIN(m.rowid) AS first_position FROM segments s
                 JOIN segment_messages sm ON s.id=sm.segment_id JOIN messages m ON m.id=sm.message_id
-                WHERE s.state='sealed' OR (? AND s.state='open')
+                WHERE (s.state='sealed' OR (? AND s.state='open')) AND s.content_hash!=''
+                AND NOT EXISTS(SELECT 1 FROM sync_jobs j WHERE j.segment_id=s.id AND j.stage='missing')
                 GROUP BY s.id ORDER BY first_position""",
                 (include_open,),
             ).fetchall()

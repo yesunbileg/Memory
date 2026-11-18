@@ -34,12 +34,16 @@ The demo imports **synthetic** Codex and OpenCode histories through the actual d
 .venv/bin/ai-memory collect codex ~/.codex/sessions
 .venv/bin/ai-memory collect opencode ~/.local/share/opencode
 .venv/bin/ai-memory status
+.venv/bin/ai-memory pending
 .venv/bin/ai-memory show CX-REPLACE_WITH_RETURNED_ID
+.venv/bin/ai-memory preview CX-REPLACE_WITH_RETURNED_ID
 .venv/bin/ai-memory approve CX-REPLACE_WITH_RETURNED_ID
 .venv/bin/ai-memory build
 ```
 
 The default archive is `data/conversations.sqlite`; use `--db PATH` **before** the subcommand to select another archive. Import prints the actual conversation IDs. Histories are imported locally without upload consent. `approve` grants consent for the specified conversation, including future continuations; `collect --approve-upload` grants it during import. Review the archived text before approving. Before upload, recognized API keys, password/token assignments, cookies, JWTs and private-key payloads are replaced with the same number of `*` characters. Surrounding text and line breaks are preserved. SQLite and local Markdown exports retain the originals; only cloud snapshots are masked. The upload gate blocks residual secrets and recognized quoted values whose boundaries cannot be determined. Exports and snapshots are written through private temporary files. Detection cannot identify every possible secret.
+
+Use `revoke ID...` to stop future uploads. This does not request deletion of existing Google copies. See [consent, backup and restore](docs/consent-backup.md).
 
 Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. Direct Codex directory reads reconcile overlapping snapshots and can fall back to individual files if batch serialization overflows. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. A complete Codex user message containing one reserved internal goal wrapper is excluded; mixed or quoted wrappers retain their visible text. Missing timestamps and model names remain unknown.
 
@@ -66,17 +70,17 @@ uv sync --frozen --extra login
 ```
 
 `ai-memory check` returns zero only when the configured NotebookLM connection
-succeeds. Local-only `ai-memory status` does not require authentication.
+succeeds. Local-only `ai-memory status` does not require authentication and never creates a missing archive.
 
 Replace `brave` with `chrome` or `firefox` for those browsers. For a specific Brave profile, use `--browser-cookies 'brave::Profile 1'`; for multiple signed-in Google accounts, add `--account YOUR_EMAIL`. Run this on the same computer and as the same operating-system user as the signed-in browser; a cloud host cannot read your laptop's browser profile. If cookie extraction fails, check the selected profile and desktop keyring access before retrying.
 
 Use the same `NOTEBOOKLM_HOME` for login, the worker, MCP and the demo. If your archive already uses an explicit storage file, pass that file to login with `--storage /private/path/storage_state.json`; configure the archive with `init --storage` only when changing its auth location. Reauthentication does not require a new notebook. To test against Google using **only synthetic data** in a dedicated demo notebook:
 
 ```bash
-.venv/bin/python scripts/live_demo.py
+.venv/bin/python scripts/live_demo.py --notebook-id YOUR_EMPTY_DEMO_NOTEBOOK_ID --output data/new-live-demo
 ```
 
-This live demo creates or reuses `AI Memory — synthetic integration demo`, syncs its generated Markdown and asks a real source-filtered question. It retains the demo notebook so you can inspect it. Errors exit nonzero. A successful request still needs answer-quality review; offline tests cannot establish Google's retrieval quality.
+Create a new empty notebook specifically for the test and copy its ID. The live demo requires an empty local output directory, generates its own fixture, checks the selected notebook is empty, then syncs its Markdown and asks a source-filtered question. It never discovers a notebook by name or adopts an existing archive. It retains the demo notebook so you can inspect it. Errors exit nonzero. A successful request still needs answer-quality review; offline tests cannot establish Google's retrieval quality.
 
 ## MCP with Codex and OpenCode
 
@@ -92,35 +96,37 @@ or the [legacy example](config/opencode.json.example) for clients using a flat
 `mcp` map. The [Codex example](config/codex.toml.example) also grants access to
 the two tools for unattended sessions; apply it only to this trusted local server.
 
-Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns verified conversation/message IDs in structured `sources` only when exact citation headings can be verified. IDs in free-form answer text remain unverified. Stale or uncertain citations keep source-level references. Historical instructions remain historical context; current user instructions take priority.
+Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns verified conversation/message IDs in structured `sources` only when exact citation headings can be verified. IDs in free-form answer text remain unverified. A known source with no verifiable message ID keeps a source-level reference. If a citation is outside the request’s approved source set, the response does not disclose the answer or passage. Historical instructions remain historical context; current user instructions take priority.
 
 ## Web capture and background collection
 
-Load `vendor/hstry/extension` as an unpacked Chrome/Brave extension. From the project folder, run:
+Load `vendor/hstry/extension` as an unpacked Chromium/Brave/Chrome extension on Linux. Copy its 32-letter ID from the extensions page. From the project folder, register the selected archive for that ID (replace the placeholders):
 
 ```bash
-.venv/bin/ai-memory connect
+.venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-For a standalone archive, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.5.3.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and the upstream license; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
+For a standalone extension, run `.venv/bin/python scripts/package_extension.py`. Extract `dist/ai-memory-extension-0.6.0.zip` into a folder and load that folder as an unpacked extension. The ZIP contains runtime files, icons and both project/upstream MIT notices; connection/auth files and tests are excluded. For local development, loading `vendor/hstry/extension` directly makes updates easier.
 
-Keep the terminal open. The command creates/reuses private connection files and starts the local receiver. Open extension Settings → **Choose connection file**, then select `data/extension-connection.json` (or the path printed for your selected archive). Connection status verifies the bearer token and application identity; public health alone cannot show Connected. When reusing an occupied port, the CLI also verifies the exact archive identity and refuses another database.
+Open extension Settings → **Choose connection file** and select the `connection_file` path printed by the command. The browser now launches its registered native host as needed; no receiver terminal stays open. A v1 bearer file cannot authenticate the receiver. To migrate, pair again using the v2 file. See [native pairing](docs/native-pairing.md) for custom browser data directories and supported platforms.
 
 Enable the desired ChatGPT, Claude or Gemini providers. All are off initially. The category checklist defaults to **Projects & folders**, **Pinned & favorites**, and **GPTs & agents** on, with **Ordinary Recents** off. Organized chats can appear in Recents and still match their selected category; Recents-only does not override unchecked organized categories. Unknown membership stays out unless Recents is explicitly enabled. Existing archived history is retained. Codex/OpenCode local collection is independent of these browser filters.
 
 ChatGPT/Claude project discovery and native pin/agent metadata are supported where their private APIs expose them. Unsupported detail response shapes or failed discovery produce an incomplete-capture warning instead of advancing a success checkpoint. Gemini has no dependable organized-membership fields, so it skips with a warning unless ordinary Recents are enabled. Gemini resumes only within an identifiable matching session. A changed session replays history without deleting accepted data, and an unidentifiable incomplete session pauses automatic continuation. Keep distinct configured namespaces for different Gemini accounts. Changing capture selection, provider enablement or connection settings invalidates active runs before subsequent batches are sent; already accepted batches remain in the archive. No-category runs are rejected. These guarantees are tested with synthetic service fixtures, not live signed-in accounts.
 
-Advanced settings retain manual port/token entry, interval and a browser-profile namespace (`browser-local` by default). Use a distinct namespace for each profile; native ChatGPT/Claude account IDs take precedence. Existing `serve --token-file` remains available. The server binds loopback, checks Host/Origin and bearer credentials, bounds bodies, and exposes public `/health`, authenticated `/auth/check`, and `/ingest`. Web capture does not grant NotebookLM upload consent. See the [Mongolian setup guide](docs/extension-setup.mn.md) and [current handoff status](docs/extension-handoff.md).
+Use a distinct capture namespace for each browser profile. The extension does not send transcripts to the legacy HTTP listener. Saving a web chat locally does not grant NotebookLM upload consent. See the [Mongolian setup guide](docs/extension-setup.mn.md) and [current handoff status](docs/extension-handoff.md).
 
 ```bash
 .venv/bin/ai-memory watch --codex-path ~/.codex/sessions \
   --opencode-path ~/.local/share/opencode
 ```
 
-The optional worker scans every 30 seconds and batches new cloud sync every 12 hours. Pending jobs are revisited during scans with their persisted retry backoff; high CPU load postpones sync. Status reports job errors, sync preflight errors, and import failures separately. A local sync status of `up_to_date` does not certify that every watched source or remote service is reachable. The worker does not implicitly approve new histories. There is no continuously running browser. Adapt [the user systemd example](config/ai-memory.service.example) for your Arch Linux paths; automatic service installation is not performed.
+The optional worker scans every 30 seconds and batches new cloud sync every 12 hours. A remote poll runs on its own SQLite connection so it cannot suspend local scans. The `watch` block in `status` records per-platform scan time, next scan, safe errors, remote activity and the next remote deadline. Times are Unix seconds. Pending jobs are revisited during scans with their persisted retry backoff; high CPU load postpones sync. Status reports job errors, sync preflight errors, and import failures separately. A local sync status of `up_to_date` does not certify that every watched source or remote service is reachable. The worker does not implicitly approve new histories. There is no continuously running browser. Adapt [the user systemd example](config/ai-memory.service.example) for your Arch Linux paths; automatic service installation is not performed.
 
 ## Reliability and scope
 
 Segments target 150,000 body words, with a 450,000-body-word merge ceiling and a 500,000-word ceiling on the complete rendered source. At most 49 sources are active, with one replacement slot. A merge that exceeds the rendered ceiling rolls back its candidate and tries a smaller or later adjacent group. Sealed segments stay stable unless their archived messages are edited. Continuations append to the current segment. A SQLite queue persists upload/reconciliation/readiness/cleanup stages with backoff. New sources must be ready before their predecessors are deleted. Exhausted capacity pauses instead of summarizing or creating another notebook.
+
+If a previously published source disappears remotely, sync records the missing source and retrieval excludes it. Re-publication is a separate choice: run `ai-memory republish SEGMENT_ID` for the segment reported missing, then `ai-memory sync`. A normal sync alone does not undo a manual deletion.
 
 The current implementation supports Codex and OpenCode local adapters plus the three web providers. Other local agents, full historical web coverage, long-running Google auth stability, 150k/300k/450k retrieval benchmarks, and real Mongolian retrieval quality remain unverified. See [donor audit](docs/donor-audit.md), [validation](docs/validation.md), and [third-party notices](THIRD_PARTY_NOTICES.md).

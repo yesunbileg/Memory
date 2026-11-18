@@ -6,21 +6,32 @@ import errno
 import json
 import logging
 import os
+import sys
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 from time import monotonic as _monotonic
 from time import sleep as _sleep
+from time import time as _wall_time
 
-from .diagnostics import SAFE_FAILURES, failure_code
+from .archive_files import backup_archive, export_segments, restore_archive
+from .diagnostics import SAFE_FAILURES, PublicInputError, failure_code, provider_failure
 from .importer import collect_into
-from .private_io import write_private_text
 from .segments import SegmentBuilder
 from .store import Store
 
 logger = logging.getLogger(__name__)
 
 
+class _PrivateArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's default inserts raw argv, including private questions or credentials.
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: invalid arguments. Run {self.prog} --help for syntax.\n")
+
+
 def parser():
-    p = argparse.ArgumentParser(description="Lossless AI archive → NotebookLM → MCP")
+    p = _PrivateArgumentParser(description="Lossless AI archive → NotebookLM → MCP")
     p.add_argument(
         "--db", type=Path, default=Path(os.environ.get("AI_MEMORY_DB", "data/conversations.sqlite"))
     )
@@ -37,10 +48,30 @@ def parser():
         action="store_true",
         help="Explicitly approve imported text for Google upload",
     )
-    approve = sub.add_parser("approve", help="Approve specific conversations for cloud upload")
+    approve = sub.add_parser(
+        "approve",
+        help="Allow future Google uploads of these conversations, including later continuations (no network)",
+    )
     approve.add_argument("conversation_ids", nargs="+")
+    sub.add_parser("pending", help="List local conversations awaiting Google upload permission")
+    preview = sub.add_parser(
+        "preview", help="Review exact masked Markdown locally, without granting consent"
+    )
+    preview.add_argument("conversation_id")
+    revoke = sub.add_parser("revoke", help="Stop future uploads; do not delete old Google copies")
+    revoke.add_argument("conversation_ids", nargs="+")
+    backup = sub.add_parser(
+        "backup", help="Make a portable private SQLite backup including pending snapshots"
+    )
+    backup.add_argument("destination", type=Path)
+    restore = sub.add_parser("restore", help="Restore a backup into a new --db archive path")
+    restore.add_argument("backup", type=Path)
     build = sub.add_parser("build", help="Generate approved Markdown segments, without networking")
     build.add_argument("--output", type=Path)
+    recover = sub.add_parser(
+        "republish", help="Authorize republishing a confirmed missing cloud source"
+    )
+    recover.add_argument("segment_id")
     sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
     ask = sub.add_parser(
         "ask", help="Retrieve prior context from NotebookLM through the memory gateway"
@@ -57,6 +88,16 @@ def parser():
     serve.add_argument("--token-file", type=Path)
     connect = sub.add_parser(
         "connect", help="Create a private extension connection file and start AI Memory"
+    )
+    connect.add_argument(
+        "--extension-id",
+        help="Register the installed browser extension ID for private Native Messaging",
+    )
+    connect.add_argument("--browser", choices=["brave", "chrome", "chromium"], default="brave")
+    connect.add_argument(
+        "--browser-user-data-dir",
+        type=Path,
+        help="Optional browser user-data root (not a profile subdirectory)",
     )
     connect.add_argument("--port", type=int, default=41770)
     sub.add_parser("mcp", help="Serve memory_ask and memory_status over stdio")
@@ -76,17 +117,9 @@ def parser():
 
 
 async def _gateway_call(db_path, name, arguments):
-    from .gateway import create_server
+    from .gateway import MemoryApplication
 
-    server = create_server(db_path)
-    # FastMCP's lifecycle also closes the lazy notebook client for CLI use.
-    async with server._mcp_server.lifespan(server._mcp_server):
-        result = await server.call_tool(name, arguments)
-    if isinstance(result, tuple):
-        return result[1]
-    if isinstance(result, dict):
-        return result
-    return json.loads(result[0].text)
+    return await MemoryApplication(db_path).call(name, arguments)
 
 
 async def sync_archive(store):
@@ -98,13 +131,13 @@ async def sync_archive(store):
     with archive_lock(store.path):
         notebook_id = store.get_setting("notebook_id")
         if not notebook_id:
-            raise ValueError("Set a notebook ID with init --notebook-id before syncing")
+            raise PublicInputError("Set a notebook ID with init --notebook-id before syncing")
         storage = store.get_setting("storage_path")
         adapter = None
         try:
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
             result = await SyncEngine(
-                store, SegmentBuilder(store), adapter, store.path.parent / "sync"
+                store, SegmentBuilder(store), adapter, store.workspace / "sync"
             )._run_once_locked()
             errors = _preflight_errors(result)
             store.set_setting("sync_preflight_errors", errors)
@@ -132,15 +165,18 @@ def _preflight_errors(result):
 
 def _watch(args):
     if args.interval < 5 or args.sync_interval < 300:
-        raise ValueError("watch requires interval >= 5 seconds and sync-interval >= 300 seconds")
+        raise PublicInputError(
+            "watch requires interval >= 5 seconds and sync-interval >= 300 seconds"
+        )
     sources = [
         (p, path)
         for p, path in (("codex", args.codex_path), ("opencode", args.opencode_path))
         if path
     ]
     if not sources:
-        raise ValueError("watch requires at least one explicit source path")
+        raise PublicInputError("watch requires at least one explicit source path")
     next_sync = 0
+    active_sync = None
     reported = {}
 
     def report(key, code):
@@ -149,56 +185,100 @@ def _watch(args):
             logger.warning("Worker %s; retry in %.0f seconds", code, args.interval)
             reported[key] = now + 300
 
+    def run_remote(future):
+        # SQLite connections belong to their creating thread. Never share the
+        # local import connection or hold a local transaction across remote I/O.
+        try:
+            with Store(args.db, existing=True) as remote_store:
+                result = asyncio.run(sync_archive(remote_store))
+            future.set_result(result)
+        except Exception as error:
+            future.set_exception(error)
+
     while True:
         with Store(args.db) as store:
+            health = store.get_setting("watch_health", {"sources": {}})
             for platform, path in sources:
+                scan = health["sources"].setdefault(platform, {})
                 try:
                     imported = collect_into(store, platform, path, account=args.account)
                     if imported.get("failed_files"):
-                        report(("import", platform), "import_failed")
-                    else:
-                        reported.pop(("import", platform), None)
+                        raise ValueError("import_failed")
+                    reported.pop(("import", platform), None)
+                    scan.update(last_successful_scan=_wall_time(), error=None)
                 except Exception:
+                    scan["error"] = "import_failed"
                     report(("import", platform), "import_failed")
-            if _monotonic() >= next_sync and store.get_setting("notebook_id"):
-                # Postpone optional remote work if local CPU load is high.
+                scan["next_scan"] = _wall_time() + args.interval
+            if (
+                active_sync is None
+                and _monotonic() >= next_sync
+                and store.get_setting("notebook_id")
+            ):
                 if not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1):
-                    try:
-                        result = asyncio.run(sync_archive(store))
-                        # Preflight failures have no persisted
-                        # job and therefore do not pass through the queue logger.
-                        for blocker in _preflight_errors(result):
-                            code = blocker["reason"]
-                            report(("sync", code), code)
-                    except Exception as error:
-                        code = failure_code(error)
-                        # Only sync_archive owns durable sync diagnostics while
-                        # holding its lock. A contending worker must not overwrite them.
-                        report(("sync", code), code)
-                        result = {"status": {"sync_status": "pending"}}
-                    # Pending jobs retain their own backoff deadline in SQLite;
-                    # revisit them during scans instead of waiting the full batch period.
+                    active_sync = Future()
+                    threading.Thread(target=run_remote, args=(active_sync,), daemon=True).start()
+
+            if active_sync is not None:
+                try:
+                    # Short local handoff lets fast completions register this scan.
+                    # Unbounded provider readiness waits never own the scan loop.
+                    result = active_sync.result(timeout=0.075)
+                except TimeoutError:
+                    if not active_sync.done():
+                        result = None
+                    else:
+                        result = {
+                            "blocked": [{"reason": "timeout"}],
+                            "status": {"sync_status": "pending"},
+                        }
+                except Exception as error:
+                    result = {
+                        "blocked": [{"reason": failure_code(error)}],
+                        "status": {"sync_status": "pending"},
+                    }
+                if result is not None:
+                    active_sync = None
+                    errors = _preflight_errors(result)
+                    for blocker in errors:
+                        report(("sync", blocker["reason"]), blocker["reason"])
                     delay = (
                         args.interval
                         if result["status"]["sync_status"] == "pending"
                         else args.sync_interval
                     )
                     next_sync = _monotonic() + delay
+                    health.update(next_sync=_wall_time() + delay, remote_errors=errors)
+            health["remote_in_progress"] = active_sync is not None
+            if active_sync is not None:
+                health["next_sync"] = None
+            store.set_setting("watch_health", health)
         _sleep(args.interval)
 
 
 def execute(args):
+    if args.command == "restore":
+        return restore_archive(args.db, args.backup)
+    if (
+        args.command in {"pending", "preview", "backup", "approve", "revoke"}
+        and not args.db.expanduser().is_file()
+    ):
+        raise PublicInputError("Archive does not exist")
     if args.command == "demo":
         from .demo import run_demo
 
         return run_demo(args.output)
     if args.command == "mcp":
-        from .gateway import create_server
+        from .gateway import stdio_main
 
-        create_server(args.db).run(transport="stdio")
+        asyncio.run(stdio_main(args.db))
         return None
     if args.command == "watch":
         return _watch(args)
+    if args.command == "connect" and args.extension_id:
+        from .native import register
+
+        return register(args.db, args.extension_id, args.browser, args.browser_user_data_dir)
     if args.command == "connect":
         from .connection import (
             check_running_receiver,
@@ -218,23 +298,23 @@ def execute(args):
                 write_connection_file(files)
                 print(
                     "AI Memory is already running.\n"
-                    "In extension settings, choose this private connection file:\n"
+                    "Legacy HTTP client configuration (for browser pairing, run connect --extension-id ID):\n"
                     f"{files.connection_file}\n"
                     "Keep the receiver's terminal open while you use the extension.",
                     flush=True,
                 )
                 return None
             if status == "different_archive":
-                raise ValueError(
+                raise PublicInputError(
                     f"Port {files.port} is serving a different archive. "
                     "Stop that receiver before selecting this archive, or use a separate data directory and port."
                 ) from None
             if status == "unauthorized":
-                raise ValueError(
+                raise PublicInputError(
                     f"Port {files.port} is using a different connection token. "
                     "Use that receiver's connection file, or choose another port with --port."
                 ) from None
-            raise ValueError(
+            raise PublicInputError(
                 f"Port {files.port} is already in use by an incompatible receiver. "
                 "Stop it before running connect, or choose another port with --port."
             ) from None
@@ -242,7 +322,7 @@ def execute(args):
             write_connection_file(files)
             print(
                 "AI Memory is ready.\n"
-                "In extension settings, choose this private connection file:\n"
+                "Legacy HTTP client configuration (for browser pairing, run connect --extension-id ID):\n"
                 f"{files.connection_file}\n"
                 "Keep this terminal open while you use the extension. Press Ctrl+C to stop.",
                 flush=True,
@@ -260,7 +340,7 @@ def execute(args):
             else os.environ.get("AI_MEMORY_INGEST_TOKEN", "")
         )
         if len(token) < 24:
-            raise ValueError(
+            raise PublicInputError(
                 "Provide a private token of at least 24 characters via --token-file or AI_MEMORY_INGEST_TOKEN"
             )
         server = make_server(args.db, token, port=args.port)
@@ -273,7 +353,7 @@ def execute(args):
         tool = "memory_ask" if args.command == "ask" else "memory_status"
         arguments = {"question": args.question} if args.command == "ask" else {}
         return asyncio.run(_gateway_call(args.db, tool, arguments))
-    with Store(args.db) as store:
+    with Store(args.db, existing=args.command in {"status", "republish"}) as store:
         if args.command == "init":
             if args.notebook_id:
                 store.set_setting("notebook_id", args.notebook_id)
@@ -283,22 +363,34 @@ def execute(args):
         if args.command == "collect":
             return collect_into(store, args.platform, args.path, args.account, args.approve_upload)
         if args.command == "approve":
-            for key in args.conversation_ids:
-                store.approve(key)
-            return {"approved": args.conversation_ids}
+            return {
+                "approved": store.approve_many(args.conversation_ids),
+                "includes_future_continuations": True,
+                "uploaded": False,
+            }
+        if args.command == "revoke":
+            return {
+                "revoked": store.revoke_many(args.conversation_ids),
+                "old_google_copies_deleted": False,
+            }
+        if args.command == "pending":
+            from .consent import pending
+
+            return pending(store)
+        if args.command == "preview":
+            from .consent import preview
+
+            return preview(store, args.conversation_id)
+        if args.command == "backup":
+            return backup_archive(store, args.destination)
         if args.command == "build":
             builder = SegmentBuilder(store)
             builder.build()
-            output = args.output or store.path.parent / "segments"
-            output.mkdir(parents=True, exist_ok=True, mode=0o700)
-            ids = []
-            for r in store.connection.execute(
-                "SELECT id FROM segments WHERE state!='retired' ORDER BY rowid"
-            ):
-                path = output / f"{r[0]}.md"
-                write_private_text(path, builder.render(r[0]))
-                ids.append(r[0])
-            return {"segments": ids, "output": str(output)}
+            return export_segments(store, builder, args.output)
+        if args.command == "republish":
+            from .sync import republish
+
+            return republish(store, args.segment_id)
         if args.command == "sync":
             return asyncio.run(sync_archive(store))
         if args.command == "show":
@@ -318,19 +410,28 @@ def main(argv=None):
         if args.command == "connect":
             message = (
                 str(exc)
-                if isinstance(exc, ValueError)
+                if isinstance(exc, PublicInputError)
                 else "Connection setup failed. Check the archive directory and try again."
             )
             print(f"AI Memory could not connect. {message}", flush=True)
             return 1
-        if isinstance(exc, NotebookLMError):
-            result = {"error": {"code": exc.code, "message": str(exc)}}
+        if isinstance(exc, FileNotFoundError) and args.command in {"status", "check"}:
+            result = {"error": {"code": "archive_not_found", "message": "Archive does not exist."}}
+        elif isinstance(exc, NotebookLMError):
+            result = {"error": provider_failure(exc)}
         elif isinstance(exc, ValueError):
-            result = {"error": {"code": "invalid_configuration", "message": str(exc)}}
+            result = {
+                "error": {
+                    "code": "invalid_configuration",
+                    "message": str(exc)
+                    if isinstance(exc, PublicInputError)
+                    else "Invalid input or configuration; check the selected archive and command arguments.",
+                }
+            }
         else:
             result = {
                 "error": {
-                    "code": type(exc).__name__,
+                    "code": failure_code(exc),
                     "message": "Operation failed; archive retained. Check configuration and retry.",
                 }
             }

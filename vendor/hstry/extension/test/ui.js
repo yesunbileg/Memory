@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_PROVIDER_SETTINGS,
   friendlyError,
@@ -9,7 +10,7 @@ import {
 
 let failures = 0;
 function check(label, actual, expected) {
-  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  const ok = isDeepStrictEqual(actual, expected);
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}`);
   if (!ok) {
     console.log(`  got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
@@ -107,6 +108,9 @@ check(
     port: 3434,
     token: 'hello',
     account: 'browser-local',
+    autoPaused: false,
+    nativeHost: '',
+    archiveId: '',
     intervalMinutes: 15,
     providers: { chatgpt: true, claude: true, gemini: false },
     captureTypes: { projects: true, pinned: true, agents: true, recents: false },
@@ -127,6 +131,9 @@ check(
     port: 41770,
     token: '',
     account: 'browser-local',
+    autoPaused: false,
+    nativeHost: '',
+    archiveId: '',
     intervalMinutes: 15,
     providers: { chatgpt: false, claude: false, gemini: false },
     captureTypes: { projects: true, pinned: true, agents: true, recents: false },

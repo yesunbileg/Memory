@@ -57,3 +57,48 @@ Offline contract tests simulate Google's HTTP service and exercise the real
 notebooklm-py SDK and MCP protocol. They do not prove live NotebookLM retrieval
 or a connected Codex/OpenCode session; those need a separately authenticated
 live run.
+
+## Disclosure and recovery
+
+The CLI commands `ask` and `check` use the same application handlers as the two
+stdio tools. `memory_status({})` checks provider connectivity without sending
+a question. Local counts and pending jobs, the last confirmed managed source
+states (`last_verified_remote`), and suggested actions are separate. An
+inventory failure does not prove deletion. `ai-memory status` reads that
+record locally without contacting Google.
+
+`memory_ask({"question":"Өмнөх шийдвэр юу байсан бэ?"})` sends the question
+(1–4,000 characters), a fixed research prompt and selected source IDs to
+Google. Google may record it in this notebook's chat history. No archive
+transcript, browser cookie or credential is appended to the question. The
+per-query prompt asks for citations, relevant dates, conflicting decisions,
+insufficient evidence and a reply in the question's language. It is ordinary
+query text, **not** a system-role instruction or a security boundary.
+
+Only consented, policy-attested, confirmed-ready revisions are eligible. The
+server freezes that selection before the query and rechecks it before
+disclosure. If any citation is unknown, outside that selection or malformed,
+or there are no citations, `isError` is true and `error.code` is
+`unverified_sources`. Neither the answer nor passages are returned. A valid
+source without a verifiable local message still gets a source-level citation.
+Domain failures and invalid arguments return structured `error.code` and
+`error.message`. A successful answer returns `answer`, `sources` and
+`sync_status`. Use `tools/list` for the machine-readable schemas. Register
+this server once per client. A second plugin registration is unnecessary.
+
+A sync job stores the exact outbound UTF-8 bytes, policy version and SHA-256.
+If an upload response is lost, matching a filename is not proof. To reconcile,
+the worker requires exactly one matching source newly visible since submission
+and the identical indexed document, including the revision's opaque receipt.
+If Google normalizes the indexed text or the attempt predates ownership
+records, the job stays uncertain. Neither that candidate nor unproven legacy
+copies are automatically deleted. A later revision or an unrelated
+conversation can proceed. A registered source waiting for readiness is only
+polled. A ready mapping replaces its predecessor in a transaction before
+cleanup of known-owned copies.
+
+After a managed source disappears, retrieval excludes it and sync pauses
+publication of that segment. To deliberately put it back, inspect the local
+archive, run `ai-memory --db PATH republish SEGMENT_ID`, then `sync` against
+the same database. This is separate from consent and does not restore revoked
+conversations.

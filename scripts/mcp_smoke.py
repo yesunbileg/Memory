@@ -25,7 +25,16 @@ async def smoke(db: Path):
             if result.isError:
                 raise RuntimeError("memory_status MCP call failed")
             status = result.structuredContent or json.loads(result.content[0].text)
-            return {"mcp_stdio": "passed", "tools": names, "status": status}
+            bad = await client.call_tool("memory_ask", {"question": " "})
+            failure = bad.structuredContent or json.loads(bad.content[0].text)
+            if failure.get("error", {}).get("code") != "invalid_question" or "answer" in failure:
+                raise RuntimeError("memory_ask did not return the expected safe validation error")
+            return {
+                "mcp_stdio": "passed",
+                "tools": names,
+                "status": status,
+                "rejected_invalid_question": True,
+            }
 
 
 if __name__ == "__main__":

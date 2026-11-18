@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .collectors import collect
+from .diagnostics import PublicInputError
 from .segments import SegmentBuilder
 from .store import Store
 
@@ -137,7 +138,7 @@ def prepare_inputs(directory: Path) -> tuple[Path, Path]:
         _write_json(
             opencode / f"storage/part/{mid}/prt_001.json",
             {
-                "id": f"{mid}_part",
+                "id": "prt_001",
                 "sessionID": "ses_memory",
                 "messageID": mid,
                 "type": "text",
@@ -151,7 +152,7 @@ def run_demo(output: Path) -> dict:
     output = Path(output).expanduser().resolve()
     marker = output / ".ai-memory-demo"
     if output.exists() and any(output.iterdir()) and not marker.exists():
-        raise ValueError(
+        raise PublicInputError(
             "Choose an empty output directory; existing non-demo files will not be overwritten"
         )
     output.mkdir(parents=True, exist_ok=True, mode=0o700)

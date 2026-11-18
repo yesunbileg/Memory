@@ -4,6 +4,7 @@ import { NotLoggedInError, textPart, toMs } from '../lib/common.js';
 
 import {
   normalizeCaptureTypes,
+  eligibleCapture,
   selectConversation,
   createSelectionSummary,
   recordSelection,
@@ -98,12 +99,15 @@ async function batchExecute(session, rpcId, arg) {
   return parseRpcResponse(await res.text(), rpcId);
 }
 
-async function listChats(session, sinceMs) {
-  const chats = new Map();
-  const cursors = new Set();
-  let cursor = null;
+async function listChats(session, sinceMs, previous, guard, save) {
+  const chats = new Map((previous?.summaries ?? []).map((c) => [c.rawId, c]));
+  const cursors = new Set(previous?.cursors ?? []);
+  let cursor = previous?.cursor ?? null;
+  let budget = 4;
   try {
     for (let page = 0; page < MAX_PAGES; page++) {
+      if (!budget--) return { queued: true };
+      await guard();
       const arg = cursor === null ? [PAGE_SIZE] : [PAGE_SIZE, cursor];
       const data = await batchExecute(session, 'MaZiqc', arg);
       if (!Array.isArray(data) || !Array.isArray(data[2]))
@@ -133,8 +137,17 @@ async function listChats(session, sinceMs) {
       if (cursors.has(key)) throw new Error('Gemini conversation pagination did not advance');
       cursors.add(key);
       cursor = nextCursor;
+      if (cursors.size >= MAX_PAGES) break;
+      try {
+        await save({ summaries: [...chats.values()], cursor, cursors: [...cursors] });
+      } catch (error) {
+        throw Object.assign(new Error('Discovery state not saved'), {
+          code: error?.code ?? 'storage_unavailable',
+        });
+      }
     }
-  } catch {
+  } catch (error) {
+    if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable') throw error;
     // Keep verified earlier pages, but never represent an unknown response as empty success.
     return { summaries: [...chats.values()], incomplete: true };
   }
@@ -153,7 +166,7 @@ function assistantText(turn) {
   return '';
 }
 
-async function readChat(session, summary) {
+async function readChat(session, summary, guard) {
   const turns = [];
   const turnIds = new Set();
   const pages = new Set();
@@ -162,6 +175,7 @@ async function readChat(session, summary) {
   let incomplete = true;
   try {
     for (let page = 0; page < MAX_PAGES; page++) {
+      await guard();
       const data = await batchExecute(session, 'hNvQHb', [
         summary.rawId,
         20,
@@ -262,6 +276,8 @@ export async function syncGemini({
   register = async () => {},
   log = () => {},
   report = async () => {},
+  guard = async () => {},
+  checkpoint = async () => {},
 }) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
@@ -279,10 +295,15 @@ export async function syncGemini({
     policy.projects || policy.pinned || policy.agents
       ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
       : null;
+  if (!eligibleCapture('gemini', policy)) {
+    await report({ phase: 'complete', processed: 0, detected: 0, selection, selectionWarning });
+    return { state, conversations: 0, selection, selectionWarning, hasMore: false };
+  }
   await report({ phase: 'discovering', selection, selectionWarning });
   const session = await getSession();
   await register('gemini-web', 'gemini');
   const fingerprint = await sessionFingerprint(session);
+  const accountId = 'gemini-session-' + (fingerprint ?? crypto.randomUUID());
   const matchingSession = fingerprint !== null && state?.sessionFingerprint === fingerprint;
   const lastSyncMs = matchingSession ? (state?.lastSyncMs ?? null) : null;
   const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
@@ -294,10 +315,34 @@ export async function syncGemini({
     ]
       .filter(Boolean)
       .join(' ');
-  const runStartedMs = pending?.runStartedMs ?? Date.now();
+  const previousDiscovery = matchingSession ? state.discovery : null;
+  const runStartedMs = pending?.runStartedMs ?? previousDiscovery?.runStartedMs ?? Date.now();
+  let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint };
   const discovery = Array.isArray(pending?.summaries)
     ? { summaries: pending.summaries, incomplete: Boolean(pending?.discoveryIncomplete) }
-    : await listChats(session, since);
+    : await listChats(session, since, previousDiscovery, guard, async (progress) => {
+        if (!fingerprint) return;
+        discoveryState = {
+          lastSyncMs,
+          sessionFingerprint: fingerprint,
+          discovery: { ...progress, runStartedMs },
+        };
+        await guard();
+        await checkpoint(discoveryState);
+      });
+  if (discovery.queued) {
+    if (!fingerprint)
+      selectionWarning =
+        'Session identity is unavailable. Gemini discovery is incomplete and cannot safely resume.';
+    await report({ phase: fingerprint ? 'queued' : 'attention', selection, selectionWarning });
+    return {
+      state: discoveryState,
+      conversations: 0,
+      hasMore: Boolean(fingerprint),
+      selection,
+      selectionWarning,
+    };
+  }
   const summaries = discovery.summaries;
   if (discovery.incomplete)
     selectionWarning = [
@@ -336,16 +381,25 @@ export async function syncGemini({
     selectionWarning,
   });
   let total = 0;
+  const retrySummaries = [...(pending?.retrySummaries ?? [])];
   let failures = discovery.incomplete ? 1 : 0;
   let processed = startIndex;
   let batch = [];
   for (const summary of summaries.slice(startIndex, endIndex)) {
+    await guard();
     try {
-      const detail = await readChat(session, summary);
-      if (detail.incomplete) failures++;
-      if (detail.conversation) batch.push(detail.conversation);
+      const detail = await readChat(session, summary, guard);
+      if (detail.incomplete) {
+        failures++;
+        retrySummaries.push(summary);
+      }
+      if (detail.conversation) {
+        detail.conversation.metadata.accountId = accountId;
+        batch.push(detail.conversation);
+      }
     } catch (error) {
       failures++;
+      retrySummaries.push(summary);
       log(`gemini: skipping conversation ${summary.id}: ${error.message}`);
     }
     processed++;
@@ -353,14 +407,28 @@ export async function syncGemini({
     if (batch.length >= 10) {
       const accepted = await push('gemini-web', 'gemini', batch);
       total += accepted;
-      if (accepted !== batch.length) failures++;
+      if (accepted !== batch.length)
+        return {
+          state,
+          conversations: total,
+          hasMore: false,
+          selection,
+          selectionWarning: 'Local archive receipt incomplete. Retry capture.',
+        };
       batch = [];
     }
   }
   if (batch.length) {
     const accepted = await push('gemini-web', 'gemini', batch);
     total += accepted;
-    if (accepted !== batch.length) failures++;
+    if (accepted !== batch.length)
+      return {
+        state,
+        conversations: total,
+        hasMore: false,
+        selection,
+        selectionWarning: 'Local archive receipt incomplete. Retry capture.',
+      };
   }
   const remaining = endIndex < summaries.length;
   const hasMore = remaining && fingerprint !== null;
@@ -375,24 +443,36 @@ export async function syncGemini({
     ]
       .filter(Boolean)
       .join(' ');
+  await guard();
+  const finalState = hasMore
+    ? {
+        lastSyncMs,
+        sessionFingerprint: fingerprint,
+        pending: {
+          runStartedMs,
+          summaries,
+          nextIndex: endIndex,
+          retrySummaries,
+          hadFailures,
+          discoveryIncomplete: discovery.incomplete,
+        },
+      }
+    : {
+        lastSyncMs: hadFailures || !fingerprint ? lastSyncMs : runStartedMs,
+        sessionFingerprint: fingerprint,
+      };
+  if (!hasMore && fingerprint && retrySummaries.length && !discovery.incomplete)
+    finalState.pending = {
+      runStartedMs,
+      summaries: retrySummaries,
+      nextIndex: 0,
+      hadFailures: false,
+      discoveryIncomplete: false,
+    };
+  await checkpoint(finalState);
   await report({ phase: hasMore ? 'queued' : 'complete', processed, selection, selectionWarning });
   return {
-    state: hasMore
-      ? {
-          lastSyncMs,
-          sessionFingerprint: fingerprint,
-          pending: {
-            runStartedMs,
-            summaries,
-            nextIndex: endIndex,
-            hadFailures,
-            discoveryIncomplete: discovery.incomplete,
-          },
-        }
-      : {
-          lastSyncMs: hadFailures || !fingerprint ? lastSyncMs : runStartedMs,
-          sessionFingerprint: fingerprint,
-        },
+    state: finalState,
     conversations: total,
     hasMore,
     selection,

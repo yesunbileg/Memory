@@ -11,7 +11,7 @@ npm run format:check
 
 `scripts/check.py` runs Ruff lint/format checks, every Python test, and all Node
 extension test scripts. It works from another directory too. GitHub Actions runs
-these checks, the synthetic demo, stdio MCP smoke test, and both package builds.
+these checks, two Chromium checks (page shim and installed toolbar), the wheel, sdist and extension ZIP builds, and a synthetic demo and real stdio MCP calls from a fresh wheel installation.
 These are offline checks; they do not access signed-in provider accounts.
 
 To format after editing:
@@ -40,7 +40,7 @@ collectors, extension or Python checks does not require npm packages.
 | `src/ai_memory/sync.py` | Persistent upload, readiness, mapping, cleanup and retries |
 | `src/ai_memory/notebook.py` | Lazy notebooklm-py client boundary and safe errors |
 | `src/ai_memory/gateway.py` | Two MCP tools and verified structured citations |
-| `src/ai_memory/connection.py`, `ingest.py` | Private connection files and authenticated loopback receiver |
+| `src/ai_memory/connection.py`, `ingest.py` | Private archive pairing and legacy HTTP receiver (the browser uses its registered native host) |
 | `vendor/hstry/adapters/` | Audited upstream TypeScript parsers |
 | `vendor/hstry/extension/` | Browser UI, provider readers and category selection |
 | `tests/`, `vendor/hstry/extension/test/` | Synthetic behavior and recovery regressions |
@@ -73,10 +73,11 @@ Build distributable files with:
 
 ```bash
 .venv/bin/python scripts/package_extension.py
-uv build --wheel
+uv build
+.venv/bin/python scripts/release_record.py > dist/verification.json
 ```
 
-The ZIP contains public runtime assets and the upstream license. The wheel also
+The ZIP contains referenced runtime assets and both MIT notices. The record lists the clean checkout commit, package versions, regular-file counts and SHA-256 hashes read from the exact artifacts. CI compares the extension ZIP to the previous revision and requires a higher version if the bytes change. The wheel also
 ships adapters so collectors work outside the checkout. Never bundle `data/`,
 personal sessions, browser profiles, tokens or saved Google authentication.
 

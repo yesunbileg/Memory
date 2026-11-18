@@ -4,9 +4,9 @@
  * Parses Codex rollout JSONL files under ~/.codex/sessions
  */
 
-import { readdir, readFile, stat } from 'fs/promises';
+import { readdir, lstat, stat } from 'fs/promises';
 import { existsSync } from 'fs';
-import { basename, dirname, join } from 'path';
+import { basename, join } from 'path';
 import { zstdDecompressSync } from 'zlib';
 import { homedir } from 'os';
 
@@ -17,12 +17,12 @@ interface SqliteDb {
   close(): void;
 }
 interface SqliteStatement {
-  all(...params: unknown[]): unknown[];
+  get(...params: unknown[]): unknown;
 }
 
 
 const openDb = (path: string): SqliteDb =>
-  new DatabaseSync(path, { readOnly: true }) as unknown as SqliteDb;
+  new DatabaseSync(checkedDatabase(path), { readOnly: true }) as unknown as SqliteDb;
 
 import type {
   Adapter,
@@ -34,6 +34,7 @@ import type {
 } from '../types/index.ts';
 import {
   runAdapter,
+  checkedSource, checkedDatabase, readSource, hidden,
   readUtf8,
   textOnlyParts,
   thinkingPart,
@@ -41,7 +42,7 @@ import {
   toolResultPart,
   isUnderAnyCanonicalRoot,
 } from '../types/index.ts';
-import { formatFrumTitle, isSystemContext } from '../types/first-message.ts';
+import { formatFrumTitle } from '../types/first-message.ts';
 
 // Codex honors CODEX_HOME; fall back to ~/.codex like the CLI itself.
 const DEFAULT_CODEX_HOME = process.env.CODEX_HOME || join(homedir(), '.codex');
@@ -97,7 +98,7 @@ interface CodexResponseItem {
   author?: string;
   recipient?: string;
   role?: string;
-  content?: Array<{ type?: string; text?: string; image_url?: string }>;
+  content?: Array<{ type?: string; text?: string; image_url?: string; visibility?: string; synthetic?: boolean; ignored?: boolean }>;
   name?: string;
   arguments?: string;
   call_id?: string;
@@ -106,11 +107,12 @@ interface CodexResponseItem {
   action?: unknown;
   input?: string;
   /** reasoning: provider summary of the model's thinking. */
-  summary?: Array<{ type?: string; text?: string }>;
+  summary?: Array<{ type?: string; text?: string; visibility?: string; synthetic?: boolean; ignored?: boolean }>;
   /** event_msg.agent_message: assistant text not always mirrored as a response_item. */
   message?: string;
   channel?: string;
   visibility?: 'ui' | 'hidden';
+  synthetic?: boolean; ignored?: boolean;
 }
 
 const adapter: Adapter = {
@@ -137,19 +139,16 @@ const adapter: Adapter = {
     const files = await findRolloutFiles(path, { shallowOnly: false });
     if (files.length === 0) return [];
 
-    const threadIndex = loadThreadIndex(path);
+    const threadIndex = loadThreadIndex(path, opts?.skipThreadIndex);
     const conversations: Conversation[] = [];
 
-    for (const filePath of files) {
-      const conv = await parseRolloutFile(filePath, threadIndex, opts);
-      if (conv) {
-        conversations.push(conv);
+    try {
+      for (const filePath of files) {
+        const conv = await parseRolloutFile(filePath, threadIndex, opts);
+        if (conv) conversations.push(conv);
+        if (opts?.limit && conversations.length >= opts.limit) break;
       }
-
-      if (opts?.limit && conversations.length >= opts.limit) {
-        break;
-      }
-    }
+    } finally { threadIndex.close(); }
 
     conversations.sort((a, b) => b.createdAt - a.createdAt);
     return conversations;
@@ -196,31 +195,24 @@ const adapter: Adapter = {
  * CODEX_HOME next to the sessions directory; rollout JSONL files stay
  * authoritative for message content.
  */
-function loadThreadIndex(searchPath: string): Map<string, ThreadRow> {
-  const index = new Map<string, ThreadRow>();
-  if (!openDb) return index;
-
-  const dbPath = latestStateDb(resolveCodexHome(searchPath));
-  if (!dbPath) return index;
+function loadThreadIndex(searchPath: string, skip?: boolean) {
   let db: SqliteDb | null = null;
+  let lookup: SqliteStatement | undefined;
   try {
-    db = openDb(dbPath);
-    const rows = db
-      .prepare("SELECT id, title, model, archived FROM threads WHERE title != ''")
-      .all() as ThreadRow[];
-    for (const row of rows) {
-      if (row?.id) index.set(row.id, row);
+    const home = skip ? null : resolveCodexHome(searchPath);
+    const path = home && latestStateDb(home);
+    if (path) {
+      db = openDb(path);
+      lookup = db.prepare('SELECT id,title,model FROM threads WHERE id=?');
     }
-  } catch {
-    // Missing DB, locked file, or older schema - fall back to derived titles
-  } finally {
-    try {
-      db?.close();
-    } catch {
-      // ignore close errors
-    }
-  }
-  return index;
+  } catch { /* Missing, unsafe, locked, or older optional index. */ }
+  return {
+    get(id: string): ThreadRow | undefined {
+      try { return lookup?.get(id) as ThreadRow | undefined; }
+      catch { return undefined; }
+    },
+    close() { db?.close(); },
+  };
 }
 
 /** Codex bumps state_<N>.sqlite on schema changes; use the newest present. */
@@ -232,7 +224,7 @@ function latestStateDb(home: string): string | null {
   return null;
 }
 
-function resolveCodexHome(searchPath: string): string {
+function resolveCodexHome(searchPath: string): string | null {
   const segments = searchPath.split(/[\\/]/);
   for (let i = segments.length - 1; i >= 0; i--) {
     if (segments[i] === 'sessions' || segments[i] === 'archived_sessions') {
@@ -241,17 +233,17 @@ function resolveCodexHome(searchPath: string): string {
     }
   }
   // An explicitly selected fixture/export must never inspect an unrelated home.
-  return /\.jsonl(?:\.zst)?$/.test(searchPath) ? dirname(searchPath) : searchPath;
+  return /\.jsonl(?:\.zst)?$/.test(searchPath) ? null : searchPath;
 }
 
 async function parseRolloutFile(
   filePath: string,
-  threadIndex: Map<string, ThreadRow>,
+  threadIndex: ReturnType<typeof loadThreadIndex>,
   opts?: ParseOptions
 ): Promise<Conversation | null> {
   // Newer Codex builds may compress rollouts as rollout-*.jsonl.zst.
   const raw = filePath.endsWith('.zst')
-    ? new TextDecoder('utf-8', { fatal: true }).decode(zstdDecompressSync(await readFile(filePath)))
+    ? new TextDecoder('utf-8', { fatal: true }).decode(zstdDecompressSync(await readSource(filePath)))
     : await readUtf8(filePath);
   const lines = raw.split(/\r?\n/);
   if (lines.length === 0) return null;
@@ -303,13 +295,13 @@ async function parseRolloutFile(
       }
       case 'response_item': {
         const payload = event.payload as CodexResponseItem | undefined;
-        if (!payload?.type || payload.visibility === 'hidden') break;
+        if (!payload?.type || hidden(payload)) break;
 
         if (payload.type === 'reasoning') {
           // Reasoning is private unless the source explicitly marks a UI summary.
           if (payload.visibility !== 'ui') break;
           const summary = (payload.summary ?? [])
-            .filter(item => item?.type === 'summary_text' && typeof item.text === 'string')
+            .filter(item => item?.type === 'summary_text' && !hidden(item) && typeof item.text === 'string')
             .map(item => item.text!).join('');
           if (!summary) break;
           messages.push({
@@ -421,7 +413,7 @@ async function parseRolloutFile(
       case 'event_msg': {
         // Mirrors are reconciled one-to-one after all response items are known.
         const payload = event.payload as CodexResponseItem | undefined;
-        if (!payload || payload.visibility === 'hidden' || !['agent_message', 'user_message'].includes(payload.type ?? '')) break;
+        if (!payload || hidden(payload) || !['agent_message', 'user_message'].includes(payload.type ?? '')) break;
         if (payload.channel && !['final', 'commentary'].includes(payload.channel)) break;
         const content = payload.message;
         if (typeof content !== 'string' || !content) break;
@@ -479,7 +471,7 @@ async function parseRolloutFile(
     title: title || undefined,
     createdAt,
     updatedAt: lastTimestamp,
-    model: model ?? thread?.model ?? undefined,
+    model: thread?.model ?? model ?? undefined,
     workspace: sessionMeta?.cwd,
     messages: reconciled,
     metadata: {
@@ -496,21 +488,30 @@ async function parseRolloutFile(
 }
 
 function isCodexBootstrap(content: string): boolean {
-  // Plain headings are also ordinary user prose. Unlike reserved wrappers,
-  // they do not establish that the source was hidden harness context.
-  if (/^\s*(?:# AGENTS\.md|# Agent Configuration|Guidance for coding agents)/.test(content)) {
-    return /^\s*# AGENTS\.md[^\n]*\n\s*<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/.test(content);
+  // Only an entire, unambiguous harness envelope is reserved. A heading,
+  // fragment, quoted wrapper or text following its closing tag remains visible.
+  const text = content.trim();
+  const agents = /^# AGENTS\.md[^\r\n]*\r?\n\s*(<INSTRUCTIONS>[\s\S]*)$/.exec(text);
+  const body = agents ? agents[1] : text;
+  for (const tag of ['INSTRUCTIONS', 'environment_context', 'permissions instructions',
+      'available_deferred_tools', 'available_skills', 'SYSTEM_PROMPT']) {
+    if (tag === 'INSTRUCTIONS' && !agents) continue;
+    const start = '<' + tag + '>', end = '</' + tag + '>';
+    if (body.startsWith(start) && body.endsWith(end)) {
+      const inside = body.slice(start.length, -end.length);
+      return !inside.includes(start) && !inside.includes(end);
+    }
   }
-  return isSystemContext(content);
+  return false;
 }
 
 function extractContent(
-  content?: Array<{ type?: string; text?: string; image_url?: string }>
+  content?: Array<{ type?: string; text?: string; image_url?: string; visibility?: string; synthetic?: boolean; ignored?: boolean }>
 ): string {
   if (!content) return '';
   const parts: string[] = [];
   for (const item of content) {
-    if (!item) continue;
+    if (!item || hidden(item)) continue;
     if (item.type === 'input_text' || item.type === 'output_text' || item.type === 'text') {
       if (typeof item.text === 'string') parts.push(item.text);
     }
@@ -640,8 +641,7 @@ async function findRolloutFiles(
   path: string,
   opts: { shallowOnly: boolean }
 ): Promise<string[]> {
-  const stats = await stat(path).catch(() => null);
-  if (!stats) return [];
+  const stats = await stat(checkedSource(path));
 
   if (stats.isFile()) {
     return isRolloutName(path) ? [path] : [];
@@ -658,7 +658,7 @@ async function findRolloutFiles(
 
   const files: string[] = [];
   for (const root of roots) {
-    const found = await walkForJsonl(root, opts.shallowOnly ? 3 : 4);
+    const found = await walkForJsonl(root, opts.shallowOnly ? 3 : Infinity);
     files.push(...found);
   }
 
@@ -672,7 +672,7 @@ async function walkForJsonl(root: string, depth: number): Promise<string[]> {
   const results: string[] = [];
   if (depth < 0) return results;
 
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(checkedSource(root), { withFileTypes: true });
   for (const entry of entries) {
     const entryPath = join(root, entry.name);
     if (entry.isFile() && isRolloutName(entry.name)) {
@@ -689,7 +689,7 @@ function isRolloutName(path: string): boolean {
 }
 
 async function existsDir(path: string): Promise<boolean> {
-  const stats = await stat(path).catch(() => null);
+  const stats = await lstat(path).catch(() => null);
   return !!stats?.isDirectory();
 }
 

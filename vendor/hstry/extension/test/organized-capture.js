@@ -138,16 +138,22 @@ function chatgptFixture(options = {}) {
 async function capture(sync, captureTypes, state = {}) {
   const conversations = [];
   const reports = [];
-  const result = await sync({
-    state,
-    captureTypes,
-    log() {},
-    report: async (value) => reports.push(structuredClone(value)),
-    push: async (_source, _adapter, batch) => {
-      conversations.push(...batch);
-      return batch.length;
-    },
-  });
+  let result;
+  let turns = 0;
+  do {
+    result = await sync({
+      state,
+      captureTypes,
+      log() {},
+      report: async (value) => reports.push(structuredClone(value)),
+      push: async (_source, _adapter, batch) => {
+        conversations.push(...batch);
+        return batch.length;
+      },
+    });
+    state = result.state;
+    assert.ok(++turns < 100, 'continuations terminate');
+  } while (result.hasMore);
   return {
     result,
     conversations,
@@ -382,11 +388,12 @@ await test('Gemini opaque metadata cannot authorize organized capture', async ()
   };
   const captured = await capture(syncGemini);
   assert.deepEqual(captured.ids, []);
-  assert.equal(captured.result.selection.unknown, 1);
-  assert.equal(captured.result.selection.skipped, 1);
+  assert.equal(calls.length, 0, 'ineligible Gemini scope must not read any provider endpoint');
+  assert.equal(captured.result.selection.unknown, 0);
+  assert.equal(captured.result.selection.skipped, 0);
   assert.match(captured.result.selectionWarning, /Gemini.*metadata/i);
   assert.ok(!calls.some((url) => url.searchParams.get('rpcids') === 'hNvQHb'));
-  assert.equal(captured.result.state.lastSyncMs, null);
+  assert.equal(captured.result.state.lastSyncMs ?? null, null);
 });
 
 await test('No selected categories cause no provider network requests', async () => {

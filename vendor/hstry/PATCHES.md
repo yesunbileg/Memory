@@ -48,3 +48,9 @@ Patch groups:
     identity reconciliation and no longer treats plain heading-like user text
     as bootstrap instructions. Incremental Codex imports can refresh matching
     titles directly from the selected source's index without reparsing rollouts.
+
+12. Codex title shortening counts Unicode code points, whole envelopes and source
+    flags control visibility, and per-session index lookups include model-only rows.
+    OpenCode JSON layouts use one parent-checked reader. SQLite v1/v2 page through
+    one read snapshot, refuse crossed parents, and keep native visibility flags.
+    Explicit roots and dependency reads refuse symlinks.

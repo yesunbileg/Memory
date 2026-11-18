@@ -11,9 +11,10 @@ assert.deepEqual(manifest.host_permissions, [
   'https://chat.openai.com/*',
   'https://claude.ai/*',
   'https://gemini.google.com/*',
-  'http://127.0.0.1/*',
 ]);
 
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
 let settings = { port: 41770, token: '', providers: { chatgpt: true } };
 let status = {};
 let messageListener;
@@ -93,7 +94,7 @@ const blockedFull = await send({ type: 'fullSyncProvider', provider: 'chatgpt' }
 assert.equal(blockedFull.ok, false, 'blocked sync must not acknowledge a successful start');
 assert.equal(blockedFull.code, 'missing_token');
 
-settings = { ...settings, token: 'synthetic-private-worker-token-123456' };
+settings = { ...settings, archiveId, nativeHost, token: 'synthetic-private-worker-token-123456' };
 status.chatgpt = {
   state: { lastSyncMs: 123, accounts: { legacy: true }, pending: ['old'] },
   lastSuccessMs: 111,
@@ -106,12 +107,11 @@ PROVIDERS.chatgpt.sync = async ({ state, captureTypes, report }) => {
   await report({ selection, selectionWarning: null });
   return { state: { cursor: 'saved' }, conversations: 2, selection, selectionWarning: null };
 };
-globalThis.fetch = async (url, options) => {
-  calls.push(url);
-  assert.equal(new URL(url).pathname, '/auth/check');
-  assert.equal(options.method, 'POST');
-  assert.equal(options.body, '{}');
-  return new Response('', { status: 401 });
+chrome.runtime.sendNativeMessage = async (host, packet) => {
+  calls.push(host);
+  assert.equal(host, nativeHost);
+  assert.deepEqual(packet, { op: 'check', archive_instance_id: archiveId });
+  return { error: 'unauthorized' };
 };
 const rejected = await send({ type: 'syncNow' });
 assert.equal(rejected.ok, false);
@@ -124,15 +124,12 @@ assert.equal(
 assert.equal(status.chatgpt.lastSuccessMs, 111);
 assert.equal(status.chatgpt.lastErrorCode, 'unauthorized');
 
-globalThis.fetch = async () =>
-  new Response(
-    JSON.stringify({
-      status: 'ok',
-      service: 'ai-memory',
-      schema: 1,
-      archive_instance_id: 'synthetic-archive',
-    }),
-  );
+chrome.runtime.sendNativeMessage = async () => ({
+  status: 'ok',
+  service: 'ai-memory',
+  schema: 2,
+  archive_instance_id: archiveId,
+});
 assert.equal((await send({ type: 'syncNow' })).ok, true);
 await finished();
 assert.deepEqual(providerInputs[0], {
@@ -189,19 +186,11 @@ await finished();
 assert.deepEqual(providerInputs.at(-1), { state: {}, captureTypes: settings.captureTypes });
 
 const archiveRequests = [];
-globalThis.fetch = async (url, options) => {
-  if (new URL(url).pathname === '/auth/check') {
-    return new Response(
-      JSON.stringify({
-        status: 'ok',
-        service: 'ai-memory',
-        schema: 1,
-        archive_instance_id: 'synthetic-archive',
-      }),
-    );
-  }
-  archiveRequests.push({ url, options });
-  return new Response(JSON.stringify({ conversations: 1, created: 1, updated: 0 }));
+chrome.runtime.sendNativeMessage = async (host, packet) => {
+  if (packet.op === 'check')
+    return { status: 'ok', service: 'ai-memory', schema: 2, archive_instance_id: archiveId };
+  archiveRequests.push({ host, packet });
+  return { conversations: 1, created: 1, updated: 0, unchanged: 0 };
 };
 PROVIDERS.chatgpt.sync = async ({ push }) => {
   await push('chatgpt-web', 'chatgpt-web', [{ externalId: 'synthetic', messages: [] }]);
@@ -210,12 +199,9 @@ PROVIDERS.chatgpt.sync = async ({ push }) => {
 assert.equal((await send({ type: 'syncNow' })).ok, true);
 await finished();
 assert.equal(archiveRequests.length, 1);
-assert.equal(archiveRequests[0].url, 'http://127.0.0.1:41770/ingest');
-assert.equal(
-  archiveRequests[0].options.redirect,
-  'error',
-  'archive payload must never follow a remote redirect',
-);
+assert.equal(archiveRequests[0].host, nativeHost);
+assert.equal(archiveRequests[0].packet.archive_instance_id, archiveId);
+assert.ok(!JSON.stringify(archiveRequests).includes(settings.token));
 assert.equal(status.chatgpt.progress.accepted, 1);
 
 const previousSuccess = status.chatgpt.lastSuccessMs;

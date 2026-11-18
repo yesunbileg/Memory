@@ -1,3 +1,4 @@
+import { drainSelected, discoveryPages } from './queue.js';
 // ChatGPT provider: syncs conversations (personal + Teams workspaces) via the
 // chatgpt.com backend API, authenticated with the browser session cookies.
 
@@ -5,7 +6,6 @@ import {
   NotLoggedInError,
   fetchJson,
   shortId,
-  sleep,
   textPart,
   thinkingPart,
   toMs,
@@ -26,7 +26,6 @@ const PAGE_SIZE = 50;
 const OVERLAP_MS = 5 * 60 * 1000;
 // Pace detail requests to stay under ChatGPT's rate limit. Backoff in
 // fetchJson handles bursts, but pacing avoids tripping 429 in the first place.
-const THROTTLE_MS = 400;
 
 async function getAccessToken() {
   const data = await fetchJson(`${BASE}/api/auth/session`);
@@ -48,10 +47,15 @@ async function listAccounts(token) {
       headers: authHeaders(token),
     });
     const accounts = [];
+    let incomplete = false;
     for (const entry of Object.values(data?.accounts ?? {})) {
       const account = entry?.account ?? entry;
       const id = account?.account_id ?? account?.id;
-      if (!id || account?.is_deactivated) continue;
+      if (account?.is_deactivated) continue;
+      if (typeof id !== 'string' || !id) {
+        incomplete = true;
+        continue;
+      }
       if (accounts.some((a) => a.id === id)) continue;
       accounts.push({
         id,
@@ -59,18 +63,18 @@ async function listAccounts(token) {
         isWorkspace: (account?.structure ?? account?.plan_type) === 'workspace',
       });
     }
-    if (accounts.length > 0) return { accounts, incomplete: false };
+    if (accounts.length > 0) return { accounts, incomplete };
   } catch {
     // Endpoint shape changed or unavailable: sync the default account only.
   }
   return { accounts: [{ id: null, name: 'default', isWorkspace: false }], incomplete: true };
 }
 
-async function* listUpdatedConversations(token, accountId, sinceMs) {
+async function* listUpdatedConversations(token, accountId, sinceMs, readPage) {
   const seen = new Set();
   for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
     const offset = page * PAGE_SIZE;
-    const data = await fetchJson(
+    const data = await readPage(
       `${BASE}/backend-api/conversations?offset=${offset}&limit=${PAGE_SIZE}&order=updated`,
       { headers: authHeaders(token, accountId) },
     );
@@ -86,6 +90,12 @@ async function* listUpdatedConversations(token, accountId, sinceMs) {
       yield item;
     }
     if (
+      items.length < PAGE_SIZE &&
+      Number.isFinite(data.total) &&
+      offset + items.length < data.total
+    )
+      throw new Error('ChatGPT conversation page is incomplete');
+    if (
       items.length < PAGE_SIZE ||
       (Number.isFinite(data.total) && offset + PAGE_SIZE >= data.total)
     )
@@ -95,7 +105,7 @@ async function* listUpdatedConversations(token, accountId, sinceMs) {
 }
 
 /** Verified community-client endpoint: see donor-audit.md, no endpoint probing. */
-async function listProjectGizmos(token, accountId) {
+async function listProjectGizmos(token, accountId, readPage) {
   const projects = [];
   const cursors = new Set();
   let cursor = null;
@@ -103,7 +113,7 @@ async function listProjectGizmos(token, accountId) {
     const url = new URL(`${BASE}/backend-api/gizmos/snorlax/sidebar`);
     url.searchParams.set('conversations_per_gizmo', '0');
     if (cursor !== null) url.searchParams.set('cursor', String(cursor));
-    const data = await fetchJson(url.href, { headers: authHeaders(token, accountId) });
+    const data = await readPage(url.href, { headers: authHeaders(token, accountId) });
     if (!Array.isArray(data?.items))
       throw new Error('ChatGPT project sidebar shape is unavailable');
     for (const entry of data.items) {
@@ -113,6 +123,8 @@ async function listProjectGizmos(token, accountId) {
       projects.push(project);
     }
     const next = data.cursor ?? null;
+    if (next === null && (data.has_more === true || data.next_cursor != null))
+      throw new Error('Incomplete pagination');
     if (next === null) return projects;
     if (!['string', 'number'].includes(typeof next) || cursors.has(String(next)))
       throw new Error('ChatGPT project sidebar cursor is invalid');
@@ -122,7 +134,7 @@ async function listProjectGizmos(token, accountId) {
   throw new Error('ChatGPT project sidebar pagination reached the safety limit');
 }
 
-async function* listProjectConversations(token, accountId, projectId) {
+async function* listProjectConversations(token, accountId, projectId, readPage) {
   const cursors = new Set();
   let cursor = 0;
   for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
@@ -131,11 +143,13 @@ async function* listProjectConversations(token, accountId, projectId) {
     );
     url.searchParams.set('limit', String(PAGE_SIZE));
     url.searchParams.set('cursor', String(cursor));
-    const data = await fetchJson(url.href, { headers: authHeaders(token, accountId) });
+    const data = await readPage(url.href, { headers: authHeaders(token, accountId) });
     if (!Array.isArray(data?.items))
       throw new Error('ChatGPT project conversation shape is unavailable');
     for (const item of data.items) yield item;
     const next = data.cursor ?? null;
+    if (next === null && (data.has_more === true || data.next_cursor != null))
+      throw new Error('Incomplete pagination');
     if (next === null) return;
     if (!['string', 'number'].includes(typeof next) || cursors.has(String(next)))
       throw new Error('ChatGPT project conversation cursor is invalid');
@@ -260,6 +274,12 @@ function extractMessage(node, index) {
     for (const part of content.parts) {
       if (typeof part === 'string') addText(part);
       else if (part?.content_type === 'text' && typeof part.text === 'string') addText(part.text);
+      else if (
+        !['image_asset_pointer', 'audio_asset_pointer', 'video_container_asset_pointer'].includes(
+          part?.content_type,
+        )
+      )
+        throw new Error('ChatGPT text part is unavailable');
     }
   } else if (content.content_type === 'code' && typeof content.text === 'string') {
     addText(content.text);
@@ -268,6 +288,17 @@ function extractMessage(node, index) {
       const text = thought?.summary;
       if (typeof text === 'string' && text) parts.push({ ...thinkingPart(text), visibility: 'ui' });
     }
+  } else if (
+    ![
+      'thoughts',
+      'reasoning_recap',
+      'tether_quote',
+      'tether_browsing_display',
+      'execution_output',
+      'tool_result',
+    ].includes(content.content_type)
+  ) {
+    throw new Error('ChatGPT visible content format is unavailable');
   }
   const contentStr = texts.join('');
   if (!contentStr && parts.length === 0) return null;
@@ -328,6 +359,8 @@ export async function syncChatGPT({
   push,
   register = async () => {},
   log = () => {},
+  checkpoint = async () => {},
+  guard = async () => {},
   report = async () => {},
 }) {
   const policy = normalizeCaptureTypes(captureTypes);
@@ -354,146 +387,186 @@ export async function syncChatGPT({
     );
   const missingTypes = new Set();
   let missingMetadata = 0;
-  let total = 0;
-  let detected = 0;
-  let processed = 0;
-
-  for (const account of accounts) {
-    const key = account.id ? shortId(account.id) : 'default';
-    const sourceId = account.id && account.isWorkspace ? `chatgpt-web-${key}` : 'chatgpt-web';
-    await register(sourceId, 'chatgpt-web');
-    const previous = state?.accounts?.[key];
-    // Short source labels are not principal identities. Legacy/unknown account
-    // state is replayed conservatively rather than borrowed by another account.
-    const lastSyncMs =
-      account.id && previous?.principalId === account.id ? (previous.lastSyncMs ?? null) : null;
-    const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
-    const runStartedMs = Date.now();
-    const candidates = new Map();
-    const projectGizmoIds = new Set();
-    let catalogAvailable = false;
-    let projectMembershipAvailable = false;
-    let failures = discovery.incomplete ? 1 : 0;
-    const add = (item, context = {}) => {
-      if (typeof item?.id !== 'string' || !item.id)
-        throw new Error('ChatGPT conversation identifier is unavailable');
-      const previous = candidates.get(item.id);
-      candidates.set(item.id, {
-        item: { ...previous?.item, ...item },
-        context: { ...previous?.context, ...context },
-      });
-    };
-    try {
-      // Organized membership can change without changing message timestamps.
-      // Scan list metadata completely in selective mode, before fetching text.
-      const selective = policy.projects || policy.pinned || policy.agents;
-      for await (const item of listUpdatedConversations(
-        token,
-        account.id,
-        selective ? null : since,
-      ))
-        add(item, { recents: true });
-    } catch (error) {
-      failures++;
-      warnings.add(
-        'ChatGPT conversation discovery is incomplete; unavailable entries were not captured.',
-      );
-      log(`chatgpt: conversation discovery unavailable: ${error.message}`);
-    }
-    if (policy.projects || policy.agents) {
-      let projects = [];
+  const signature = JSON.stringify(accounts.map((p) => p.id).sort());
+  const canResume = accounts.every((p) => typeof p.id === 'string' && p.id.length);
+  const pager = discoveryPages({
+    state,
+    signature,
+    canResume,
+    guard,
+    checkpoint,
+    report,
+    selection,
+    fetchPage: fetchJson,
+  });
+  delete newState.discovery;
+  const prior = canResume && state.pending?.signature === signature ? state.pending : null;
+  const run = prior
+    ? structuredClone(prior)
+    : {
+        signature,
+        started: pager.started,
+        groups: [],
+        processed: 0,
+        detected: 0,
+        selection,
+        warnings: [],
+      };
+  if (!prior)
+    for (const account of accounts) {
+      await guard();
+      const key = account.id ? shortId(account.id) : 'default';
+      const sourceId = account.id && account.isWorkspace ? `chatgpt-web-${key}` : 'chatgpt-web';
+      await register(sourceId, 'chatgpt-web');
+      const previous = state?.accounts?.[key];
+      // Short source labels are not principal identities. Legacy/unknown account
+      // state is replayed conservatively rather than borrowed by another account.
+      const lastSyncMs =
+        account.id && previous?.principalId === account.id ? (previous.lastSyncMs ?? null) : null;
+      const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
+      const ids = [];
+      const candidates = new Map();
+      const projectGizmoIds = new Set();
+      let catalogAvailable = false;
+      let projectMembershipAvailable = false;
+      let failures = discovery.incomplete ? 1 : 0;
+      const add = (item, context = {}) => {
+        if (typeof item?.id !== 'string' || !item.id)
+          throw new Error('ChatGPT conversation identifier is unavailable');
+        const previous = candidates.get(item.id);
+        candidates.set(item.id, {
+          item: { ...previous?.item, ...item },
+          context: { ...previous?.context, ...context },
+        });
+      };
       try {
-        projects = await listProjectGizmos(token, account.id);
-        for (const project of projects) projectGizmoIds.add(project.id);
-        catalogAvailable = true;
+        // Organized membership can change without changing message timestamps.
+        // Scan list metadata completely in selective mode, before fetching text.
+        const selective = policy.projects || policy.pinned || policy.agents;
+        for await (const item of listUpdatedConversations(
+          token,
+          account.id,
+          selective ? null : since,
+          pager.read,
+        ))
+          add(item, { recents: true });
       } catch (error) {
+        if (error === pager.pause) return pager.continuation();
+        if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable')
+          throw error;
         failures++;
         warnings.add(
-          'ChatGPT project discovery is unavailable; only explicit verified category metadata can match.',
+          'ChatGPT conversation discovery is incomplete; unavailable entries were not captured.',
         );
-        log(`chatgpt: project sidebar unavailable: ${error.message}`);
+        log(`chatgpt: conversation discovery unavailable: ${error.message}`);
       }
-      if (policy.projects && catalogAvailable) {
-        let complete = true;
-        for (const project of projects) {
-          try {
-            for await (const item of listProjectConversations(token, account.id, project.id))
-              add(item, { projectId: project.id });
-          } catch (error) {
-            complete = false;
-            failures++;
-            warnings.add(
-              'ChatGPT project conversation discovery is incomplete; unavailable pages were not captured.',
-            );
-            log(`chatgpt: project conversations unavailable: ${error.message}`);
-          }
+      if (policy.projects || policy.agents) {
+        let projects = [];
+        try {
+          projects = await listProjectGizmos(token, account.id, pager.read);
+          for (const project of projects) projectGizmoIds.add(project.id);
+          catalogAvailable = true;
+        } catch (error) {
+          if (error === pager.pause) return pager.continuation();
+          if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable')
+            throw error;
+          failures++;
+          warnings.add(
+            'ChatGPT project discovery is unavailable; only explicit verified category metadata can match.',
+          );
+          log(`chatgpt: project sidebar unavailable: ${error.message}`);
         }
-        projectMembershipAvailable = complete;
+        if (policy.projects && catalogAvailable) {
+          let complete = true;
+          for (const project of projects) {
+            try {
+              for await (const item of listProjectConversations(
+                token,
+                account.id,
+                project.id,
+                pager.read,
+              ))
+                add(item, { projectId: project.id });
+            } catch (error) {
+              if (error === pager.pause) return pager.continuation();
+              if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable')
+                throw error;
+              complete = false;
+              failures++;
+              warnings.add(
+                'ChatGPT project conversation discovery is incomplete; unavailable pages were not captured.',
+              );
+              log(`chatgpt: project conversations unavailable: ${error.message}`);
+            }
+          }
+          projectMembershipAvailable = complete;
+        }
       }
-    }
 
-    let batch = [];
-    let first = true;
-    for (const { item, context } of candidates.values()) {
-      detected++;
-      const decision = selectConversation(item, policy, {
-        recents: false,
-        ...context,
-        projectGizmoIds,
-        projectMembershipAvailable,
-        gizmoClassificationAvailable: catalogAvailable || !policy.agents,
+      for (const { item, context } of candidates.values()) {
+        run.detected++;
+        const decision = selectConversation(item, policy, {
+          recents: false,
+          ...context,
+          projectGizmoIds,
+          projectMembershipAvailable,
+          gizmoClassificationAvailable: catalogAvailable || !policy.agents,
+        });
+        recordSelection(selection, decision);
+        if (
+          !policy.recents &&
+          !decision.selected &&
+          decision.unavailable.some((category) => policy[category])
+        ) {
+          missingMetadata++;
+          for (const category of decision.unavailable.filter((category) => policy[category]))
+            missingTypes.add(category);
+        }
+        if (!decision.selected) {
+          continue;
+        }
+        ids.push(item.id);
+      }
+      run.groups.push({
+        principalId: account.id,
+        key,
+        name: account.name,
+        adapter: 'chatgpt-web',
+        sourceId,
+        ids,
+        failed: [],
+        lastSyncMs,
+        discoveryFailed: failures > 0,
       });
-      recordSelection(selection, decision);
-      if (
-        !policy.recents &&
-        !decision.selected &&
-        decision.unavailable.some((category) => policy[category])
-      ) {
-        missingMetadata++;
-        for (const category of decision.unavailable.filter((category) => policy[category]))
-          missingTypes.add(category);
-      }
-      if (!decision.selected) {
-        await report({ phase: 'importing', detected, processed, selection });
-        continue;
-      }
-      if (!first) await sleep(THROTTLE_MS);
-      first = false;
-      try {
-        const detail = await fetchJson(
-          `${BASE}/backend-api/conversation/${encodeURIComponent(item.id)}`,
-          {
-            headers: authHeaders(token, account.id),
-          },
-        );
-        const conv = toParsedConversation(detail, item.id, account.id);
-        if (conv) batch.push(conv);
-      } catch (error) {
-        failures++;
-        warnings.add(
-          'Some selected ChatGPT conversations could not be read. Capture is incomplete; retry after checking your sign-in.',
-        );
-        log(`chatgpt: skipping conversation ${item.id}: ${error.message}`);
-      }
-      processed++;
-      await report({ phase: 'importing', detected, processed, selection });
-      if (batch.length >= 10) {
-        total += await push(sourceId, 'chatgpt-web', batch);
-        batch = [];
-      }
     }
-    if (batch.length) total += await push(sourceId, 'chatgpt-web', batch);
-    newState.accounts[key] = {
-      principalId: account.id,
-      lastSyncMs: failures > 0 ? lastSyncMs : runStartedMs,
-      name: account.name,
-    };
-  }
   if (missingMetadata)
     warnings.add(
       `ChatGPT category metadata unavailable for ${missingMetadata} conversation(s) (${[...missingTypes].join(', ')}); those unverified chats were skipped.`,
     );
-  const selectionWarning = [...warnings].join(' ') || null;
-  await report({ phase: 'complete', detected, processed, selection, selectionWarning });
-  return { state: newState, conversations: total, selection, selectionWarning };
+  if (!prior) run.warnings = [...warnings];
+  for (const group of run.groups)
+    newState.accounts[group.key] =
+      state.accounts?.[group.key]?.principalId === group.principalId
+        ? state.accounts[group.key]
+        : { principalId: group.principalId, lastSyncMs: group.lastSyncMs };
+  const unverifiedPrincipal = 'unverified-' + crypto.randomUUID();
+  const read = async (principalId, id) => {
+    const detail = await fetchJson(`${BASE}/backend-api/conversation/${encodeURIComponent(id)}`, {
+      headers: authHeaders(token, principalId),
+    });
+    if (detail?.id != null && detail.id !== id) throw new Error('Wrong conversation');
+    return toParsedConversation(detail, id, principalId ?? unverifiedPrincipal);
+  };
+  return drainSelected({
+    run,
+    state: newState,
+    field: 'accounts',
+    provider: 'ChatGPT',
+    read,
+    push,
+    report,
+    checkpoint,
+    canResume,
+    guard,
+  });
 }

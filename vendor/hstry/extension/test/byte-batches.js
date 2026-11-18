@@ -11,7 +11,11 @@ let rejectBodies = false,
   failAtPost = null,
   nextWatermark = 999;
 const posted = [];
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
 const settings = {
+  archiveId,
+  nativeHost,
   port: 41770,
   token: 'synthetic-private-ingest-token',
   account: 'synthetic-namespace',
@@ -73,28 +77,20 @@ const conversation = (id, n = 1) => ({
   })),
 });
 let packet = [conversation('one'), conversation('two')];
-globalThis.fetch = async (url, options) => {
-  if (new URL(url).pathname === '/auth/check')
-    return new Response(
-      JSON.stringify({
-        status: 'ok',
-        service: 'ai-memory',
-        schema: 1,
-        archive_instance_id: 'synthetic-archive',
-      }),
-    );
-  const bytes = new TextEncoder().encode(options.body).length;
-  posted.push({ bytes, packet: JSON.parse(options.body) });
-  if (failAtPost === posted.length) return new Response('{}', { status: 503 });
-  if (rejectBodies || bytes > LIMIT) return new Response('{}', { status: 413 });
-  return new Response(
-    JSON.stringify({
-      conversations: ackOverride ?? JSON.parse(options.body).conversations.length,
-      created: 1,
-      updated: 0,
-      unchanged: 0,
-    }),
-  );
+chrome.runtime.sendNativeMessage = async (host, packet) => {
+  assert.equal(host, nativeHost);
+  if (packet.op === 'check')
+    return { status: 'ok', service: 'ai-memory', schema: 2, archive_instance_id: archiveId };
+  const bytes = new TextEncoder().encode(JSON.stringify(packet)).length;
+  posted.push({ bytes, packet });
+  if (failAtPost === posted.length) return { error: 'archive_unavailable' };
+  if (rejectBodies || bytes > LIMIT) return { error: 'body_too_large' };
+  return {
+    conversations: ackOverride ?? packet.conversations.length,
+    created: packet.conversations.length,
+    updated: 0,
+    unchanged: 0,
+  };
 };
 PROVIDERS.chatgpt.sync = async ({ push }) => {
   await push('chatgpt-web', 'chatgpt-web', packet);

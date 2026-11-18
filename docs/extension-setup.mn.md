@@ -7,21 +7,19 @@ git pull --ff-only
 uv sync --frozen
 ```
 
-Хуучин `serve` ажиллаж байгаа terminal дээр Ctrl+C дарж зогсооно. Дараа нь:
+1. Linux дээр Brave-ийн `brave://extensions` эсвэл Chrome/Chromium-ийн `chrome://extensions` хуудсыг нээнэ.
+2. Developer mode → Load unpacked → `vendor/hstry/extension` хавтсыг сонгоно. Суулгасан бол Reload дарна. Extensions хуудаснаас AI Memory-ийн 32 үсэгтэй ID-г хуулна.
+3. Дараах командын `YOUR_EXTENSION_ID`-г хуулсан ID-аар, `brave`-ийг шаардлагатай бол `chrome` эсвэл `chromium`-аар солино.
 
 ```bash
-.venv/bin/ai-memory connect
+.venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-Команд token-ийг үүсгэж эсвэл байгааг ашиглан, private connection файл бэлдээд локал серверийг асаана. Terminal-ийг нээлттэй үлдээнэ. Тусдаа SQLite архив сонгосон бол connection файл хаана үүссэнийг terminal-ийн замаас харна. Өөр архивтай сервер ажиллаж байвал чимээгүйгээр түүнтэй холбохгүй, алдаа мэдээлнэ.
+4. Settings → Choose connection file дээр командын хэвлэсэн `connection_file`-ийг сонгоно. Хөтөч энэ архивт холбогдсон локал програмыг өөрөө ажиллуулна. Terminal ажиллаж үлдэх шаардлагагүй.
+5. Хуучин token/bearer файлтай бол шинэ хувилбар руу автоматаар холбохгүй. Дээрх командаар v2 файл үүсгэж дахин сонгоно. Буруу файл өмнөх ажиллаж буй тохиргоог солихгүй.
+6. Холболт баталгаажсаны дараа нэвтэрсэн сайт, хадгалах ярианы төрлөө сонгоод Capture selected chats дарна.
 
-1. Brave дээр `brave://extensions`, Chrome дээр `chrome://extensions` нээнэ.
-2. Анх суулгах бол Developer mode → Load unpacked → төслийн `vendor/hstry/extension` хавтсыг сонгоно. Өмнө суулгасан бол Reload дарна.
-3. AI Memory → Settings → Choose connection file дээр дарна.
-4. Төслийн `data/extension-connection.json` файлыг эсвэл terminal-д хэвлэсэн connection файлыг сонгоно.
-5. Token-ийн бодит шалгалт амжилттай бол Connected гэж гарна.
-6. Хүссэн website/provider-оо асаана. Browser дээр тухайн сайтад нэвтэрсэн байна.
-7. Checklist-ээс ярианы төрлөө сонгоод Capture selected chats дарна.
+Стандарт бус browser user-data хавтас болон платформын хязгаарыг [native холболтын заавар](native-pairing.md)-аас үзнэ.
 
 ## Checklist
 
@@ -39,9 +37,9 @@ Project/pinned чат Recents жагсаалтад давхар харагдса
 ## Төлөв болон хязгаар
 
 - Not connected: connection файлаа сонгоно.
-- Offline: `connect` terminal ажиллаж байгааг шалгана.
-- Check connection: token зөрсөн байж болно; зөв файлаа дахин сонгоно.
-- Update needed: хуучин серверээ зогсоож шинэ кодоор `connect` ажиллуулна.
+- Offline: сонгосон хөтөч, extension ID, локал програмын бүртгэлийг шалгана.
+- Check connection: зөв архив, хөтөч болон өргөтгөлд зориулсан v2 файлыг дахин сонгоно.
+- Update needed: код болон өргөтгөлийг шинэчлээд дахин холбоно.
 - Some chats skipped: дутуу таталт эсвэл website-ийн category мэдээлэл дутуу. Activity-ийн тайлбарыг уншаад нэвтрэлтээ шалган, дахин оролдоно.
 - Selection updated: checklist шинэчлэгдсэн; өмнөх амжилтын төлөв шинэ сонголтын баталгаа биш.
 

@@ -59,6 +59,7 @@ export function findFirstRealUserMessage(messages: FrumCandidate[]): string | un
  */
 export function formatFrumTitle(message: string, maxLen = 80): string {
   const collapsed = message.replace(/\s+/g, ' ').trim();
-  if (collapsed.length <= maxLen) return collapsed;
-  return `${collapsed.slice(0, maxLen - 3)}...`;
+  const characters = Array.from(collapsed);
+  if (characters.length <= maxLen) return collapsed;
+  return `${characters.slice(0, maxLen - 3).join('')}...`;
 }

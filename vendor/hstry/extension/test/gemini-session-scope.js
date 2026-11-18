@@ -59,6 +59,11 @@ for (const changed of [{ at: 'csrf-two' }, { sid: 'session-two' }, { index: '1' 
     const first = await capture();
     const second = await capture({ state: first.result.state, ...changed });
     assert.equal(second.pushed.length, 1);
+    assert.notEqual(
+      first.pushed[0].metadata.accountId,
+      second.pushed[0].metadata.accountId,
+      'changed session must not inherit archive consent or text',
+    );
     assert.equal(second.result.selectionWarning, null);
   });
   test(`changed Gemini ${Object.keys(changed)[0]} discards old pending summaries`, async () => {

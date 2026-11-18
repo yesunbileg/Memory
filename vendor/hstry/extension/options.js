@@ -1,3 +1,4 @@
+import { eligibleCapture } from './providers/selection.js';
 import {
   CAPTURE_TYPES,
   DEFAULT_CAPTURE_TYPES,
@@ -5,6 +6,11 @@ import {
   PROVIDERS,
   PROVIDER_CAPABILITIES,
   describeEffectivePlan,
+  captureOutcome,
+  statusForPairing,
+  enterToggles,
+  progressSemantics,
+  restoreControl,
   formatDuration,
   formatSyncBreakdown,
   formatTime,
@@ -34,9 +40,23 @@ let currentSettings = DEFAULTS;
 let apiConnected = false;
 let checking = false;
 let connectionCheck = 0;
+let pairingGeneration = 0;
+let since = 0;
+let lastStatus = {};
+let starting = false;
+let outcomeProviders = null;
+let displayScope = '';
+let statusRender = 0;
+function updateCommand() {
+  const selected = el('browser-family').value;
+  const browser = ['brave', 'chromium', 'chrome'].includes(selected) ? selected : 'chrome';
+  const id = /^[a-p]{32}$/.test(chrome.runtime.id) ? chrome.runtime.id : 'EXTENSION_ID';
+  el('setup-command').textContent =
+    `ai-memory --db /path/to/archive.sqlite connect --extension-id ${id} --browser ${browser}`;
+}
 
 function sameConnection(a, b) {
-  return a.port === b.port && a.token === b.token;
+  return a.archiveId === b.archiveId && a.nativeHost === b.nativeHost && a.token === b.token;
 }
 
 function feedback(id, text, error = false) {
@@ -77,8 +97,8 @@ function renderControls() {
 function readSettings() {
   return normalizeSettings(
     {
-      port: el('port').value,
-      token: el('token').value,
+      ...currentSettings,
+      autoPaused: el('auto-paused').checked,
       account: el('account').value,
       intervalMinutes: el('interval').value,
       providers: Object.fromEntries(
@@ -93,12 +113,13 @@ function readSettings() {
 }
 
 async function persist() {
-  if (el('port').checkValidity && !el('port').checkValidity()) {
-    el('port').reportValidity();
-    throw new Error('Check the port number in manual settings.');
+  if (el('interval').checkValidity && !el('interval').checkValidity()) {
+    el('interval').reportValidity();
+    throw new Error('Check the automatic interval.');
   }
-  currentSettings = readSettings();
-  await chrome.storage.local.set({ settings: currentSettings });
+  const next = readSettings();
+  await chrome.storage.local.set({ settings: next });
+  currentSettings = next;
   await chrome.runtime.sendMessage({ type: 'settingsChanged' });
   updateSelection();
 }
@@ -113,20 +134,27 @@ function updateSelection() {
     el('effective-plan').textContent = plan.summary;
   }
   const selected = Object.values(types).some(Boolean);
-  const enabled = Object.values(currentSettings.providers).some(Boolean);
+  el('schedule-detail').textContent = currentSettings.autoPaused
+    ? 'Automatic checks are paused. You can still capture manually.'
+    : `Automatic checks run every ${currentSettings.intervalMinutes} minutes.`;
   el('gemini-selection-warning').hidden = !(
     currentSettings.providers.gemini &&
     !types.recents &&
     selected
   );
-  el('sync-now').disabled = !apiConnected || !selected || !enabled || checking;
+  el('sync-now').disabled =
+    !apiConnected ||
+    !plan.readyCount ||
+    checking ||
+    starting ||
+    Object.values(lastStatus).some((entry) => entry.running);
 }
 
 async function checkConnection() {
   const generation = ++connectionCheck;
-  const requested = { port: currentSettings.port, token: currentSettings.token };
+  const requested = currentSettings;
   checking = true;
-  el('test-connection').disabled = true;
+  el('test-connection').setAttribute('aria-busy', 'true');
   el('connection-label').textContent = 'Checking…';
   el('connection-pill').className = 'status-pill checking';
   el('connection-dot').className = 'status-dot checking';
@@ -139,6 +167,9 @@ async function checkConnection() {
   }
   if (generation !== connectionCheck || !sameConnection(requested, currentSettings)) return false;
   const state = connectionPresentation(result);
+  const focused = document.activeElement;
+  const inGuide = el('connection-guide').contains?.(focused);
+  const inReady = el('connection-ready').contains?.(focused);
   apiConnected = result?.ok === true;
   el('connection-title').textContent = state.title;
   el('connection-result').textContent = state.detail;
@@ -147,12 +178,14 @@ async function checkConnection() {
   el('connection-dot').className = `status-dot ${state.tone}`;
   el('connection-guide').hidden = apiConnected;
   el('connection-ready').hidden = !apiConnected;
+  if (apiConnected && inGuide) el('change-connection').focus?.();
+  if (!apiConnected && inReady) el('import-connection').focus?.();
   if (el('connection-ready-detail')) {
     el('connection-ready-detail').textContent = apiConnected
-      ? `Local receiver verified on 127.0.0.1:${currentSettings.port}. Selected chats stay on this computer.`
+      ? `Verified local archive ${currentSettings.archiveId}. Selected chats stay on this computer.`
       : 'You’re all set. Your selected chats will be saved on this computer.';
   }
-  el('test-connection').disabled = false;
+  el('test-connection').setAttribute('aria-busy', 'false');
   checking = false;
   updateSelection();
   await renderStatus();
@@ -209,6 +242,7 @@ function renderActivityLog(entries) {
         `${counts.detected ?? 0} checked`,
         `${counts.created ?? 0} new`,
         `${counts.updated ?? 0} updated`,
+        `${counts.unchanged ?? 0} unchanged`,
       ];
       if ((counts.skipped ?? 0) > 0) parts.push(`${counts.skipped} skipped`);
       if (run.durationMs) parts.push(formatDuration(run.durationMs));
@@ -235,16 +269,30 @@ function renderActivityLog(entries) {
 }
 
 async function renderStatus() {
+  const ticket = ++statusRender;
   const statusResp = await chrome.storage.local.get('status');
-  const status = statusResp?.status ?? {};
   const logResp = await chrome.storage.local.get('activityLog');
   const activityLog = Array.isArray(logResp?.activityLog) ? logResp.activityLog : [];
 
+  if (ticket !== statusRender) return;
+  const status = statusForPairing(statusResp?.status, currentSettings);
+  const key = JSON.stringify([currentSettings.archiveId, currentSettings.account]);
+  if (displayScope !== key) {
+    displayScope = key;
+    since = 0;
+    outcomeProviders = null;
+    feedback('capture-outcome', '');
+  }
+  const focused = document.activeElement?.id;
+  const dynamic = /^(rescan|site|capture-one)-(.+)$/.exec(focused || '');
+  lastStatus = status;
+  updateSelection();
+  const outcome = captureOutcome(status, outcomeProviders ?? currentSettings.providers, since);
+  if (outcome) el('capture-outcome').textContent = outcome;
   const list = el('status-list');
   list.replaceChildren();
   const rescans = el('resync-list');
   rescans.replaceChildren();
-  const hasCategories = Object.values(currentSettings.captureTypes).some(Boolean);
 
   for (const [id, provider] of Object.entries(PROVIDERS)) {
     const entry = status[id];
@@ -272,6 +320,7 @@ async function renderStatus() {
     if (enabled && entry?.running) {
       const bar = document.createElement('div');
       bar.className = `progress-track${breakdown.percent === null ? ' indeterminate' : ''}`;
+      progressSemantics(bar, provider.name, breakdown.percent);
       const fill = document.createElement('div');
       fill.className = 'progress-fill';
       if (breakdown.percent !== null) fill.style.width = `${breakdown.percent}%`;
@@ -303,31 +352,20 @@ async function renderStatus() {
       if (entry?.lastErrorCode === 'not_logged_in' && caps?.loginUrl) {
         const openLink = document.createElement('a');
         openLink.className = 'mini-action';
+        openLink.id = `site-${id}`;
         openLink.href = caps.loginUrl;
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
         openLink.innerHTML = `Open ${provider.site} ${UI_ICONS.external}`;
         actionBar.appendChild(openLink);
       }
-      if (hasCategories && !(id === 'gemini' && !currentSettings.captureTypes.recents)) {
+      if (eligibleCapture(id, currentSettings.captureTypes)) {
         const syncOne = document.createElement('button');
         syncOne.type = 'button';
+        syncOne.id = `capture-one-${id}`;
         syncOne.className = 'mini-action';
         syncOne.innerHTML = `${UI_ICONS.play} Sync ${provider.name}`;
-        syncOne.addEventListener('click', async () => {
-          try {
-            await persist();
-            if (!(await checkConnection())) return;
-            const res = await chrome.runtime.sendMessage({ type: 'syncProvider', provider: id });
-            feedback(
-              'saved',
-              res?.ok ? `Syncing ${provider.name}…` : (res?.error ?? 'Could not start sync.'),
-              !res?.ok,
-            );
-          } catch {
-            feedback('saved', 'Could not start sync. Check your connection and try again.', true);
-          }
-        });
+        syncOne.addEventListener('click', () => startCapture('syncProvider', id));
         actionBar.appendChild(syncOne);
       }
       if (actionBar.children.length > 0) item.appendChild(actionBar);
@@ -340,59 +378,85 @@ async function renderStatus() {
     row.innerHTML = `<div><strong>${provider.name}</strong><small>Uses your current checklist</small></div><button class="button-secondary" type="button">Rescan selected chats</button>`;
     const button = row.querySelector('button');
     button.dataset.provider = id;
-    button.disabled = !apiConnected || !hasCategories || !enabled || Boolean(entry?.running);
+    button.id = `rescan-${id}`;
+    button.disabled =
+      !apiConnected ||
+      !eligibleCapture(id, currentSettings.captureTypes) ||
+      !enabled ||
+      Boolean(entry?.running);
     button.setAttribute('aria-label', `${provider.name}: rescan selected chats`);
     rescans.appendChild(row);
   }
 
   renderActivityLog(activityLog);
+  if (dynamic) restoreControl(focused, `provider-${dynamic[2]}`);
+  if (focused === 'clear-log' && el('clear-log').disabled) restoreControl(focused, 'auto-paused');
+  if (focused === 'sync-now' && el('sync-now').disabled) restoreControl(focused, 'auto-paused');
 }
 
 async function importFileObject(file) {
   if (!file) return;
+  const generation = ++pairingGeneration;
+  let saved = false;
+  const previousConnection = currentSettings;
   try {
-    if (file.size > 16_384) throw new Error('Invalid connection file');
-    const connection = parseConnectionFile(await file.text());
-    el('port').value = connection.port;
-    el('token').value = connection.token;
-    await persist();
-    const connected = await checkConnection();
-    feedback(
-      'import-result',
-      connected
-        ? 'Connection file verified. You’re ready.'
-        : 'File imported. Keep the local app running and check the connection again.',
-      !connected,
-    );
+    if (file.size > 16_384) throw new Error();
+    const candidate = parseConnectionFile(await file.text());
+    const verified = await chrome.runtime.sendMessage({ type: 'verifyPairing', candidate });
+    if (generation !== pairingGeneration || !sameConnection(previousConnection, currentSettings))
+      return;
+    if (!verified?.ok || verified.archiveId !== candidate.archiveId) throw new Error();
+    const next = { ...readSettings(), ...candidate, token: '' };
+    await chrome.storage.local.set({ settings: next });
+    saved = true;
+    currentSettings = next;
+    await chrome.runtime.sendMessage({ type: 'settingsChanged' });
+    await checkConnection();
+    if (generation !== pairingGeneration) return;
+    feedback('import-result', 'Local archive paired.');
+    if (apiConnected && document.activeElement === document.body) el('change-connection').focus?.();
   } catch {
+    if (generation !== pairingGeneration) return;
     feedback(
       'import-result',
-      'Choose extension-connection.json created by AI Memory on this computer.',
+      saved
+        ? 'The verified pairing was saved. Check the connection again.'
+        : 'Could not verify or save that file. Choose the matching native connection JSON. Your previous connection was not replaced.',
       true,
     );
   }
 }
 
-async function capture() {
+async function startCapture(type = 'syncNow', provider = null) {
+  const enabled = provider
+    ? { [provider]: currentSettings.providers[provider] }
+    : currentSettings.providers;
+  if (
+    starting ||
+    !apiConnected ||
+    !describeEffectivePlan(enabled, currentSettings.captureTypes).readyCount
+  )
+    return;
+  starting = true;
+  const buttonId = document.activeElement?.id;
+  since = Date.now();
+  outcomeProviders = enabled;
+  el('capture-outcome').textContent = 'Requesting local capture…';
+  updateSelection();
+  if (buttonId === 'sync-now' && el('sync-now').disabled) restoreControl(buttonId, 'auto-paused');
   try {
-    await persist();
-    if (!(await checkConnection())) return;
-    if (
-      !Object.values(currentSettings.providers).some(Boolean) ||
-      !Object.values(currentSettings.captureTypes).some(Boolean)
-    )
-      return;
-    const response = await chrome.runtime.sendMessage({ type: 'syncNow' });
-    feedback(
-      'saved',
-      response?.ok
-        ? 'Capturing your selected chats. You can close this page.'
-        : (response?.error ?? 'Capture did not start. Check your connection.'),
-      !response?.ok,
-    );
+    const result = await chrome.runtime.sendMessage({ type, ...(provider ? { provider } : {}) });
+    if (!result?.ok) feedback('capture-outcome', friendlyError('', result?.code), true);
     await renderStatus();
   } catch {
-    feedback('saved', 'Could not start capture. Check your connection and try again.', true);
+    feedback(
+      'capture-outcome',
+      'Could not start capture. Check the local archive connection.',
+      true,
+    );
+  } finally {
+    starting = false;
+    updateSelection();
   }
 }
 
@@ -402,6 +466,7 @@ for (const id of [
   ...Object.keys(CAPTURE_TYPES).map((id) => `capture-${id}`),
   'account',
   'interval',
+  'auto-paused',
 ]) {
   el(id).addEventListener('change', async () => {
     try {
@@ -413,26 +478,15 @@ for (const id of [
     }
   });
 }
-el('save').addEventListener('click', async () => {
-  try {
-    await persist();
-    await checkConnection();
-  } catch {
-    feedback('import-result', 'Check the port and connection token.', true);
-  }
-});
-el('test-connection').addEventListener('click', async () => {
-  try {
-    await persist();
-    await checkConnection();
-  } catch {
-    feedback('import-result', 'Check your manual connection settings.', true);
-  }
-});
-el('sync-now').addEventListener('click', capture);
+el('test-connection').addEventListener('click', checkConnection);
+el('sync-now').addEventListener('click', () => startCapture());
+el('browser-family').addEventListener('change', updateCommand);
+updateCommand();
+for (const id of Object.keys(PROVIDERS)) enterToggles(el(`provider-${id}`));
+enterToggles(el('auto-paused'));
 el('copy-command').addEventListener('click', async () => {
   try {
-    await navigator.clipboard.writeText('.venv/bin/ai-memory connect');
+    await navigator.clipboard.writeText(el('setup-command').textContent);
     feedback('import-result', 'Command copied. Run it in your Memory folder.');
   } catch {
     feedback('import-result', 'Select and copy the command above.');
@@ -482,26 +536,7 @@ el('clear-log')?.addEventListener('click', async () => {
 el('resync-list').addEventListener('click', async (event) => {
   const button = event.target.closest?.('button[data-provider]');
   if (!button || button.disabled) return;
-  button.disabled = true;
-  try {
-    await persist();
-    if (!(await checkConnection())) return;
-    const response = await chrome.runtime.sendMessage({
-      type: 'fullSyncProvider',
-      provider: button.dataset.provider,
-    });
-    feedback(
-      'resync-result',
-      response?.ok
-        ? 'Rescanning only your selected chat types.'
-        : (response?.error ?? 'Rescan did not start. Check the source and try again.'),
-      !response?.ok,
-    );
-  } catch {
-    feedback('resync-result', 'Could not start the rescan. Try again.', true);
-  } finally {
-    await renderStatus();
-  }
+  await startCapture('fullSyncProvider', button.dataset.provider);
 });
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.settings?.newValue) {
@@ -512,7 +547,8 @@ chrome.storage.onChanged.addListener((changes) => {
     );
     const authChanged = !sameConnection(currentSettings, next);
     currentSettings = next;
-    for (const id of ['port', 'token', 'account']) el(id).value = next[id];
+    el('account').value = next.account;
+    el('auto-paused').checked = next.autoPaused;
     el('interval').value = next.intervalMinutes;
     for (const id of Object.keys(PROVIDERS)) el(`provider-${id}`).checked = next.providers[id];
     for (const id of Object.keys(CAPTURE_TYPES))
@@ -528,32 +564,19 @@ chrome.storage.onChanged.addListener((changes) => {
   }
   if (changes.status || changes.activityLog) renderStatus();
 });
-for (const id of ['port', 'token'])
-  el(id).addEventListener('input', () => {
-    connectionCheck++;
-    apiConnected = false;
-    checking = false;
-    el('connection-title').textContent = 'Verify your connection';
-    el('connection-result').textContent = 'Save & verify your updated connection settings.';
-    el('connection-label').textContent = 'Not verified';
-    el('connection-pill').className = 'status-pill idle';
-    el('connection-dot').className = 'status-dot idle';
-    el('test-connection').disabled = false;
-    updateSelection();
-    renderStatus();
-  });
-
 const { settings = {} } = await chrome.storage.local.get('settings');
 currentSettings = normalizeSettings(
   { ...DEFAULTS, ...settings, providers: { ...DEFAULT_PROVIDER_SETTINGS, ...settings.providers } },
   DEFAULTS,
 );
-for (const id of ['port', 'token', 'account']) el(id).value = currentSettings[id];
+el('account').value = currentSettings.account;
+el('auto-paused').checked = currentSettings.autoPaused;
 el('interval').value = currentSettings.intervalMinutes;
 for (const id of Object.keys(PROVIDERS))
   el(`provider-${id}`).checked = currentSettings.providers[id];
 for (const id of Object.keys(CAPTURE_TYPES))
   el(`capture-${id}`).checked = currentSettings.captureTypes[id];
-el('app-version').textContent = `v${chrome.runtime.getManifest?.().version ?? '0.5.3'}`;
+const version = chrome.runtime.getManifest?.().version;
+el('app-version').textContent = version ? `v${version}` : 'Extension';
 updateSelection();
 await checkConnection();

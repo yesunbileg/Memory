@@ -35,7 +35,9 @@ def test_connection_files_are_private_and_repeatable(tmp_path):
 def test_existing_private_token_is_reused_without_rotation(tmp_path):
     from ai_memory.connection import prepare_connection
 
-    token = tmp_path / "ingest.token"
+    directory = tmp_path / "archive.sqlite.files"
+    directory.mkdir()
+    token = directory / "ingest.token"
     token.write_text(SYNTHETIC_TOKEN + "\n")
     token.chmod(0o600)
     files = prepare_connection(tmp_path / "archive.sqlite", 43210)
@@ -47,7 +49,9 @@ def test_existing_private_token_is_reused_without_rotation(tmp_path):
 def test_existing_private_connection_can_restore_missing_token_file(tmp_path):
     from ai_memory.connection import prepare_connection
 
-    file = tmp_path / "extension-connection.json"
+    directory = tmp_path / "archive.sqlite.files"
+    directory.mkdir()
+    file = directory / "extension-connection.json"
     file.write_text(
         json.dumps(
             {
@@ -71,7 +75,9 @@ def test_existing_private_connection_can_restore_missing_token_file(tmp_path):
 def test_existing_unrecognized_user_file_is_never_overwritten(tmp_path, which):
     from ai_memory.connection import prepare_connection
 
-    file = tmp_path / which
+    directory = tmp_path / "archive.sqlite.files"
+    directory.mkdir()
+    file = directory / which
     file.write_text("Existing personal note. Do not replace.")
     file.chmod(0o600)
     with pytest.raises(ValueError):
@@ -86,7 +92,9 @@ def test_symlinked_secret_files_are_refused_without_modifying_targets(tmp_path, 
     user_file = tmp_path / "existing-user-file"
     user_file.write_text("Unrelated user file")
     user_file.chmod(0o600)
-    (tmp_path / which).symlink_to(user_file)
+    directory = tmp_path / "archive.sqlite.files"
+    directory.mkdir()
+    (directory / which).symlink_to(user_file)
     with pytest.raises(ValueError, match="private|regular|symbolic"):
         prepare_connection(tmp_path / "archive.sqlite", 41770)
     assert user_file.read_text() == "Unrelated user file"
@@ -95,7 +103,9 @@ def test_symlinked_secret_files_are_refused_without_modifying_targets(tmp_path, 
 def test_public_token_permissions_are_refused_without_changing_file(tmp_path):
     from ai_memory.connection import prepare_connection
 
-    token = tmp_path / "ingest.token"
+    directory = tmp_path / "archive.sqlite.files"
+    directory.mkdir()
+    token = directory / "ingest.token"
     token.write_text(SYNTHETIC_TOKEN)
     token.chmod(0o644)
     with pytest.raises(ValueError, match="permission|private|0600"):
@@ -141,3 +151,12 @@ def test_running_receiver_identity_distinguishes_archives_without_exposing_paths
     with Store(first) as store:
         assert store.archive_instance_id()
         assert store.connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+def test_sibling_archives_do_not_share_legacy_keys(tmp_path):
+    from ai_memory.connection import prepare_connection
+
+    one = prepare_connection(tmp_path / "one.sqlite", 43100)
+    two = prepare_connection(tmp_path / "two.sqlite", 43101)
+    assert one.token_file != two.token_file and one.connection_file != two.connection_file
+    assert one.token != two.token

@@ -40,20 +40,34 @@ A file being written can be retried by the watcher after the next poll.
 Codex messages retain native IDs or original JSONL record evidence. Mirrored
 `event_msg`/`response_item` messages reconcile one-to-one, passing matched identity
 aliases through archive ingestion without deduplicating by reply text. Source
-record order wins over unreliable clocks. Incremental scans refresh indexed
-titles without reparsing unchanged rollouts. Commentary
+record order wins over unreliable clocks. Partial rollouts retain an order proof
+(native IDs, source update clock and a content digest only). Incremental scans
+and batch collection place older-only messages at their shared anchors. If
+timestamps tie, a deterministic content rank breaks the tie, not filenames or
+file mtimes. Without a native edit clock this is a deterministic choice, not proof
+of which edit a human made last. Indexed title/model changes update the matching
+archive rows without reparsing the rollouts. Commentary
 maps to visible progress; analysis channels, private subagent sessions,
 inter-agent routing, tool/system traffic, and compaction summaries are excluded.
 Supported message and event payloads explicitly marked `visibility: hidden` are
 excluded before mirror reconciliation. Visible payload markers are retained.
-Known bootstrap wrappers are filtered at the start of a message. A plain
+Only complete reserved bootstrap wrappers are filtered. A plain
 `# AGENTS.md` heading alone does not establish hidden context, so ordinary user
 messages with that heading are retained. An explicitly selected file or tree
-does not inspect an unrelated default Codex home or its SQLite index.
+does not inspect an unrelated default Codex home or its SQLite index. A standalone
+exported JSONL outside a native sessions tree does not authorize a sibling index.
+Selecting the containing directory explicitly does.
 
 OpenCode retains message IDs and available native message or part modification
 times, uses v2's native `seq` order, and reads large SQLite archives in bounded
-session batches. It excludes synthetic, ignored, hidden, tool, and system content.
+session batches within one read-only SQLite transaction across the entire import.
+An explicit `opencode.db` includes its live WAL. Current and legacy JSON layouts
+are combined, with current files preferred when session IDs overlap. Session,
+message and part IDs/parent links are checked before dependent reads. A symlink
+is not an alternative source of transcript content. Per-file archive rows,
+revisions, message IDs, sequence evidence and success checkpoint commit together.
+A damaged unit remains retryable; independently committed conversation IDs
+appear in the import result. It excludes synthetic, ignored, hidden, tool, and system content.
 Unmarked reasoning never enters the archive. Thinking summaries require explicit
 `visibility: ui`, so hidden reasoning is not exposed for containing readable text.
 

@@ -35,7 +35,7 @@ import type {
 } from '../types/index.ts';
 import {
   runAdapter,
-  readUtf8,
+  readUtf8, checkedDatabase, checkedSource, hidden,
   textPart,
   thinkingPart,
   toolCallPart,
@@ -47,17 +47,19 @@ import {
 // AI Memory: Node 24's built-in SQLite, opened read-only; no native addon.
 import { DatabaseSync } from 'node:sqlite';
 interface SqliteDb {
+  exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;
 }
 interface SqliteStatement {
+  iterate(...params: unknown[]): Iterable<unknown>;
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown;
 }
 
 
 const openDb = (path: string): SqliteDb =>
-  new DatabaseSync(path, { readOnly: true }) as unknown as SqliteDb;
+  new DatabaseSync(checkedDatabase(path), { readOnly: true }) as unknown as SqliteDb;
 
 
 // OpenCode storage structures
@@ -81,6 +83,7 @@ interface SessionInfo {
 }
 
 interface MessageInfo {
+  visibility?: string; synthetic?: boolean; ignored?: boolean;
   id: string;
   sessionID: string;
   role: string;
@@ -146,52 +149,30 @@ interface SessionRef {
  * Deduplicates sessions that appear in both layouts (prefers new layout).
  */
 async function enumerateSessionRefs(basePath: string): Promise<SessionRef[]> {
-  const refs: SessionRef[] = [];
-  const seenIds = new Set<string>();
-
-  // Enumerate new layout first (preferred)
-  const newSessionDir = join(basePath, 'storage', 'session');
-  try {
-    const projectIds = await readdir(newSessionDir);
-    for (const projectId of projectIds) {
-      const projectPath = join(newSessionDir, projectId);
-      try {
-        const projectStats = await stat(projectPath);
-        if (!projectStats.isDirectory()) continue;
-        const sessionFiles = await readdir(projectPath);
-        for (const f of sessionFiles) {
-          if (f.startsWith('ses_') && f.endsWith('.json')) {
-            const sessionId = f.replace('.json', '');
-            seenIds.add(sessionId);
-            refs.push({ path: join(projectPath, f), layout: 'new' });
-          }
-        }
-      } catch { /* skip */ }
+  const refs = new Map<string, SessionRef>();
+  for (const layout of ['new', 'old'] as const) {
+    const root = join(basePath, layout === 'new' ? 'storage/session' : 'project');
+    for (const project of await optionalEntries(root)) {
+      if (!project.isDirectory()) continue;
+      const dir = layout === 'new' ? join(root, project.name) : join(root, project.name, 'storage/session/info');
+      for (const entry of await optionalEntries(dir)) {
+        if (!entry.name.startsWith('ses_') || !entry.name.endsWith('.json') || refs.has(entry.name)) continue;
+        const path = join(dir, entry.name);
+        checkedSource(path);
+        if (entry.isFile()) refs.set(entry.name, { path, layout, projectName: project.name });
+      }
     }
-  } catch { /* no new layout */ }
+  }
+  return [...refs.values()];
+}
 
-  // Enumerate old layout (skip sessions already seen in new layout)
-  const oldProjectDir = join(basePath, 'project');
+async function optionalEntries(dir: string) {
   try {
-    const projects = await readdir(oldProjectDir);
-    for (const projectName of projects) {
-      const infoDir = join(oldProjectDir, projectName, 'storage/session/info');
-      try {
-        const sessionFiles = await readdir(infoDir);
-        for (const f of sessionFiles) {
-          if (f.startsWith('ses_') && f.endsWith('.json')) {
-            const sessionId = f.replace('.json', '');
-            if (!seenIds.has(sessionId)) {
-              seenIds.add(sessionId);
-              refs.push({ path: join(infoDir, f), layout: 'old', projectName });
-            }
-          }
-        }
-      } catch { /* skip */ }
-    }
-  } catch { /* no old layout */ }
-
-  return refs;
+    return (await readdir(checkedSource(dir), { withFileTypes: true })).sort((a,b) => a.name.localeCompare(b.name));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
 }
 
 // Detect which layout is being used
@@ -266,6 +247,8 @@ const adapter: Adapter = {
   },
 
   async parse(path: string, opts?: ParseOptions): Promise<Conversation[]> {
+    if (basename(path) === 'opencode.db' && (await stat(checkedSource(path))).isFile())
+      return parseSqliteLayout(dirname(path), opts);
     if (basename(path).startsWith('ses_') && path.endsWith('.json')) {
       const directory = dirname(path);
       const sessionDir = dirname(directory);
@@ -287,17 +270,15 @@ const adapter: Adapter = {
       const conversation = await parseSingleSession(basePath, ref, opts);
       return conversation ? [conversation] : [];
     }
-    const layout = await detectLayout(path);
-    
-    if (layout === 'sqlite') {
-      return parseSqliteLayout(path, opts);
-    } else if (layout === 'new') {
-      return parseNewLayout(path, opts);
-    } else if (layout === 'old') {
-      return parseOldLayout(path, opts);
+    checkedSource(path);
+    if (existsSync(join(path, 'opencode.db'))) return parseSqliteLayout(path, opts);
+    const conversations: Conversation[] = [];
+    for (const ref of await enumerateSessionRefs(path)) {
+      const conv = await parseSingleSession(path, ref, opts);
+      if (conv) conversations.push(conv);
     }
-    
-    return [];
+    return conversations.sort((a, b) => b.createdAt - a.createdAt || (a.externalId ?? '').localeCompare(b.externalId ?? ''));
+
   },
 
   supportsIncremental: true,
@@ -469,32 +450,34 @@ function tableExists(db: SqliteDb, name: string): boolean {
  * Parse all conversations from the SQLite layout.
  */
 async function parseSqliteLayout(basePath: string, opts?: ParseOptions): Promise<Conversation[]> {
-  const conversations: Conversation[] = [];
-  let cursor: unknown = undefined;
-  do {
-    const result = await parseSqliteStream(basePath, { ...opts, batchSize: 500, cursor });
-    conversations.push(...result.conversations);
-    if (result.done) break;
-    cursor = result.cursor;
-  } while (true);
-  return conversations;
+  return withSnapshot(basePath, db => {
+    const conversations: Conversation[] = [];
+    let cursor: unknown;
+    do {
+      const page = sqlitePage(db, { ...opts, batchSize: 256, cursor });
+      conversations.push(...page.conversations);
+      if (page.done) break;
+      cursor = page.cursor;
+    } while (true);
+    return conversations;
+  });
 }
 
-/**
- * Parse conversations from SQLite in batches using LIMIT/OFFSET.
- */
-async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise<ParseStreamResult> {
-  if (!openDb) {
-    return { conversations: [], done: true };
-  }
-
-  const dbPath = join(basePath, 'opencode.db');
-  const batchSize = Math.max(1, Math.min(opts?.batchSize ?? 25, 500));
-  const cursor = opts?.cursor as { offset: number } | undefined;
-  const offset = cursor?.offset ?? 0;
-
-  const db = openDb(dbPath);
+function withSnapshot<T>(basePath: string, read: (db: SqliteDb) => T): T {
+  const db = openDb(join(basePath, 'opencode.db'));
   try {
+    db.exec('BEGIN');
+    return read(db);
+  } finally { db.close(); } // close releases the read-only transaction
+}
+
+async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise<ParseStreamResult> {
+  return withSnapshot(basePath, db => sqlitePage(db, opts));
+}
+
+function sqlitePage(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
+    const batchSize = Math.max(1, Math.min(opts?.batchSize ?? 25, 500));
+    const offset = (opts?.cursor as {offset: number} | undefined)?.offset ?? 0;
     // OpenCode 2.x replaced the v1 session/message/part tables with session_v2
     // + session_message (typed, event-sourced rows). Prefer the new schema when
     // present; a migrated database may still carry the v1 tables.
@@ -548,8 +531,8 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
     const messageRows = db.prepare(
       `SELECT id, session_id, time_created, time_updated, data
        FROM message WHERE session_id IN (${placeholders})
-       ORDER BY session_id, time_created`
-    ).all(...sessionIds) as SqliteMessageRow[];
+       ORDER BY session_id, time_created, id`
+    ).iterate(...sessionIds) as Iterable<SqliteMessageRow>;
 
     // Group messages by session
     const messagesBySession = new Map<string, SqliteMessageRow[]>();
@@ -563,7 +546,7 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
     }
 
     // Load parts for all messages
-    const messageIds = messageRows.map(r => r.id);
+    const messageIds = Array.from(messagesBySession.values()).flatMap(rows => rows.map(r => r.id));
     const partsByMessage = new Map<string, SqlitePartRow[]>();
     if (messageIds.length > 0) {
       // Process in chunks to avoid SQLite variable limit
@@ -575,7 +558,7 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
           `SELECT id, message_id, session_id, time_created, time_updated, data
            FROM part WHERE message_id IN (${ph})
            ORDER BY message_id, id`
-        ).all(...chunk) as SqlitePartRow[];
+        ).iterate(...chunk) as Iterable<SqlitePartRow>;
 
         for (const row of partRows) {
           let list = partsByMessage.get(row.message_id);
@@ -612,9 +595,6 @@ async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise
       cursor: done ? undefined : { offset: offset + batchSize },
       done,
     };
-  } finally {
-    db.close();
-  }
 }
 
 /**
@@ -633,7 +613,9 @@ function buildSqliteConversation(
     try {
       const msgData = JSON.parse(msgRow.data);
       const role = msgData.role;
-      if (typeof role !== 'string') continue;
+      if (msgData.sessionID !== undefined && msgData.sessionID !== session.id) throw new Error('Invalid message parent');
+      if (msgData.id !== undefined && msgData.id !== msgRow.id) throw new Error('Invalid message identity');
+      if (typeof role !== 'string' || hidden(msgData) || !['user','assistant'].includes(mapRole(role))) continue;
 
       // Reconstruct parts from the part table
       const partRows = partsByMessage.get(msgRow.id) ?? [];
@@ -642,12 +624,15 @@ function buildSqliteConversation(
       for (const partRow of partRows) {
         try {
           const partData = JSON.parse(partRow.data);
+          if (partRow.session_id !== session.id || (partData.sessionID !== undefined && partData.sessionID !== session.id)
+              || (partData.messageID !== undefined && partData.messageID !== msgRow.id)
+              || (partData.id !== undefined && partData.id !== partRow.id)) throw new Error('Invalid part parent');
           // The data blob stores type/text/tool/state etc. directly
           parts.push({
             id: partRow.id,
             messageID: msgRow.id,
             sessionID: msgRow.session_id,
-            type: partData.type ?? 'text',
+            type: partData.type,
             text: partData.text,
             updatedAt: latestUpdate(partData.time?.updated, partRow.time_updated),
             visibility: partData.visibility,
@@ -780,7 +765,7 @@ function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResu
     `SELECT id, session_id, type, seq, time_created, time_updated, data
      FROM session_message WHERE session_id IN (${placeholders})
      ORDER BY session_id, seq`
-  ).all(...sessionIds) as SqliteV2MessageRow[];
+  ).iterate(...sessionIds) as Iterable<SqliteV2MessageRow>;
 
   const messagesBySession = new Map<string, SqliteV2MessageRow[]>();
   for (const row of messageRows) {
@@ -819,7 +804,9 @@ function buildSqliteV2Conversation(
     } catch (error) {
       throw error;
     }
-    if (data.visibility === 'hidden' || data.ignored === true) continue;
+    if ((data.sessionID !== undefined && data.sessionID !== session.id) ||
+        (data.id !== undefined && data.id !== row.id)) throw new Error('Invalid message parent');
+    if (hidden(data)) continue;
     const type = row.type || data.type;
     const createdAt = data.time?.created ?? row.time_created;
     const updatedAt = latestUpdate(data.time?.updated, row.time_updated);
@@ -1003,6 +990,9 @@ async function parseSingleSession(
 ): Promise<Conversation | null> {
   const sessionContent = await readUtf8(ref.path);
   const session: SessionInfo = JSON.parse(sessionContent);
+  if (session.id !== basename(ref.path, '.json') ||
+      (ref.layout === 'new' && session.projectID !== undefined && session.projectID !== basename(dirname(ref.path))))
+    throw new Error('Invalid session identity');
 
   // Apply time filter
   if (opts?.since) {
@@ -1019,13 +1009,13 @@ async function parseSingleSession(
     const storageDir = join(basePath, 'storage');
     const messageDir = join(storageDir, 'message');
     const partDir = join(storageDir, 'part');
-    messages = await loadMessagesNew(session.id, messageDir, partDir, opts);
+    messages = await loadMessages(session.id, messageDir, partDir, opts);
     workspace = session.directory;
   } else {
     const projectPath = join(basePath, 'project', ref.projectName!);
     const sessionMessageDir = join(projectPath, 'storage/session/message');
     const sessionPartDir = join(projectPath, 'storage/session/part');
-    messages = await loadMessagesOld(session.id, sessionMessageDir, sessionPartDir, opts);
+    messages = await loadMessages(session.id, sessionMessageDir, join(sessionPartDir, session.id), opts);
     workspace = session.directory || projectNameToPath(ref.projectName!);
   }
 
@@ -1088,122 +1078,7 @@ function buildConversation(
   return conv;
 }
 
-/**
- * Parse NEW layout (v1.1.25+):
- *   storage/session/<project-id>/<session-id>.json
- *   storage/message/<session-id>/<msg-id>.json
- *   storage/part/<msg-id>/<part-id>.json
- */
-async function parseNewLayout(basePath: string, opts?: ParseOptions): Promise<Conversation[]> {
-  const conversations: Conversation[] = [];
-  const storageDir = join(basePath, 'storage');
-  const sessionDir = join(storageDir, 'session');
-  const messageDir = join(storageDir, 'message');
-  const partDir = join(storageDir, 'part');
-
-  try {
-    // Iterate over project directories in storage/session/
-    const projectIds = await readdir(sessionDir);
-
-    for (const projectId of projectIds) {
-      const projectPath = join(sessionDir, projectId);
-      const projectStats = await stat(projectPath);
-      if (!projectStats.isDirectory()) continue;
-
-      try {
-        const sessionFiles = await readdir(projectPath);
-
-        for (const sessionFile of sessionFiles) {
-          if (!sessionFile.startsWith('ses_') || !sessionFile.endsWith('.json')) {
-            continue;
-          }
-
-          const sessionPath = join(projectPath, sessionFile);
-          const sessionContent = await readUtf8(sessionPath);
-          const session: SessionInfo = JSON.parse(sessionContent);
-
-          // Apply time filter
-          if (opts?.since) {
-            const lastModified = session.time.updated ?? session.time.created;
-            if (session.time.created < opts.since && lastModified < opts.since) {
-              continue;
-            }
-          }
-
-          // Load messages for this session (new layout)
-          const messages = await loadMessagesNew(session.id, messageDir, partDir, opts);
-
-          const conv: Conversation = {
-            externalId: session.id,
-            title: session.title || undefined,
-            createdAt: session.time.created,
-            updatedAt: session.time.updated,
-            workspace: session.directory,
-            messages,
-            metadata: {
-              version: session.version,
-              slug: session.slug,
-              parentId: session.parentID,
-              projectId: session.projectID,
-            },
-          };
-
-          // Calculate totals
-          let tokensIn = 0;
-          let tokensOut = 0;
-          let cost = 0;
-          let model: string | undefined;
-          let provider: string | undefined;
-
-          for (const msg of messages) {
-            if (msg.tokens) {
-              if (msg.role === 'user') tokensIn += msg.tokens;
-              else tokensOut += msg.tokens;
-            }
-            if (msg.costUsd) cost += msg.costUsd;
-            if (msg.model && !model) model = msg.model;
-            if (!provider && msg.metadata && typeof msg.metadata.provider === 'string') {
-              provider = msg.metadata.provider;
-            }
-          }
-
-          if (tokensIn > 0) conv.tokensIn = tokensIn;
-          if (tokensOut > 0) conv.tokensOut = tokensOut;
-          if (cost > 0) conv.costUsd = cost;
-          if (model) conv.model = model;
-          if (provider) conv.provider = provider;
-
-          conversations.push(conv);
-
-          if (opts?.limit && conversations.length >= opts.limit) {
-            break;
-          }
-        }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw err;
-        }
-        continue;
-      }
-
-      if (opts?.limit && conversations.length >= opts.limit) {
-        break;
-      }
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
-  }
-
-  conversations.sort((a, b) => b.createdAt - a.createdAt);
-  return conversations;
-}
-
-/**
- * Load messages for NEW layout
- */
-async function loadMessagesNew(
+async function loadMessages(
   sessionId: string,
   messageDir: string,
   partDir: string,
@@ -1213,7 +1088,7 @@ async function loadMessagesNew(
   const messages: Message[] = [];
 
   try {
-    const messageFiles = await readdir(sessionMessagePath);
+    const messageFiles = (await optionalEntries(sessionMessagePath)).map(entry => entry.name);
 
     for (const messageFile of messageFiles) {
       if (!messageFile.startsWith('msg_') || !messageFile.endsWith('.json')) {
@@ -1225,10 +1100,13 @@ async function loadMessagesNew(
         const messageContent = await readUtf8(messagePath);
         if (!messageContent.trim()) throw new Error('Empty source message file');
         const msgInfo: MessageInfo = JSON.parse(messageContent);
+        if (msgInfo.id !== basename(messageFile, '.json') || msgInfo.sessionID !== sessionId)
+          throw new Error('Invalid message parent or identity');
+        if (hidden(msgInfo) || !['user','assistant'].includes(mapRole(msgInfo.role))) continue;
 
         // Load parts - in new layout: part/<msg-id>/<part-id>.json
         const msgPartDir = join(partDir, msgInfo.id);
-        const parts = await loadPartsNew(msgPartDir, opts);
+        const parts = await loadParts(msgPartDir, sessionId, msgInfo.id);
 
         const textParts = parts.filter(p => p.type === 'text' && p.text && !p.synthetic && !p.ignored && p.visibility !== 'hidden');
         const content = textParts.map(p => p.text).join('');
@@ -1272,9 +1150,7 @@ async function loadMessagesNew(
       }
     }
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
+    throw err;
   }
 
   messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -1284,11 +1160,11 @@ async function loadMessagesNew(
 /**
  * Load parts for NEW layout
  */
-async function loadPartsNew(msgPartDir: string, opts?: ParseOptions): Promise<PartInfo[]> {
+async function loadParts(msgPartDir: string, sessionId: string, messageId: string): Promise<PartInfo[]> {
   const parts: PartInfo[] = [];
 
   try {
-    const partFiles = await readdir(msgPartDir);
+    const partFiles = (await optionalEntries(msgPartDir)).map(entry => entry.name);
 
     for (const partFile of partFiles) {
       if (!partFile.startsWith('prt_') || !partFile.endsWith('.json')) {
@@ -1300,128 +1176,21 @@ async function loadPartsNew(msgPartDir: string, opts?: ParseOptions): Promise<Pa
         const partContent = await readUtf8(partPath);
         if (!partContent.trim()) throw new Error('Empty source part file');
         const part: PartInfo = JSON.parse(partContent);
+        if (part.id !== basename(partFile, '.json') ||
+            (part.messageID !== undefined && part.messageID !== messageId) ||
+            (part.sessionID !== undefined && part.sessionID !== sessionId))
+          throw new Error('Invalid part parent or identity');
         parts.push(part);
       } catch (partErr) {
         throw partErr;
       }
     }
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
+    throw err;
   }
 
   parts.sort((a, b) => a.id.localeCompare(b.id));
   return parts;
-}
-
-/**
- * Parse OLD layout (legacy):
- *   project/<project-name>/storage/session/info/<session-id>.json
- */
-async function parseOldLayout(basePath: string, opts?: ParseOptions): Promise<Conversation[]> {
-  const projectDir = join(basePath, 'project');
-  const conversations: Conversation[] = [];
-
-  try {
-    const projects = await readdir(projectDir);
-
-    for (const projectName of projects) {
-      const projectPath = join(projectDir, projectName);
-      const projectStats = await stat(projectPath);
-      if (!projectStats.isDirectory()) continue;
-
-      const sessionInfoDir = join(projectPath, 'storage/session/info');
-      const sessionMessageDir = join(projectPath, 'storage/session/message');
-      const sessionPartDir = join(projectPath, 'storage/session/part');
-
-      const workspace = projectNameToPath(projectName);
-
-      try {
-        const sessionFiles = await readdir(sessionInfoDir);
-
-        for (const sessionFile of sessionFiles) {
-          if (!sessionFile.startsWith('ses_') || !sessionFile.endsWith('.json')) {
-            continue;
-          }
-
-          const sessionPath = join(sessionInfoDir, sessionFile);
-          const sessionContent = await readUtf8(sessionPath);
-          const session: SessionInfo = JSON.parse(sessionContent);
-
-          if (opts?.since) {
-            const lastModified = session.time.updated ?? session.time.created;
-            if (session.time.created < opts.since && lastModified < opts.since) {
-              continue;
-            }
-          }
-
-          const messages = await loadMessagesOld(session.id, sessionMessageDir, sessionPartDir, opts);
-
-          const conv: Conversation = {
-            externalId: session.id,
-            title: session.title || undefined,
-            createdAt: session.time.created,
-            updatedAt: session.time.updated,
-            workspace: session.directory || workspace,
-            messages,
-            metadata: {
-              version: session.version,
-              parentId: session.parentID,
-              projectId: projectName,
-            },
-          };
-
-          let tokensIn = 0;
-          let tokensOut = 0;
-          let cost = 0;
-          let model: string | undefined;
-          let provider: string | undefined;
-
-          for (const msg of messages) {
-            if (msg.tokens) {
-              if (msg.role === 'user') tokensIn += msg.tokens;
-              else tokensOut += msg.tokens;
-            }
-            if (msg.costUsd) cost += msg.costUsd;
-            if (msg.model && !model) model = msg.model;
-            if (!provider && msg.metadata && typeof msg.metadata.provider === 'string') {
-              provider = msg.metadata.provider;
-            }
-          }
-
-          if (tokensIn > 0) conv.tokensIn = tokensIn;
-          if (tokensOut > 0) conv.tokensOut = tokensOut;
-          if (cost > 0) conv.costUsd = cost;
-          if (model) conv.model = model;
-          if (provider) conv.provider = provider;
-
-          conversations.push(conv);
-
-          if (opts?.limit && conversations.length >= opts.limit) {
-            break;
-          }
-        }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw err;
-        }
-        continue;
-      }
-
-      if (opts?.limit && conversations.length >= opts.limit) {
-        break;
-      }
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return [];
-    }
-    throw err;
-  }
-
-  conversations.sort((a, b) => b.createdAt - a.createdAt);
-  return conversations;
 }
 
 /**
@@ -1431,133 +1200,6 @@ async function parseOldLayout(basePath: string, opts?: ParseOptions): Promise<Co
 function projectNameToPath(projectName: string): string {
   if (projectName === 'global') return '~';
   return '/' + projectName.replace(/-/g, '/');
-}
-
-/**
- * Load messages for OLD layout
- */
-async function loadMessagesOld(
-  sessionId: string,
-  messageDir: string,
-  partDir: string,
-  opts?: ParseOptions
-): Promise<Message[]> {
-  const sessionMessagePath = join(messageDir, sessionId);
-  const sessionPartPath = join(partDir, sessionId);
-  const messages: Message[] = [];
-
-  try {
-    const messageFiles = await readdir(sessionMessagePath);
-
-    for (const messageFile of messageFiles) {
-      if (!messageFile.startsWith('msg_') || !messageFile.endsWith('.json')) {
-        continue;
-      }
-
-      const messagePath = join(sessionMessagePath, messageFile);
-      try {
-        const messageContent = await readUtf8(messagePath);
-        if (!messageContent.trim()) throw new Error('Empty source message file');
-        const msgInfo: MessageInfo = JSON.parse(messageContent);
-
-        // Load parts for this message
-        const parts = await loadPartsOld(sessionId, msgInfo.id, sessionPartPath, opts);
-
-        // Combine text parts into content
-        const textParts = parts.filter(p => p.type === 'text' && p.text && !p.synthetic && !p.ignored && p.visibility !== 'hidden');
-        const content = textParts.map(p => p.text).join('');
-
-        // Extract tool calls if requested
-        let toolCalls: ToolCall[] | undefined;
-        if (opts?.includeTools !== false) {
-          const toolParts = parts.filter(p => p.type === 'tool' && p.tool);
-          if (toolParts.length > 0) {
-            toolCalls = toolParts.map(p => ({
-              toolName: p.tool!,
-              input: p.state?.input,
-              output: p.state?.output ?? p.state?.error,
-              status: mapToolStatus(p.state?.status),
-            }));
-          }
-        }
-
-        const tokens = (msgInfo.tokens?.input || 0) + (msgInfo.tokens?.output || 0) + (msgInfo.tokens?.reasoning || 0);
-        const canonParts = buildCanonParts(parts, msgInfo.role, opts?.includeTools !== false) ?? textOnlyParts(content);
-
-        const msg: Message = {
-          role: mapRole(msgInfo.role),
-          content: content || projectPartsToContent(canonParts),
-          parts: canonParts,
-          createdAt: msgInfo.time.created,
-          updatedAt: msgInfo.time.updated,
-          model: msgInfo.modelID || undefined,
-          tokens: tokens > 0 ? tokens : undefined,
-          costUsd: msgInfo.cost || undefined,
-          toolCalls,
-          metadata: {
-            id: msgInfo.id,
-            parentId: msgInfo.parentID,
-            provider: msgInfo.providerID,
-            agent: msgInfo.agent,
-            summaryTitle: msgInfo.summary?.title,
-          },
-        };
-
-        messages.push(msg);
-      } catch (msgErr) {
-        throw msgErr;
-      }
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
-  }
-
-  // Sort by created_at ascending (chronological)
-  messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-
-  return messages;
-}
-
-async function loadPartsOld(
-  sessionId: string,
-  messageId: string,
-  sessionPartPath: string,
-  opts?: ParseOptions
-): Promise<PartInfo[]> {
-  // Parts are in: part/<session-id>/<msg-id>/<part-id>.json
-  const messagePartDir = join(sessionPartPath, messageId);
-  const parts: PartInfo[] = [];
-
-  try {
-    const partFiles = await readdir(messagePartDir);
-
-    for (const partFile of partFiles) {
-      if (!partFile.startsWith('prt_') || !partFile.endsWith('.json')) {
-        continue;
-      }
-
-      const partPath = join(messagePartDir, partFile);
-      try {
-        const partContent = await readUtf8(partPath);
-        if (!partContent.trim()) throw new Error('Empty source part file');
-        const part: PartInfo = JSON.parse(partContent);
-        parts.push(part);
-      } catch (partErr) {
-        throw partErr;
-      }
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
-  }
-
-  // Sort by ID (roughly chronological)
-  parts.sort((a, b) => a.id.localeCompare(b.id));
-
-  return parts;
 }
 
 /** Preserve reliable native edit times, without inventing an observed-time version. */

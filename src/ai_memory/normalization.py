@@ -243,6 +243,12 @@ def normalize_conversation(raw: dict, platform: str, account: str) -> dict:
             }
             if aliases:
                 suffix = group_id[len(native_id) :]
+                if mirror_id and mirror.get("metadata", {}).get("record", 0) < meta.get(
+                    "identityRecord", 0
+                ):
+                    # A fresh full parse and an earlier event-only import use
+                    # the same archival identity when the event came first.
+                    item["first_record_id"] = mirror_id + suffix
                 item["native_aliases"] = list(
                     dict.fromkeys(alias + suffix for alias in aliases if alias != native_id)
                 )

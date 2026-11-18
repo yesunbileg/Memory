@@ -1,7 +1,11 @@
 // Nonvisual worker integration: destination and namespace changes replay history.
 import assert from 'node:assert/strict';
 import { PROVIDERS } from '../providers/index.js';
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
 let settings = {
+  archiveId,
+  nativeHost,
   port: 41770,
   token: 'synthetic-private-ingest-token',
   account: 'one',
@@ -10,7 +14,7 @@ let settings = {
 };
 let status = {},
   listener,
-  archive = 'logical-archive-one';
+  archive = archiveId;
 const states = [];
 globalThis.chrome = {
   storage: {
@@ -42,16 +46,12 @@ globalThis.chrome = {
     setBadgeBackgroundColor: async () => {},
   },
 };
-globalThis.fetch = async () =>
-  new Response(
-    JSON.stringify({
-      status: 'ok',
-      service: 'ai-memory',
-      schema: 1,
-      archive_id: 'same-location',
-      ...(archive ? { archive_instance_id: archive } : {}),
-    }),
-  );
+chrome.runtime.sendNativeMessage = async () => ({
+  status: 'ok',
+  service: 'ai-memory',
+  schema: 2,
+  archive_instance_id: archive,
+});
 PROVIDERS.chatgpt.sync = async ({ state }) => {
   states.push(structuredClone(state));
   return { state: { watermark: 123 }, conversations: 0 };
@@ -72,7 +72,10 @@ assert.deepEqual(
   { watermark: 123 },
   'matching logical archive reuses acknowledged state',
 );
-archive = 'logical-archive-two';
+archive = 'b'.repeat(32);
+await run();
+assert.equal(states.length, 2, 'wrong archive must not read any provider');
+settings = { ...settings, archiveId: archive, nativeHost: 'org.ai_memory.archive_' + archive };
 await run();
 assert.deepEqual(states[2], {}, 'new database at identical receiver address must replay');
 settings.account = 'two';
@@ -89,7 +92,7 @@ assert.deepEqual(
 archive = null;
 const legacyProbe = await new Promise((resolve) => listener({ type: 'checkApi' }, {}, resolve));
 assert.equal(legacyProbe.ok, false, 'UI connection checks must reflect capture eligibility');
-assert.equal(legacyProbe.code, 'incompatible_server');
+assert.equal(legacyProbe.code, 'archive_changed');
 await run();
 await run();
 assert.equal(
@@ -97,7 +100,7 @@ assert.equal(
   5,
   'unverifiable legacy receiver must not read providers or loop continuations',
 );
-assert.equal(status.chatgpt.lastErrorCode, 'incompatible_server');
+assert.equal(status.chatgpt.lastErrorCode, 'archive_changed');
 assert.equal(status.chatgpt.continuationPending, false);
 console.log(
   'PASS authenticated destination/account checkpoint scope and conservative legacy replay',

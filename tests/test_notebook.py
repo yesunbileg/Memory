@@ -142,6 +142,23 @@ async def test_sdk_terminal_processing_failure_is_distinct_from_timeout(failure,
         await adapter.close()
 
 
+def offline_http(monkeypatch, handler):
+    """Mock the transport and prevent ambient proxies from being constructed before it."""
+    import httpx
+
+    for name in (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+
+
 async def test_real_sdk_post_answer_failure_is_content_safe(monkeypatch, caplog, capsys):
     import io
     import json
@@ -177,8 +194,7 @@ async def test_real_sdk_post_answer_failure_is_content_safe(monkeypatch, caplog,
         logging.getLogger("httpcore.http11").debug("%s [%s, %s]", transcript, cookie, csrf)
         return httpx.Response(200, content=f")]}}'\n{len(chunk)}\n{chunk}\n".encode())
 
-    transport = httpx.MockTransport(simulated_google)
-    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    offline_http(monkeypatch, simulated_google)
     auth = AuthTokens(cookies={"SID": cookie}, csrf_token=csrf, session_id="offline")
     adapter = NotebookLMAdapter(
         "synthetic-notebook",
@@ -416,8 +432,7 @@ async def test_real_sdk_file_upload_query_and_delete_with_simulated_http(tmp_pat
             raise AssertionError(f"Unexpected offline request: {request.method} {request.url.path}")
         return httpx.Response(200, content=rpc_response(method, data).encode())
 
-    transport = httpx.MockTransport(simulated_google)
-    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    offline_http(monkeypatch, simulated_google)
     auth = AuthTokens(
         cookies={"SID": "synthetic-offline"}, csrf_token="offline", session_id="offline"
     )

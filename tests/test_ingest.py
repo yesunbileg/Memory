@@ -400,7 +400,9 @@ def test_connection_probe_rejects_unexpected_payload_without_archiving(running_s
     assert not database.exists()
 
 
-def test_real_worker_auth_helper_connects_to_loopback_receiver_without_ingesting(running_server):
+def test_real_worker_refuses_even_a_working_legacy_receiver_before_sending_credentials(
+    running_server,
+):
     server, database = running_server
     script = """
 import { checkConnection } from './vendor/hstry/extension/worker-auth.js';
@@ -418,12 +420,12 @@ process.stdout.write(JSON.stringify({accepted, rejected}));
         timeout=10,
     )
     data = json.loads(result.stdout)
-    assert data["accepted"]["ok"] is True
+    assert data["accepted"] == data["rejected"]
+    assert data["accepted"]["ok"] is False
     assert data["rejected"]["ok"] is False
-    assert data["rejected"]["code"] == "unauthorized"
+    assert data["rejected"]["code"] == "legacy_pairing"
     assert TOKEN not in result.stdout + result.stderr
-    assert data["accepted"]["archiveId"]
-    assert archived(database) == []
+    assert not database.exists()
 
 
 def test_unchanged_replay_receipt_tracks_actual_revision(running_server):

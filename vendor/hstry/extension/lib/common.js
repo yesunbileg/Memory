@@ -40,7 +40,11 @@ const MAX_BACKOFF_MS = 60_000;
  */
 export async function fetchJson(url, init = {}, { retries = 5, baseDelayMs = 1000 } = {}) {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, { credentials: 'include', ...init });
+    const res = await fetch(url, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(20_000),
+      ...init,
+    });
 
     if (res.status === 401 || res.status === 403) {
       throw new NotLoggedInError(new URL(url).hostname);

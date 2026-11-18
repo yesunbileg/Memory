@@ -7,6 +7,7 @@ small, lossless input contract. No personal paths are inspected implicitly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -28,12 +29,16 @@ def _vendor_root() -> Path:
     raise RuntimeError("Vendored hstry adapters are missing; reinstall AI Memory")
 
 
-def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
-    """Find rollouts without following symlinks, preferring plain mirrors.
+def selected_source(path: Path) -> Path:
+    selected = Path(path).expanduser().absolute()
+    canonical = selected.resolve(strict=True)
+    if canonical != Path(os.path.abspath(selected)):
+        raise ValueError("Selected source must not traverse symlinks")
+    return canonical
 
-    Direct batch retries match the adapter's depth bound. Incremental archive
-    imports pass no bound to retain their recursive explicit-source behavior.
-    """
+
+def codex_rollout_files(path: Path, *, max_depth: int | None = None) -> list[Path]:
+    """Find rollouts to the same depth for direct, incremental and retry paths."""
 
     def fail_listing(error):
         raise error
@@ -63,22 +68,25 @@ def codex_rollout_files(path: Path, *, max_depth: int | None = 4) -> list[Path]:
                 ):
                     files.add(candidate)
     # Match hstry's preference when a rollout exists in both encodings.
-    files = {f for f in files if not (f.name.endswith(".jsonl.zst") and f.with_suffix("").exists())}
+    files = {f for f in files if not (f.name.endswith(".jsonl.zst") and f.with_suffix("") in files)}
     return sorted(files)
 
 
-def codex_thread_metadata(path: Path) -> dict[str, dict]:
+def codex_thread_metadata(path: Path, external_id: str | None = None) -> dict[str, dict]:
     """Read only the selected source's optional title index, never CODEX_HOME."""
-    home = path.parent if path.name.endswith((".jsonl", ".jsonl.zst")) else path
+    home = None if path.name.endswith((".jsonl", ".jsonl.zst")) else path
     for candidate in (path, *path.parents):
         if candidate.name in {"sessions", "archived_sessions"}:
             home = candidate.parent
             break
+    if home is None:
+        return {}
     database = next(
         (
             home / f"state_{n}.sqlite"
             for n in range(128, 0, -1)
             if (home / f"state_{n}.sqlite").is_file()
+            and not (home / f"state_{n}.sqlite").is_symlink()
         ),
         None,
     )
@@ -86,14 +94,27 @@ def codex_thread_metadata(path: Path) -> dict[str, dict]:
         return {}
     # Match the adapter's optional-index fallback for absent/older/locked schemas.
     try:
-        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
-            rows = db.execute("SELECT id,title,model FROM threads WHERE title != ''").fetchall()
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            candidate = Path(str(database) + suffix)
+            if candidate.is_symlink():
+                return {}
+        with closing(
+            sqlite3.connect(selected_source(database).as_uri() + "?mode=ro", uri=True)
+        ) as db:
+            query = "SELECT id,title,model FROM threads"
+            rows = (
+                db.execute(query + " WHERE id=?", (external_id,))
+                if external_id is not None
+                else db.execute(query)
+            ).fetchall()
     except sqlite3.Error:
         return {}
     return {
         native_id: {"title": title, "model": model}
         for native_id, title, model in rows
-        if isinstance(native_id, str) and isinstance(title, str)
+        if isinstance(native_id, str)
+        and (title is None or isinstance(title, str))
+        and (model is None or isinstance(model, str))
     }
 
 
@@ -207,8 +228,9 @@ def _insert_missing_ids(order: list[str], older_ids: list[str]) -> list[str]:
 
 def _collect_codex_files(path: Path, account: str) -> list[dict]:
     conversations: list[dict] = []
+    index = codex_thread_metadata(path)
     for rollout in codex_rollout_files(path):
-        snapshot = collect("codex", rollout, account)
+        snapshot = collect("codex", rollout, account, _index=index)
         rank = _snapshot_rank(snapshot[0], rollout) if snapshot else None
         for conversation in snapshot:
             if rank is not None:
@@ -219,24 +241,23 @@ def _collect_codex_files(path: Path, account: str) -> list[dict]:
 
 def _snapshot_rank(conversation: dict, source_file: Path | None) -> tuple[str, int, str]:
     timestamp = conversation.get("updated_at") or conversation.get("created_at") or ""
-    mtime_ns = 0
-    filename = ""
-    if source_file is not None:
-        try:
-            stat = source_file.stat()
-            mtime_ns = stat.st_mtime_ns
-            filename = source_file.name
-        except OSError:
-            pass
-    return timestamp, mtime_ns, filename
+    # Wall-clock ties carry no source precedence. Break them by content, never
+    # by the rollout filename, filesystem mtime, or discovery/import order.
+    records = [
+        [m["native_id"], m["role"], m["text"], m.get("kind"), m.get("model")]
+        for m in conversation["messages"]
+    ]
+    return timestamp, len(records), hashlib.sha256(json.dumps(records).encode()).hexdigest()
 
 
-def collect(platform: str, path: Path, account: str = "local") -> list[dict]:
+def collect(
+    platform: str, path: Path, account: str = "local", *, _index: dict | None = None
+) -> list[dict]:
     """Parse an explicitly selected Codex file/tree or OpenCode storage tree."""
     platform = platform.lower()
     if platform not in {"codex", "opencode"}:
         raise ValueError(f"Unsupported collector platform: {platform}")
-    path = Path(path).expanduser().resolve(strict=True)
+    path = selected_source(path)
     if not isinstance(account, str) or not account:
         raise ValueError("account must be a nonempty string")
     node = shutil.which("node")
@@ -248,7 +269,13 @@ def collect(platform: str, path: Path, account: str = "local") -> list[dict]:
     result = subprocess.run(
         [node, "--disable-warning=ExperimentalWarning", str(adapter)],
         input=json.dumps(
-            {"method": "parse", "params": {"path": str(path), "opts": {"includeTools": False}}}
+            {
+                "method": "parse",
+                "params": {
+                    "path": str(path),
+                    "opts": {"includeTools": False, "skipThreadIndex": _index is not None},
+                },
+            }
         ),
         text=True,
         encoding="utf-8",
@@ -275,6 +302,11 @@ def collect(platform: str, path: Path, account: str = "local") -> list[dict]:
         raise RuntimeError(f"hstry {platform} parser failed; verify the selected source format")
     conversations = []
     for raw in parsed:
+        if _index is not None and platform == "codex":
+            row = _index.get(raw.get("externalId"), {})
+            for field in ("title", "model"):
+                if row.get(field):
+                    raw[field] = row[field]
         conversation = normalize_conversation(raw, platform, account)
         if platform == "codex":
             metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}

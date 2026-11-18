@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           version: 0.13.5
@@ -23,11 +25,45 @@ jobs:
       - run: uv sync --frozen --python 3.12 --extra login
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run format:check
-      - run: uv run --frozen --extra login python scripts/check.py
-      - run: uv run --frozen --extra login ai-memory demo --output data/ci-demo
-      - run: uv run --frozen --extra login python scripts/mcp_smoke.py --db data/ci-demo/conversations.sqlite
-      - run: uv run --frozen --extra login python scripts/package_extension.py
-      - run: uv build --wheel
+      - name: Ruff, pytest and Node offline tests
+        run: uv run --frozen --extra login python scripts/check.py
+      - name: Install locked Playwright Chromium
+        run: |
+          .venv/bin/python -m playwright install --with-deps chromium
+          .venv/bin/python - <<'PY' >> "$GITHUB_ENV"
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              print(f"CHROMIUM={p.chromium.executable_path}")
+          PY
+      - name: Chromium pages with a synthetic Chrome API bridge
+        run: .venv/bin/python scripts/extension_ui_check.py --browser-executable "$CHROMIUM"
+      - name: Installed MV3 extension toolbar in Chromium
+        run: xvfb-run -a .venv/bin/python scripts/extension_toolbar_check.py --browser-executable "$CHROMIUM"
+      - name: Build wheel, sdist and unpacked-extension ZIP
+        run: |
+          uv build
+          .venv/bin/python scripts/package_extension.py
+      - name: Install wheel into a fresh environment and call real stdio MCP outside checkout
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/runtime.txt"
+          uv venv --python 3.12 "$RUNNER_TEMP/wheel"
+          uv pip sync --python "$RUNNER_TEMP/wheel/bin/python" --require-hashes "$RUNNER_TEMP/runtime.txt"
+          uv pip install --python "$RUNNER_TEMP/wheel/bin/python" --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          wheel/bin/ai-memory demo --output wheel-demo
+          wheel/bin/python "$GITHUB_WORKSPACE/scripts/mcp_smoke.py" --db wheel-demo/conversations.sqlite
+      - name: Enforce new ZIP version and record same-run artifact provenance
+        env:
+          PREVIOUS: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          args=()
+          if [[ -n "$PREVIOUS" && "$PREVIOUS" != 0000000000000000000000000000000000000000 ]]; then
+            git worktree add --detach "$RUNNER_TEMP/previous" "$PREVIOUS"
+            .venv/bin/python "$RUNNER_TEMP/previous/scripts/package_extension.py" --output "$RUNNER_TEMP/previous.zip"
+            args+=(--previous-extension "$RUNNER_TEMP/previous.zip")
+          fi
+          .venv/bin/python scripts/release_record.py "${args[@]}" > dist/verification.json
+          cat dist/verification.json
       - uses: actions/upload-artifact@v4
         with:
           name: ai-memory-build

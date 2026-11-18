@@ -4,6 +4,13 @@ import {
   PROVIDERS,
   PROVIDER_CAPABILITIES,
   formatSyncBreakdown,
+  describeEffectivePlan,
+  captureOutcome,
+  statusForPairing,
+  enterToggles,
+  progressSemantics,
+  restoreControl,
+  friendlyError,
   formatTime,
   normalizeSettings,
   providerState,
@@ -31,6 +38,10 @@ let apiConnected = false;
 let current = DEFAULTS;
 let busy = false;
 let connectionCheck = 0;
+let since = 0;
+let generation = 0;
+let requestNotice = '';
+let displayScope = '';
 
 async function saveSettingsPatch(patch) {
   const { settings = {} } = await chrome.storage.local.get('settings');
@@ -67,6 +78,7 @@ function renderFilters() {
   for (const [key, label] of Object.entries(filterLabels)) {
     const active = Boolean(current.captureTypes[key]);
     const chip = document.createElement('button');
+    chip.id = `filter-${key}`;
     chip.type = 'button';
     chip.className = `filter-chip${active ? ' active' : ''}${key === 'recents' ? ' is-recents' : ''}`;
     chip.setAttribute('aria-pressed', String(active));
@@ -79,7 +91,13 @@ function renderFilters() {
 }
 
 async function render() {
-  const { settings = {}, status = {} } = await chrome.storage.local.get(['settings', 'status']);
+  const ticket = ++generation;
+  const { settings = {}, status: rawStatus } = await chrome.storage.local.get([
+    'settings',
+    'status',
+  ]);
+  if (ticket !== generation) return;
+  const focused = document.activeElement?.id;
   current = normalizeSettings(
     {
       ...DEFAULTS,
@@ -89,6 +107,13 @@ async function render() {
     DEFAULTS,
   );
 
+  const status = statusForPairing(rawStatus, current);
+  const key = JSON.stringify([current.archiveId, current.account]);
+  if (displayScope !== key) {
+    displayScope = key;
+    since = 0;
+    requestNotice = '';
+  }
   el('selection-summary').textContent =
     Object.entries(current.captureTypes)
       .filter(([, value]) => value)
@@ -97,7 +122,9 @@ async function render() {
   el('recents-note').textContent = current.captureTypes.recents
     ? 'Ordinary Recents included'
     : 'Ordinary Recents stay out';
-  el('schedule').textContent = `Every ${current.intervalMinutes}m`;
+  el('schedule').textContent = current.autoPaused
+    ? 'Automatic checks paused'
+    : `Every ${current.intervalMinutes}m`;
 
   renderFilters();
 
@@ -116,14 +143,6 @@ async function render() {
     if (entry?.running) anyRunning = true;
     const caps = PROVIDER_CAPABILITIES[id];
     const breakdown = formatSyncBreakdown(entry);
-    const hasTypes = Object.values(current.captureTypes).some(Boolean);
-    const canSyncSingle =
-      enabled &&
-      apiConnected &&
-      hasTypes &&
-      !entry?.running &&
-      !(id === 'gemini' && !current.captureTypes.recents);
-
     const card = document.createElement('article');
     card.className = `popup-provider${enabled ? '' : ' is-off'}`;
 
@@ -150,6 +169,9 @@ async function render() {
     if (state.tone === 'warning') detailEl.classList.add('warning-copy');
 
     const toggle = top.querySelector('input');
+    toggle.id = `toggle-${id}`;
+    toggle.setAttribute('role', 'switch');
+    enterToggles(toggle);
     toggle.checked = enabled;
     toggle.addEventListener('change', () => {
       saveSettingsPatch({ providers: { [id]: toggle.checked } });
@@ -160,6 +182,7 @@ async function render() {
     if (enabled && entry?.running) {
       const bar = document.createElement('div');
       bar.className = `progress-track${breakdown.percent === null ? ' indeterminate' : ''}`;
+      progressSemantics(bar, provider.name, breakdown.percent);
       const fill = document.createElement('div');
       fill.className = 'progress-fill';
       if (breakdown.percent !== null) fill.style.width = `${breakdown.percent}%`;
@@ -169,10 +192,7 @@ async function render() {
 
     const showMetaRow =
       enabled &&
-      (entry?.lastRunMs ||
-        breakdown.chips.length > 0 ||
-        canSyncSingle ||
-        entry?.lastErrorCode === 'not_logged_in');
+      (entry?.lastRunMs || breakdown.chips.length > 0 || entry?.lastErrorCode === 'not_logged_in');
     if (showMetaRow) {
       const meta = document.createElement('div');
       meta.className = 'popup-provider-meta';
@@ -198,24 +218,12 @@ async function render() {
       if (entry?.lastErrorCode === 'not_logged_in' && caps?.loginUrl) {
         const link = document.createElement('a');
         link.className = 'mini-action';
+        link.id = `signin-${id}`;
         link.href = caps.loginUrl;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         link.innerHTML = `Open site ${UI_ICONS.external}`;
         actions.appendChild(link);
-      } else if (canSyncSingle) {
-        const syncBtn = document.createElement('button');
-        syncBtn.type = 'button';
-        syncBtn.className = 'mini-action';
-        syncBtn.innerHTML = `${UI_ICONS.play} Sync`;
-        syncBtn.addEventListener('click', async () => {
-          el('notice').textContent = '';
-          const res = await chrome.runtime.sendMessage({ type: 'syncProvider', provider: id });
-          el('notice').textContent = res?.ok
-            ? `Syncing ${provider.name}…`
-            : (res?.error ?? 'Could not start sync.');
-        });
-        actions.appendChild(syncBtn);
       }
       meta.appendChild(actions);
       card.appendChild(meta);
@@ -224,29 +232,33 @@ async function render() {
     providersBox.appendChild(card);
   }
 
-  const hasProviders = Object.values(current.providers).some(Boolean);
-  const hasTypes = Object.values(current.captureTypes).some(Boolean);
-  const selected = hasProviders && hasTypes;
+  const plan = describeEffectivePlan(current.providers, current.captureTypes);
   const syncBtn = el('sync');
+  el('plan-hint').textContent = apiConnected && !plan.readyCount ? plan.summary : '';
+  syncBtn.disabled = busy || anyRunning || (apiConnected && !plan.readyCount);
   if (busy || anyRunning) {
-    syncBtn.innerHTML = `${UI_ICONS.refresh} ${busy ? 'Starting capture…' : 'Syncing in background…'}`;
+    syncBtn.innerHTML = `${UI_ICONS.refresh} Capture in progress…`;
   } else if (!apiConnected) {
     syncBtn.innerHTML = `Connect your computer ${UI_ICONS.arrowRight}`;
-  } else if (!hasProviders) {
-    syncBtn.textContent = 'Turn on a web source above';
-  } else if (!hasTypes) {
-    syncBtn.textContent = 'Choose at least one chat type';
   } else {
     syncBtn.innerHTML = `${UI_ICONS.play} Capture selected chats`;
   }
-  syncBtn.disabled = busy;
+  const outcome = captureOutcome(status, current.providers, since);
+  el('notice').textContent =
+    outcome || requestNotice || 'No local capture reported for the current sites.';
+  if (/^(toggle|filter|signin)-/.test(focused || '')) {
+    restoreControl(
+      focused,
+      focused.startsWith('signin-') ? focused.replace('signin-', 'toggle-') : 'settings',
+    );
+  } else if (focused === 'sync' && syncBtn.disabled) restoreControl(focused, 'settings');
 }
 
 async function checkApi() {
   const generation = ++connectionCheck;
-  const requested = { port: current.port, token: current.token };
+  const requested = current;
   el('api-dot').className = 'status-dot checking';
-  el('retry').disabled = true;
+  el('retry').setAttribute('aria-busy', 'true');
   let result;
   try {
     result = await chrome.runtime.sendMessage({ type: 'checkApi' });
@@ -255,7 +267,8 @@ async function checkApi() {
   }
   if (
     generation !== connectionCheck ||
-    requested.port !== current.port ||
+    requested.nativeHost !== current.nativeHost ||
+    requested.archiveId !== current.archiveId ||
     requested.token !== current.token
   )
     return false;
@@ -263,35 +276,38 @@ async function checkApi() {
   const state = connectionPresentation(result);
   el('api-title').textContent = apiConnected ? 'Connected to your computer' : state.label;
   el('api-detail').textContent = apiConnected
-    ? `Local receiver active · 127.0.0.1:${current.port}`
+    ? 'Verified local archive · SQLite on this computer'
     : state.detail;
   el('api-dot').className = `status-dot ${state.tone}`;
   el('connection-banner').className =
     `popup-connection is-${apiConnected ? 'connected' : state.tone}`;
-  el('open-setup').hidden = apiConnected;
-  el('retry').disabled = false;
+  el('retry').setAttribute('aria-busy', 'false');
   await render();
   return apiConnected;
 }
 
 el('sync').addEventListener('click', async () => {
   if (busy) return;
-  const selected =
-    Object.values(current.providers).some(Boolean) &&
-    Object.values(current.captureTypes).some(Boolean);
-  if (!apiConnected || !selected) {
+  if (!apiConnected) {
     await chrome.runtime.openOptionsPage();
     return;
   }
+  if (
+    !describeEffectivePlan(current.providers, current.captureTypes).readyCount ||
+    el('sync').disabled
+  )
+    return;
+  since = Date.now();
+  requestNotice = 'Requesting local capture…';
   busy = true;
   await render();
   try {
     const result = await chrome.runtime.sendMessage({ type: 'syncNow' });
-    el('notice').textContent = result?.ok
-      ? 'Capturing your selection. You can close this popup.'
-      : (result?.error ?? 'Could not start. Check your connection in settings.');
+    requestNotice = result?.ok
+      ? 'Capture requested. Waiting for local progress.'
+      : friendlyError('', result?.code);
   } catch {
-    el('notice').textContent = 'Check your connection in settings and try again.';
+    requestNotice = 'Check your connection in settings and try again.';
   } finally {
     busy = false;
     await render();
@@ -304,10 +320,13 @@ for (const id of ['settings', 'edit-selection', 'open-setup']) {
 el('retry').addEventListener('click', checkApi);
 
 chrome.storage.onChanged.addListener(async (changes) => {
-  const previous = { port: current.port, token: current.token };
+  const previous = current;
   const values = changes.settings?.newValue;
   const authChanged =
-    values && (Number(values.port) !== previous.port || values.token !== previous.token);
+    values &&
+    ((values.nativeHost ?? '') !== previous.nativeHost ||
+      (values.archiveId ?? '') !== previous.archiveId ||
+      (values.token ?? '') !== previous.token);
   if (authChanged) {
     connectionCheck++;
     apiConnected = false;

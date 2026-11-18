@@ -94,6 +94,46 @@ def _normalize_packet(packet: object) -> list[dict]:
     return result
 
 
+class ArchiveChanged(ValueError):
+    pass
+
+
+def save_packet(store: Store, packet: dict) -> dict:
+    """A positive receipt is published only after the complete packet commits."""
+    conversations = _normalize_packet(packet)
+    expected = packet.get("archive_instance_id")
+    if expected is not None and expected != store.archive_instance_id():
+        raise ArchiveChanged("Archive changed")
+    created = updated = unchanged = 0
+    with store.import_transaction():
+        for conversation in conversations:
+            previous = store.connection.execute(
+                "SELECT id,revision FROM conversations WHERE platform=? AND account=? AND external_id=?",
+                (
+                    conversation["platform"],
+                    conversation["account"],
+                    conversation["external_id"],
+                ),
+            ).fetchone()
+            key = store.ingest(conversation, consent=False, reconcile_order=True)
+            if previous is None:
+                created += 1
+            else:
+                revision = store.connection.execute(
+                    "SELECT revision FROM conversations WHERE id=?", (key,)
+                ).fetchone()[0]
+                if revision != previous["revision"]:
+                    updated += 1
+                else:
+                    unchanged += 1
+    return {
+        "conversations": len(conversations),
+        "created": created,
+        "updated": updated,
+        "unchanged": unchanged,
+    }
+
+
 def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
     """Return a server bound to 127.0.0.1; the caller owns serve/shutdown."""
     if not isinstance(token, str) or not token or "\r" in token or "\n" in token:
@@ -196,12 +236,13 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
         def do_POST(self):
             if not self._boundary():
                 return
-            if self.path not in {"/ingest", "/auth/check"}:
+            if self.path not in {"/ingest", "/auth/check", "/auth/probe"}:
                 self._reply(404, {"error": "not_found"})
                 return
             authorization = self.headers.get_all("Authorization", [])
-            if len(authorization) != 1 or not hmac.compare_digest(
-                authorization[0].encode("utf-8"), expected_auth
+            if self.path != "/auth/probe" and (
+                len(authorization) != 1
+                or not hmac.compare_digest(authorization[0].encode("utf-8"), expected_auth)
             ):
                 self._reply(401, {"error": "unauthorized"})
                 return
@@ -232,6 +273,32 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                 if len(raw) != length:
                     raise ValueError("incomplete body")
                 packet = json.loads(raw.decode("utf-8")) if raw else {}
+                if self.path == "/auth/probe":
+                    challenge = packet.get("challenge") if isinstance(packet, dict) else None
+                    if not isinstance(challenge, str) or not re.fullmatch(
+                        "[0-9a-f]{64}", challenge
+                    ):
+                        raise ValueError("invalid challenge")
+                    with Store(db_path) as store:
+                        instance = store.archive_instance_id()
+                    location = archive_identity(db_path)
+                    proof = hmac.digest(
+                        token.encode(),
+                        json.dumps([challenge, location, instance]).encode(),
+                        "sha256",
+                    ).hex()
+                    self._reply(
+                        200,
+                        {
+                            "status": "ok",
+                            "service": "ai-memory",
+                            "schema": 1,
+                            "archive_instance_id": instance,
+                            "archive_id": location,
+                            "proof": proof,
+                        },
+                    )
+                    return
                 if self.path == "/auth/check":
                     if not isinstance(packet, dict) or packet:
                         raise ValueError("connection check requires an empty object")
@@ -248,60 +315,17 @@ def make_server(db_path: Path, token: str, port: int = 0) -> HTTPServer:
                         },
                     )
                     return
-                conversations = _normalize_packet(packet)
+                with Store(db_path) as store:
+                    receipt = save_packet(store, packet)
+            except ArchiveChanged:
+                self._reply(409, {"error": "archive_changed"})
+                return
             except sqlite3.OperationalError:
                 self._reply(503, {"error": "archive_unavailable"})
                 return
             except (ValueError, TypeError, UnicodeError, RecursionError, TimeoutError):
                 self._reply(400, {"error": "invalid_payload"})
                 return
-            created = updated = unchanged = 0
-            try:
-                with Store(db_path) as store:
-                    expected_instance = packet.get("archive_instance_id")
-                    if expected_instance is not None and (
-                        not isinstance(expected_instance, str)
-                        or not hmac.compare_digest(
-                            expected_instance.encode("utf-8"),
-                            store.archive_instance_id().encode("utf-8"),
-                        )
-                    ):
-                        self._reply(409, {"error": "archive_changed"})
-                        return
-                    for conversation in conversations:
-                        previous = store.connection.execute(
-                            "SELECT id,revision FROM conversations WHERE platform=? AND account=? AND external_id=?",
-                            (
-                                conversation["platform"],
-                                conversation["account"],
-                                conversation["external_id"],
-                            ),
-                        ).fetchone()
-                        key = store.ingest(conversation, consent=False, reconcile_order=True)
-                        if previous is None:
-                            created += 1
-                        else:
-                            revision = store.connection.execute(
-                                "SELECT revision FROM conversations WHERE id=?", (key,)
-                            ).fetchone()[0]
-                            if revision != previous["revision"]:
-                                updated += 1
-                            else:
-                                unchanged += 1
-            except ValueError:
-                self._reply(400, {"error": "invalid_payload"})
-                return
-            except sqlite3.OperationalError:
-                self._reply(503, {"error": "archive_unavailable"})
-                return
-            self._reply(
-                200,
-                {
-                    "conversations": len(conversations),
-                    "created": created,
-                    "updated": updated,
-                    "unchanged": unchanged,
-                },
-            )
+            self._reply(200, receipt)
 
     return HTTPServer(("127.0.0.1", port), Handler)

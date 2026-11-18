@@ -2,10 +2,67 @@
 
 import hashlib
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
 from .store import Store
+
+
+def _opencode_sessions(root):
+    """Enumerate both JSON layouts without listing inside unselected symlinks."""
+    from .collectors import selected_source
+
+    def entries(directory):
+        if not directory.exists() and not directory.is_symlink():
+            return []
+        return sorted(selected_source(directory).iterdir())
+
+    found = {}
+    for legacy, projects in ((False, root / "storage/session"), (True, root / "project")):
+        for project in entries(projects):
+            if project.is_symlink() or not project.is_dir():
+                continue
+            for item in entries(project / "storage/session/info" if legacy else project):
+                if item.match("ses_*.json"):
+                    found.setdefault(item.name, item)
+    return list(found.values())
+
+
+def _fingerprint(platform, path, file, relative, json_layout):
+    """Only stat native dependencies that could change this unit's visible data."""
+    from .collectors import selected_source
+
+    def stamp(p):
+        st = selected_source(p).stat()
+        return [str(p), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+    def children(directory, pattern):
+        if not directory.exists() and not directory.is_symlink():
+            return []
+        return sorted(selected_source(directory).glob(pattern))
+
+    if json_layout:
+        info = selected_source(file)
+        session = info.stem
+        legacy = info.parent.name == "info" and info.parent.parent.name == "session"
+        base = info.parents[1] if legacy else info.parents[2]
+        files = [info]
+        for message in children(base / "message" / session, "msg_*.json"):
+            files.append(message)
+            parts = base / "part" / session if legacy else base / "part"
+            files.extend(children(parts / message.stem, "prt_*.json"))
+        input_data = [stamp(item) for item in files]
+    elif platform == "opencode" and (path.is_dir() or path.name == "opencode.db"):
+        database = path / "opencode.db" if path.is_dir() else path
+        input_data = [
+            stamp(item)
+            for item in (database, Path(str(database) + "-wal"))
+            if item.exists() or item.is_symlink()
+        ]
+    else:
+        input_data = [relative, stamp(file)]
+    return hashlib.sha256(json.dumps(input_data).encode()).hexdigest()
 
 
 def collect_into(
@@ -15,7 +72,7 @@ def collect_into(
     account: str = "local",
     consent: bool = False,
 ) -> dict:
-    from .collectors import codex_rollout_files, codex_thread_metadata, collect
+    from .collectors import codex_rollout_files, codex_thread_metadata, collect, selected_source
 
     platform = platform.lower()
     # Hash the selected source even when it is missing or inaccessible. Its
@@ -23,7 +80,7 @@ def collect_into(
     path = Path(path).expanduser().absolute()
     source_id = hashlib.sha256(f"{platform}:{account}:{path}".encode()).hexdigest()[:16]
     try:
-        path = path.resolve(strict=True)
+        path = selected_source(path)
         key = f"{platform}:{account}:{path}"
         opencode_json = False
         # An explicit session file references message/part files beyond its own mtime.
@@ -36,14 +93,7 @@ def collect_into(
         elif (
             path.is_dir() and platform.lower() == "opencode" and not (path / "opencode.db").exists()
         ):
-            current = sorted(f for f in path.glob("storage/session/*/ses_*.json") if f.is_file())
-            current_ids = {f.name for f in current}
-            legacy = sorted(
-                f
-                for f in path.glob("project/*/storage/session/info/ses_*.json")
-                if f.is_file() and f.name not in current_ids
-            )
-            files = current + legacy
+            files = _opencode_sessions(path)
             opencode_json = independent_files = bool(files)
             if not files:
                 files = [path]
@@ -63,35 +113,14 @@ def collect_into(
     ids = []
     failures = []
     scanned = 0
-    inventory = None
-    tree_fingerprint = None
     thread_metadata = codex_thread_metadata(path) if platform == "codex" else {}
     for file in files:
         relative = str(file.relative_to(path)) if independent_files else file.name
         try:
-            if path.is_dir() and (opencode_json or not independent_files):
-                if inventory is None:
-                    inventory = []
-                    for item in sorted(p for p in path.rglob("*") if p.is_file()):
-                        stat = item.stat()
-                        inventory.append(
-                            (str(item.relative_to(path)), stat.st_size, stat.st_mtime_ns)
-                        )
-                if opencode_json:
-                    # Message/part edits need not touch session JSON. Hash the tree
-                    # once, then checkpoint successful sessions independently.
-                    if tree_fingerprint is None:
-                        tree_fingerprint = hashlib.sha256(
-                            json.dumps(inventory).encode()
-                        ).hexdigest()
-                    fingerprint_input = [relative, tree_fingerprint]
-                else:
-                    fingerprint_input = inventory
-            else:
-                stat = file.stat()
-                fingerprint_input = [relative, stat.st_size, stat.st_mtime_ns]
-            fingerprint = hashlib.sha256(json.dumps(fingerprint_input).encode()).hexdigest()
-        except OSError:
+            fingerprint = _fingerprint(
+                platform, path, file, relative, opencode_json or explicit_session
+            )
+        except (OSError, ValueError):
             failures.append(
                 {"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16], "category": "read"}
             )
@@ -119,31 +148,86 @@ def collect_into(
             # checkpoints are read once to establish this file's conversation IDs.
             if known_ids:
                 for external_id in json.loads(known_ids[0]):
-                    title = thread_metadata.get(external_id, {}).get("title")
-                    previous = store.connection.execute(
-                        "SELECT title,updated_at FROM conversations WHERE platform=? AND account=? AND external_id=?",
-                        (platform, account, external_id),
+                    index = thread_metadata.get(external_id)
+                    if index is None:
+                        continue
+                    state_key = f"codex-index:{file_key}:{external_id}"
+                    serialized = json.dumps(index, sort_keys=True)
+                    saved = store.connection.execute(
+                        "SELECT value FROM checkpoints WHERE key=?", (state_key,)
                     ).fetchone()
-                    if previous and title and title != previous["title"]:
-                        ids.append(
-                            store.ingest(
-                                {
-                                    "platform": platform,
-                                    "account": account,
-                                    "external_id": external_id,
-                                    "title": title,
-                                    "updated_at": previous["updated_at"],
-                                    "messages": [],
-                                }
-                            )
+                    if saved and saved[0] == serialized:
+                        continue
+                    with store.import_transaction():
+                        # Verify the selected row after reserving the archive writer.
+                        if codex_thread_metadata(path, external_id).get(external_id) != index:
+                            continue
+                        previous = store.connection.execute(
+                            "SELECT id,title,models,updated_at FROM conversations WHERE platform=? AND account=? AND external_id=?",
+                            (platform, account, external_id),
+                        ).fetchone()
+                        if previous:
+                            title = index["title"]
+                            if not title and saved and json.loads(saved[0]).get("title"):
+                                first = store.connection.execute(
+                                    "SELECT text FROM messages WHERE conversation_id=? AND role='user' ORDER BY sequence LIMIT 1",
+                                    (previous["id"],),
+                                ).fetchone()
+                                title = " ".join(first[0].split()) if first else None
+                                if title and len(title) > 80:
+                                    title = title[:77] + "..."
+                            model = index["model"]
+                            if (
+                                saved
+                                or (title and title != previous["title"])
+                                or (model and model not in json.loads(previous["models"]))
+                            ):
+                                ids.append(
+                                    store.ingest(
+                                        {
+                                            "platform": platform,
+                                            "account": account,
+                                            "external_id": external_id,
+                                            "title": title or None,
+                                            "models": [model] if model else [],
+                                            "updated_at": previous["updated_at"],
+                                            "messages": [],
+                                        }
+                                    )
+                                )
+                        store.connection.execute(
+                            "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+                            (state_key, serialized),
                         )
             scanned += 1
             continue
         try:
-            conversations = collect(platform, file if independent_files else path, account=account)
-            for c in conversations:
-                ids.append(store.ingest(c, consent=consent, reconcile_order=True))
-            with store.connection:
+            conversations = collect(
+                platform,
+                file if independent_files else path,
+                account=account,
+                _index=thread_metadata if platform == "codex" else None,
+            )
+            with store.import_transaction():
+                current = store.connection.execute(
+                    "SELECT value FROM checkpoints WHERE key=?", (file_key,)
+                ).fetchone()
+                if current and checkpoint != current and current[0] != fingerprint:
+                    # Another importer finished a different version while this adapter read.
+                    # Leave its newer checkpoint alone and retry on the next scan.
+                    failures.append(
+                        {
+                            "file_id": hashlib.sha256(relative.encode()).hexdigest()[:16],
+                            "category": "source_changed",
+                        }
+                    )
+                    continue
+                accepted = [
+                    store.ingest(
+                        c, consent=consent, reconcile_order=True, codex_snapshot=platform == "codex"
+                    )
+                    for c in conversations
+                ]
                 store.connection.execute(
                     "INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (file_key, fingerprint)
                 )
@@ -152,6 +236,18 @@ def collect_into(
                         "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
                         (metadata_key, json.dumps([c["external_id"] for c in conversations])),
                     )
+                    store.connection.executemany(
+                        "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+                        [
+                            (
+                                f"codex-index:{file_key}:{c['external_id']}",
+                                json.dumps(thread_metadata[c["external_id"]], sort_keys=True),
+                            )
+                            for c in conversations
+                            if c["external_id"] in thread_metadata
+                        ],
+                    )
+            ids.extend(accepted)
             scanned += 1
         except subprocess.TimeoutExpired:
             # Timeout exceptions can contain command paths and partial transcript
@@ -162,7 +258,7 @@ def collect_into(
                     "category": "timeout",
                 }
             )
-        except (OSError, RuntimeError, ValueError, UnicodeError):
+        except (OSError, RuntimeError, ValueError, UnicodeError, sqlite3.Error):
             failures.append(
                 {"file_id": hashlib.sha256(relative.encode()).hexdigest()[:16], "category": "parse"}
             )
@@ -176,6 +272,7 @@ def collect_into(
         if failures
         else None,
     )
+    ids = list(dict.fromkeys(ids))
     return {
         "imported_conversations": len(ids),
         "conversation_ids": ids,

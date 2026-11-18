@@ -116,7 +116,11 @@ def prepare_connection(
     """Create or reuse one private connection beside the selected archive."""
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("Choose a local port between 1 and 65535.")
-    directory = Path(db_path).expanduser().resolve().parent
+    from .archive_files import workspace_for
+
+    directory = workspace_for(db_path)
+    if directory.is_symlink():
+        raise ValueError("Use a private archive directory, not a symbolic link.")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     token_file = directory / "ingest.token"
     connection_file = directory / "extension-connection.json"
@@ -184,13 +188,13 @@ def check_running_receiver(port: int, token: str, db_path: Path) -> str:
     """Classify an occupied loopback port without exposing credentials or replies."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
+        challenge = secrets.token_hex(32)
         connection.request(
             "POST",
-            "/auth/check",
-            body="{}",
+            "/auth/probe",
+            body=json.dumps({"challenge": challenge}),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": "Bearer " + token,
             },
         )
         response = connection.getresponse()
@@ -210,6 +214,11 @@ def check_running_receiver(port: int, token: str, db_path: Path) -> str:
             return "incompatible"
         if not isinstance(data.get("archive_id"), str):
             return "incompatible"
+        proof = data.get("proof")
+        payload = [challenge, data["archive_id"], data.get("archive_instance_id")]
+        expected = hmac.digest(token.encode(), json.dumps(payload).encode(), "sha256").hex()
+        if not isinstance(proof, str) or not hmac.compare_digest(proof, expected):
+            return "unauthorized"
         if not hmac.compare_digest(data["archive_id"], archive_identity(db_path)):
             return "different_archive"
         if not isinstance(data.get("archive_instance_id"), str):

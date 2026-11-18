@@ -1,15 +1,14 @@
 {
   "manifest_version": 3,
   "name": "AI Memory",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Keep selected project, pinned and agent chats in your local archive. Ordinary Recents are off by default.",
-  "permissions": ["alarms", "storage"],
+  "permissions": ["alarms", "storage", "nativeMessaging"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://claude.ai/*",
-    "https://gemini.google.com/*",
-    "http://127.0.0.1/*"
+    "https://gemini.google.com/*"
   ],
   "background": {
     "service_worker": "background.js",

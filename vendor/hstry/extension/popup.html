@@ -52,8 +52,13 @@
           <strong id="api-title">Checking connection…</strong>
           <p id="api-detail">Verifying local AI Memory receiver.</p>
         </div>
-        <button id="open-setup" class="button-chip" hidden>Setup</button>
       </section>
+
+      <div class="popup-actions">
+        <button id="sync" class="button-primary" disabled>Connect your computer</button>
+      </div>
+      <p id="plan-hint" class="inline-feedback"></p>
+      <p id="notice" class="inline-feedback" role="status" aria-live="polite"></p>
 
       <section class="popup-section">
         <div class="popup-section-head">
@@ -73,14 +78,16 @@
         <div id="quick-filters" class="quick-filters" aria-label="Capture categories"></div>
       </section>
 
-      <div class="popup-actions">
-        <button id="sync" class="button-primary" disabled>Connect your computer</button>
-      </div>
-      <p id="notice" class="inline-feedback" role="status" aria-live="polite"></p>
-
       <footer class="popup-footer">
         <span id="recents-note">Ordinary Recents stay out</span>
-        <span>Local SQLite · NotebookLM via CLI</span>
+        <dl class="cloud-states" aria-label="Cloud status">
+          <dt>Approved for Google</dt>
+          <dd>Not checked here. Approval is a separate CLI action.</dd>
+          <dt>Ready for NotebookLM search</dt>
+          <dd>
+            Not checked here. Run <code>ai-memory status</code> for the last confirmed source.
+          </dd>
+        </dl>
       </footer>
     </main>
     <script src="popup.js" type="module"></script>

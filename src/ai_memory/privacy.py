@@ -4,7 +4,16 @@ Redaction is performed on upload snapshots only. Callers must keep the original
 text in the local archive.
 """
 
+import hashlib
 import re
+
+# Increment for any change to the outbound field allowlist or masking semantics.
+MASKING_POLICY = 2
+
+
+def snapshot_sha256(text: str | bytes) -> str:
+    return hashlib.sha256(text.encode("utf-8") if isinstance(text, str) else text).hexdigest()
+
 
 PATTERNS = {
     "private_key": re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"),

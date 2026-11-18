@@ -7,7 +7,7 @@
   --soft-hover: #eef1f5;
   --ink: #14171f;
   --muted: #525866;
-  --faint: #717887;
+  --faint: #596271;
   --rule: #e6e9ef;
   --border: #d4d9e2;
   --accent: #0969da;
@@ -1319,7 +1319,8 @@ input::placeholder {
 .popup-page {
   /* Toolbar popups need an intrinsic width before Chrome sizes their viewport. */
   width: 440px;
-  min-width: 440px;
+  min-width: 300px;
+  max-width: 100%;
   min-height: 440px;
   background: var(--bg);
 }
@@ -1752,7 +1753,7 @@ input::placeholder {
     --soft-hover: #282e3d;
     --ink: #f1f5f9;
     --muted: #a1aab8;
-    --faint: #7b8494;
+    --faint: #a3acbc;
     --rule: #282e3c;
     --border: #363e52;
     --accent: #4c9aff;
@@ -1789,4 +1790,70 @@ input::placeholder {
   .switch input:after {
     background: #f8fafc;
   }
+}
+
+/* Keep hit targets within small toolbar panels, including Chromium scrollbars. */
+.popup-provider-title,
+.popup-footer,
+.capture-schedule {
+  flex-wrap: wrap;
+}
+.popup-provider-copy,
+.command-box code,
+.connection-ready p {
+  overflow-wrap: anywhere;
+}
+.popup-page :is(.mini-action, .button-quiet, .filter-chip, .switch-sm, .switch-sm input) {
+  min-height: 26px;
+}
+.popup-page .switch-sm input:after {
+  top: 5px;
+}
+.popup-provider.is-off,
+.status-item.is-off {
+  opacity: 1;
+}
+.popup-shell > #notice {
+  margin: 4px 0 12px;
+}
+.capture-schedule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+}
+.capture-schedule label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.capture-schedule label .field-hint {
+  display: none;
+}
+.capture-schedule input[type='number'] {
+  width: 5em;
+}
+.capture-schedule p {
+  flex-basis: 100%;
+}
+@media (max-width: 380px) {
+  .popup-shell {
+    padding: 12px;
+  }
+  .popup-provider-meta {
+    padding-left: 0;
+    flex-wrap: wrap;
+  }
+}
+
+.cloud-states {
+  margin: 0;
+}
+.cloud-states dt {
+  font-weight: 600;
+  color: var(--ink);
+}
+.cloud-states dd {
+  margin: 0 0 4px;
 }

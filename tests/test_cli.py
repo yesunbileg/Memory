@@ -280,7 +280,7 @@ def test_connect_writes_private_file_starts_receiver_and_reuses_running_setup(tm
     process = subprocess.Popen(
         command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    file = tmp_path / "extension-connection.json"
+    file = tmp_path / "archive.sqlite.files" / "extension-connection.json"
     try:
         deadline = time.monotonic() + 7
         ready = False
@@ -346,7 +346,7 @@ def test_connect_explains_occupied_receiver_with_different_token(tmp_path):
     assert "token" in result.stdout.lower() or "different connection" in result.stdout.lower()
     assert "other-synthetic-private-token" not in result.stdout + result.stderr
     assert "Traceback" not in result.stderr
-    assert not (tmp_path / "extension-connection.json").exists()
+    assert not (tmp_path / "selected.sqlite.files" / "extension-connection.json").exists()
 
 
 def test_connect_rejects_running_receiver_for_other_database_in_same_directory(tmp_path):
@@ -365,7 +365,7 @@ def test_connect_rejects_running_receiver_for_other_database_in_same_directory(t
         server.server_close()
         worker.join(timeout=5)
     assert result.returncode == 1
-    assert "different archive" in result.stdout.lower()
-    assert not (tmp_path / "extension-connection.json").exists()
+    assert "different connection token" in result.stdout.lower()
+    assert not (tmp_path / "second.sqlite.files" / "extension-connection.json").exists()
     # The authenticated probe persists only the logical receiver archive identity.
     assert first.exists() and not second.exists()

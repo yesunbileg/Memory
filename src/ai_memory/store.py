@@ -4,10 +4,12 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 
+from . import revisions
+from .archive_files import workspace_for
 from .archive_lock import archive_lock
 from .diagnostics import SAFE_FAILURES
 
@@ -84,24 +86,44 @@ PRAGMA user_version=1;
 
 
 class Store:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, existing: bool = False):
         self.path = Path(path).expanduser().resolve()
-        if not self.path.parent.exists():
+        self.workspace = workspace_for(self.path)
+        if existing and not self.path.is_file():
+            raise FileNotFoundError("Archive does not exist")
+        if not existing and not self.path.parent.exists():
             self.path.parent.mkdir(parents=True, mode=0o700)
-        self.connection = sqlite3.connect(self.path, timeout=30)
+        self.connection = sqlite3.connect(
+            self.path.as_uri() + "?mode=rw" if existing else self.path, uri=existing, timeout=30
+        )
+        if existing:
+            # Refuse empty placeholders, notes and unrelated SQLite files before
+            # chmod, WAL configuration or schema creation can modify them.
+            try:
+                known = self.connection.execute(
+                    """SELECT count(*) FROM sqlite_master WHERE type='table'
+                       AND name IN ('conversations','messages','segments','settings')"""
+                ).fetchone()[0]
+            except sqlite3.DatabaseError:
+                known = 0
+            if known != 4:
+                self.close()
+                raise ValueError("The selected file is not a Memory archive")
         self.path.chmod(0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
-        version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        try:
+            revisions.initialize(self, SCHEMA)
+        except BaseException:
             self.close()
-            raise ValueError("Archive schema is newer than this application")
-        if version == 0:
-            self.connection.executescript(SCHEMA)
-        elif version != 1:
-            self.close()
-            raise ValueError("Unsupported archive schema")
+            raise
+
+    def save_outbound(self, segment_id, revision, text):
+        return revisions.save_outbound(self, segment_id, revision, text)
+
+    def attest_source(self, source_id, segment_id, revision):
+        return revisions.attest_source(self, source_id, segment_id, revision)
 
     def archive_instance_id(self) -> str:
         """Persist a logical archive identity, independent of its filesystem location."""
@@ -150,7 +172,8 @@ class Store:
             elif len(matches) > 1:
                 raise ValueError("Message aliases identify multiple archived messages")
             else:
-                target = next(iter(matches), message["native_id"])
+                hint = message.get("first_record_id")
+                target = next(iter(matches), hint if hint in aliases else message["native_id"])
             if target in resolved:
                 raise ValueError("Message aliases identify duplicate snapshot messages")
             resolved.add(target)
@@ -174,7 +197,48 @@ class Store:
             "INSERT OR REPLACE INTO checkpoints(key,value) VALUES(?,?)", assignments.items()
         )
 
-    def _reconcile_order(self, key: str, messages: list[dict]) -> bool:
+    @contextmanager
+    def import_transaction(self):
+        """One writer owns both the archive rows and the caller's receipt/checkpoint."""
+        if self.connection.in_transaction:
+            yield
+            return
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            yield
+
+    def _codex_order(self, key, incoming, rank, existing, old_update):
+        # Keep only native IDs and rank, not duplicate transcripts. A newer
+        # snapshot containing all the same IDs makes the older ordering redundant.
+        from .collectors import _insert_missing_ids
+
+        checkpoint = "codex-order:" + key
+        data = self.connection.execute(
+            "SELECT value FROM checkpoints WHERE key=?", (checkpoint,)
+        ).fetchone()
+        orders = json.loads(data[0]) if data else []
+        if not orders and existing:
+            orders.append([[old_update or "", 0, ""], list(existing)])
+        if incoming:
+            orders.append([list(rank), list(incoming)])
+        orders.sort(key=lambda item: item[0], reverse=True)
+        result, keep = [], []
+        present = set()
+        for version, ids in orders:
+            if all(mid in present for mid in ids):
+                continue
+            result = _insert_missing_ids(result, ids)
+            present.update(ids)
+            keep.append([version, ids])
+        self.connection.execute(
+            "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+            (checkpoint, json.dumps(keep, separators=(",", ":"))),
+        )
+        return result
+
+    def _reconcile_order(
+        self, key: str, messages: list[dict], *, codex_rank=None, old_update=None
+    ) -> bool:
         """Insert unseen chunks at consistent native-ID anchors without dropping history.
 
         Existing IDs retain their relative order. Contradictory snapshots and
@@ -203,6 +267,10 @@ class Store:
             ordered.extend(before.get(row["native_id"], []))
             ordered.append(row["native_id"])
         ordered.extend(pending)
+        if codex_rank is not None:
+            ordered = self._codex_order(
+                key, [m["native_id"] for m in incoming], codex_rank, known, old_update
+            )
         sequences = {native_id: seq for seq, native_id in enumerate(ordered, 1)}
         moved = [row for row in rows if row["sequence"] != sequences[row["native_id"]]]
         # Move changed rows out of the final range before assigning new slots,
@@ -231,7 +299,12 @@ class Store:
         return bool(moved)
 
     def ingest(
-        self, conversation: dict, consent: bool = False, *, reconcile_order: bool = False
+        self,
+        conversation: dict,
+        consent: bool = False,
+        *,
+        reconcile_order: bool = False,
+        codex_snapshot: bool = False,
     ) -> str:
         c = dict(conversation)
         platform = str(c.get("platform", "")).lower()
@@ -298,17 +371,25 @@ class Store:
         }.get(platform, "CV")
         key = prefix + "-" + digest([platform, account, external])[:16].upper()
         db = self.connection
-        with db:
-            # sqlite3's context manager does not begin until the first DML.
-            # Take the write reservation before reading metadata or positions.
-            if not db.in_transaction:
-                db.execute("BEGIN IMMEDIATE")
-            else:
-                db.execute("UPDATE conversations SET revision=revision WHERE 0")
+        with self.import_transaction():
             old = db.execute("SELECT * FROM conversations WHERE id=?", (key,)).fetchone()
             if platform == "codex":
                 self._resolve_aliases(key, messages)
-            reordered = self._reconcile_order(key, messages) if reconcile_order else False
+            codex_rank = None
+            if platform == "codex" and codex_snapshot and messages:
+                from .collectors import _snapshot_rank
+
+                codex_rank = _snapshot_rank(c, None)
+            reordered = (
+                self._reconcile_order(
+                    key,
+                    messages,
+                    codex_rank=codex_rank,
+                    old_update=old["updated_at"] if old else None,
+                )
+                if reconcile_order
+                else False
+            )
             incoming_update = c.get("updated_at")
             old_update = old["updated_at"] if old else None
             metadata_stale = bool(
@@ -316,6 +397,18 @@ class Store:
                 and old_update
                 and (not incoming_update or _time_order(incoming_update, old_update) == -1)
             )
+            if codex_rank:
+                rank_key = "codex-meta-rank:" + key
+                saved = db.execute(
+                    "SELECT value FROM checkpoints WHERE key=?", (rank_key,)
+                ).fetchone()
+                if saved and tuple(json.loads(saved[0])) > codex_rank:
+                    metadata_stale = True
+                elif not metadata_stale:
+                    db.execute(
+                        "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+                        (rank_key, json.dumps(codex_rank)),
+                    )
             models = list(
                 dict.fromkeys((json.loads(old["models"]) if old else []) + c.get("models", []))
             )
@@ -353,10 +446,12 @@ class Store:
                     m.get("timestamp"),
                     m.get("model"),
                 ]
-                content_hash = digest(values)
                 previous = db.execute(
-                    "SELECT content_hash,timestamp FROM messages WHERE id=?", (mid,)
+                    "SELECT content_hash,timestamp,model FROM messages WHERE id=?", (mid,)
                 ).fetchone()
+                if previous and values[-1] is None:
+                    values[-1] = previous["model"]
+                content_hash = digest(values)
                 version_key = f"message-version:{mid}"
                 saved_version = db.execute(
                     "SELECT value FROM checkpoints WHERE key=?", (version_key,)
@@ -382,6 +477,17 @@ class Store:
                     )
                 ):
                     continue
+                if codex_rank:
+                    rank_key = "codex-message-rank:" + mid
+                    saved = db.execute(
+                        "SELECT value FROM checkpoints WHERE key=?", (rank_key,)
+                    ).fetchone()
+                    if saved and tuple(json.loads(saved[0])) > codex_rank:
+                        continue
+                    db.execute(
+                        "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+                        (rank_key, json.dumps(codex_rank)),
+                    )
                 if previous is None or previous[0] != content_hash:
                     changed = True
                     db.execute(
@@ -418,14 +524,18 @@ class Store:
         return key
 
     def approve(self, conversation_id: str):
-        with self.connection:
-            if (
-                self.connection.execute(
-                    "UPDATE conversations SET consent=1 WHERE id=?", (conversation_id,)
-                ).rowcount
-                != 1
-            ):
-                raise ValueError("Conversation does not exist")
+        self.approve_many([conversation_id])
+
+    def approve_many(self, ids):
+        from .consent import update_consent
+
+        return update_consent(self, ids, approved=True)
+
+    def revoke_many(self, ids):
+        from .consent import update_consent
+
+        with archive_lock(self.path):
+            return update_consent(self, ids, approved=False)
 
     def get_conversation(self, conversation_id: str) -> dict:
         row = self.connection.execute(
@@ -467,6 +577,8 @@ class Store:
                 )
 
     def status(self) -> dict:
+        from .publication import publication_status
+
         db = self.connection
 
         def count(query):
@@ -506,12 +618,14 @@ class Store:
             "unapproved_conversations": count("SELECT COUNT(*) FROM conversations WHERE consent=0"),
             "segments": count("SELECT COUNT(*) FROM segments WHERE state!='retired'"),
             "sources": count("SELECT COUNT(*) FROM source_map"),
+            "last_verified_remote": publication_status(self),
             "pending_segments": pending,
             "unassigned_messages": unassigned,
             "pending_jobs": cleanup,
             "sync_errors": sync_errors,
             "sync_preflight_errors": sync_preflight_errors,
             "import_failures": import_failures,
+            "watch": self.get_setting("watch_health", {}),
             "sync_status": "pending" if pending or unassigned or cleanup else "up_to_date",
             "notebook_configured": bool(self.get_setting("notebook_id")),
         }

@@ -1,60 +1,43 @@
-// Simulated loopback HTTP: authentication, identity, and privacy at the worker boundary.
 import assert from 'node:assert/strict';
 import { checkConnection } from '../worker-auth.js';
-
-const settings = { port: 41770, token: 'synthetic-private-ingest-token-123456' };
-let calls = [];
-const fetchImpl = async (url, options) => {
-  calls.push({ url, options });
-  return new Response(JSON.stringify({ status: 'ok', service: 'ai-memory', schema: 1 }));
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
+const settings = { archiveId, nativeHost },
+  calls = [];
+const good = { status: 'ok', service: 'ai-memory', schema: 2, archive_instance_id: archiveId };
+const sendNative = async (...args) => {
+  calls.push(args);
+  return good;
 };
-const missing = await checkConnection({ ...settings, token: '' }, { fetchImpl });
-assert.equal(missing.ok, false);
-assert.equal(missing.code, 'missing_token');
+const token = 'synthetic-private-worker-token';
+globalThis.fetch = () => {
+  throw new Error('no HTTP check is permitted');
+};
+assert.equal((await checkConnection({}, { sendNative })).code, 'missing_token');
+assert.equal(
+  (await checkConnection({ token, port: 41770 }, { sendNative })).code,
+  'legacy_pairing',
+);
+assert.equal(
+  (await checkConnection({ ...settings, nativeHost: 'com.other.app' }, { sendNative })).code,
+  'incompatible_server',
+);
 assert.equal(calls.length, 0);
-
-const valid = await checkConnection(settings, { fetchImpl });
-assert.equal(valid.ok, true);
-assert.equal(calls.length, 1);
-assert.equal(calls[0].url, 'http://127.0.0.1:41770/auth/check');
-assert.equal(calls[0].options.method, 'POST');
-assert.equal(calls[0].options.headers.Authorization, `Bearer ${settings.token}`);
-assert.equal(calls[0].options.body, '{}');
-assert.equal(calls[0].options.redirect, 'error');
-assert.equal(JSON.stringify(valid).includes(settings.token), false);
-
-for (const status of [401, 403]) {
-  const unauthorized = await checkConnection(settings, {
-    fetchImpl: async () => new Response('', { status }),
-  });
-  assert.equal(unauthorized.ok, false);
-  assert.equal(unauthorized.code, 'unauthorized');
-}
-for (const body of [
-  { status: 'ok' },
-  { status: 'ok', service: 'other-app', schema: 1 },
-  { status: 'ok', service: 'ai-memory', schema: 2 },
+assert.equal((await checkConnection(settings, { sendNative })).ok, true);
+assert.deepEqual(calls, [[nativeHost, { op: 'check', archive_instance_id: archiveId }]]);
+for (const [reply, code] of [
+  [{}, 'incompatible_server'],
+  [{ ...good, schema: 1 }, 'incompatible_server'],
+  [{ ...good, service: 'other' }, 'incompatible_server'],
+  [{ ...good, archive_instance_id: 'b'.repeat(32) }, 'archive_changed'],
+  [{ error: 'unauthorized' }, 'unauthorized'],
 ]) {
-  const wrongApp = await checkConnection(settings, {
-    fetchImpl: async () => new Response(JSON.stringify(body)),
-  });
-  assert.equal(wrongApp.ok, false);
-  assert.equal(wrongApp.code, 'incompatible_server');
+  assert.equal((await checkConnection(settings, { sendNative: async () => reply })).code, code);
 }
-const wrongRoute = await checkConnection(settings, {
-  fetchImpl: async () => new Response('', { status: 404 }),
-});
-assert.equal(wrongRoute.code, 'incompatible_server');
 const offline = await checkConnection(settings, {
-  fetchImpl: async () => {
-    throw new Error(`Unsafe error contains ${settings.token}`);
+  sendNative: async () => {
+    throw new Error(token);
   },
 });
 assert.equal(offline.code, 'offline');
-assert.equal(JSON.stringify(offline).includes(settings.token), false);
-
-calls = [];
-const tampered = await checkConnection({ ...settings, port: '41770@evil.example' }, { fetchImpl });
-assert.equal(tampered.ok, false);
-assert.equal(calls.length, 0);
-console.log('PASS authenticated loopback connection checks and sanitized failure codes');
+assert.ok(!JSON.stringify(offline).includes(token));

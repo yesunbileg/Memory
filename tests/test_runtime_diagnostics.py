@@ -158,7 +158,7 @@ def test_sync_cli_cannot_read_binding_or_construct_adapter_before_archive_lock(
         assert adapters == []
 
 
-def test_build_atomically_replaces_export_without_following_symlink(tmp_path):
+def test_build_preserves_existing_symlink_and_publishes_complete_fresh_export(tmp_path):
     db = tmp_path / "archive.sqlite"
     output = tmp_path / "public-output"
     output.mkdir(mode=0o755)
@@ -172,15 +172,22 @@ def test_build_atomically_replaces_export_without_following_symlink(tmp_path):
         expected = builder.render(segment_id)
     destination = output / f"{segment_id}.md"
     destination.symlink_to(outside)
+    with pytest.raises(ValueError, match="existing files were retained"):
+        cli.execute(cli.parser().parse_args(["--db", str(db), "build", "--output", str(output)]))
+    assert outside.read_text() == "must remain untouched"
+    assert destination.is_symlink() and destination.resolve() == outside
+    assert output.stat().st_mode & 0o777 == 0o755
+    fresh = tmp_path / "new-export"
     result = cli.execute(
-        cli.parser().parse_args(["--db", str(db), "build", "--output", str(output)])
+        cli.parser().parse_args(["--db", str(db), "build", "--output", str(fresh)])
     )
     assert result["segments"] == [segment_id]
-    assert outside.read_text() == "must remain untouched"
-    assert not destination.is_symlink()
-    assert destination.read_text() == expected
-    assert destination.stat().st_mode & 0o777 == 0o600
-    assert output.stat().st_mode & 0o777 == 0o755
+    complete = fresh / f"{segment_id}.md"
+    assert complete.read_bytes() == expected.encode("utf-8")
+    assert not complete.is_symlink()
+    assert complete.stat().st_mode & 0o777 == 0o600
+    assert fresh.stat().st_mode & 0o777 == 0o700
+    assert not list(tmp_path.glob(".partial-*"))
 
 
 def test_busy_worker_does_not_overwrite_active_workers_diagnostic(tmp_path, monkeypatch):

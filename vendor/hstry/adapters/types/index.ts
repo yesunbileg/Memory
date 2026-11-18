@@ -2,11 +2,42 @@
  * @hstry/types - TypeScript types for hstry adapters
  */
 
-import { readFile } from 'node:fs/promises';
+import { constants, lstatSync, realpathSync } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { resolve } from 'node:path';
+
+/** The explicit source and enumerated dependencies must not traverse a symlink. */
+export function checkedSource(path: string): string {
+  if (resolve(path) !== realpathSync.native(path)) throw new Error('Source symlink refused');
+  return path;
+}
+
+export function checkedDatabase(path: string): string {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    if (!suffix || lstatSync(path + suffix, {throwIfNoEntry: false})) checkedSource(path + suffix);
+  }
+  return path;
+}
+
+export async function readSource(path: string): Promise<Buffer> {
+  const file = await open(checkedSource(path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile()) throw new Error('Expected a regular source file');
+    // Verify the opened descriptor before reading, even if an ancestor changed.
+    if (process.platform === 'linux' && realpathSync.native('/proc/self/fd/' + file.fd) !== resolve(path))
+      throw new Error('Selected source changed');
+    return await file.readFile();
+  } finally { await file.close(); }
+}
+
+export function hidden(record: { visibility?: unknown; synthetic?: unknown; ignored?: unknown }): boolean {
+  return record.visibility === 'hidden' || record.synthetic === true || record.ignored === true;
+}
+
 
 /** Read source text strictly; invalid UTF-8 cannot be archived losslessly. */
 export async function readUtf8(path: string): Promise<string> {
-  return new TextDecoder('utf-8', { fatal: true }).decode(await readFile(path));
+  return new TextDecoder('utf-8', { fatal: true }).decode(await readSource(path));
 }
 
 /** Message roles across different sources */
@@ -96,6 +127,7 @@ export interface ParseOptions {
   since?: number;         // Only parse after this timestamp (ms)
   limit?: number;         // Max conversations to parse
   includeTools?: boolean;
+  skipThreadIndex?: boolean; // Caller already resolved metadata inside the selected scope.
   includeAttachments?: boolean;
   cursor?: unknown;       // Adapter-defined incremental cursor
   batchSize?: number;     // Max conversations per batch
@@ -120,6 +152,7 @@ export interface ExportOptions {
   format: ExportFormat;
   pretty?: boolean;
   includeTools?: boolean;
+  skipThreadIndex?: boolean; // Caller already resolved metadata inside the selected scope.
   includeAttachments?: boolean;
 }
 

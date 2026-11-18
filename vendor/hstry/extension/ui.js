@@ -3,6 +3,8 @@ import {
   CAPTURE_TYPES,
   DEFAULT_CAPTURE_TYPES,
   normalizeCaptureTypes,
+  eligibleCapture,
+  supportedCaptureTypes,
 } from './providers/selection.js';
 
 export { DEFAULT_PROVIDER_SETTINGS, PROVIDERS };
@@ -10,10 +12,6 @@ export { CAPTURE_TYPES, DEFAULT_CAPTURE_TYPES };
 
 export const PROVIDER_CAPABILITIES = Object.freeze({
   chatgpt: {
-    projects: true,
-    pinned: true,
-    agents: true,
-    recents: true,
     loginUrl: 'https://chatgpt.com/',
     badges: [
       { key: 'projects', label: 'Projects' },
@@ -23,10 +21,6 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
     ],
   },
   claude: {
-    projects: true,
-    pinned: true,
-    agents: false,
-    recents: true,
     loginUrl: 'https://claude.ai/',
     badges: [
       { key: 'projects', label: 'Projects' },
@@ -35,10 +29,6 @@ export const PROVIDER_CAPABILITIES = Object.freeze({
     ],
   },
   gemini: {
-    projects: false,
-    pinned: false,
-    agents: false,
-    recents: true,
     loginUrl: 'https://gemini.google.com/app',
     badges: [{ key: 'recents', label: 'Recents only' }],
   },
@@ -50,6 +40,9 @@ export function normalizeSettings(values, defaults) {
   return {
     port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : defaults.port,
     token: String(values.token ?? '').trim(),
+    autoPaused: values.autoPaused === true,
+    nativeHost: String(values.nativeHost ?? ''),
+    archiveId: String(values.archiveId ?? ''),
     account:
       String(values.account ?? defaults.account ?? 'browser-local').trim() || 'browser-local',
     intervalMinutes:
@@ -96,16 +89,18 @@ export function providerState(
   const types = captureTypes ? normalizeCaptureTypes(captureTypes) : null;
   if (
     apiConnected &&
-    providerId === 'gemini' &&
+    providerId &&
     types &&
-    !types.recents &&
-    (types.projects || types.pinned || types.agents)
+    !eligibleCapture(providerId, types) &&
+    Object.values(types).some(Boolean)
   ) {
     return {
       tone: 'warning',
       label: 'Selection unavailable',
       detail:
-        'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.',
+        providerId !== 'gemini'
+          ? 'Choose a supported chat type or enable another website.'
+          : 'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.',
     };
   }
   if (
@@ -185,7 +180,7 @@ export function providerState(
         changed > 0
           ? `${progress.created} new · ${progress.updated} updated · ${progress.detected} detected`
           : progress.accepted > 0
-            ? `${progress.accepted} accepted · ${progress.detected} detected`
+            ? `${progress.unchanged ?? progress.accepted} unchanged · ${progress.detected} detected`
             : (entry.selection?.skipped ?? 0) > 0
               ? `No new chats · ${entry.selection.skipped} outside your selection`
               : `No changes · ${progress.detected} checked`,
@@ -221,6 +216,8 @@ export function friendlyError(error, code = null) {
   ) {
     return 'Start AI Memory on this computer, then try again.';
   }
+  if (code === 'legacy_pairing' || code === 'native_unavailable' || code === 'archive_mismatch')
+    return 'Open Settings and pair this archive with its native connection file.';
   if (code === 'unauthorized' || text.includes('rejected the token') || text.includes('401')) {
     return 'The ingest token does not match the local API.';
   }
@@ -265,11 +262,11 @@ export function describeEffectivePlan(providers = {}, captureTypes = {}) {
     };
   }
   const items = enabledProviders.map((id) => {
-    const caps = PROVIDER_CAPABILITIES[id] ?? {};
-    const matched = selectedKeys.filter((key) => caps[key]);
-    const unsupported = selectedKeys.filter((key) => !caps[key]);
+    const caps = supportedCaptureTypes[id] ?? [];
+    const matched = selectedKeys.filter((key) => caps.includes(key));
+    const unsupported = selectedKeys.filter((key) => !caps.includes(key));
     const name = PROVIDERS[id].name;
-    if (matched.length === 0) {
+    if (!eligibleCapture(id, policy)) {
       return {
         id,
         name,
@@ -298,6 +295,8 @@ export function formatSyncBreakdown(entry) {
     chips.push({ label: `+${progress.created} new`, tone: 'success' });
   if ((progress.updated ?? 0) > 0)
     chips.push({ label: `${progress.updated} updated`, tone: 'info' });
+  if ((progress.unchanged ?? 0) > 0)
+    chips.push({ label: `${progress.unchanged} unchanged`, tone: 'muted' });
   if ((selection.skipped ?? 0) > 0)
     chips.push({ label: `${selection.skipped} skipped`, tone: 'muted' });
   if ((selection.unknown ?? 0) > 0)
@@ -316,9 +315,97 @@ export function formatSyncBreakdown(entry) {
   const processed = progress.processed ?? 0;
   const percent =
     entry.running && detected > 0
-      ? Math.max(6, Math.min(100, Math.round((processed / detected) * 100)))
+      ? Math.max(0, Math.min(100, Math.round((processed / detected) * 100)))
       : entry.running
         ? null
         : null;
   return { chips, categoryChips, percent };
+}
+
+// Status is keyed by provider in profile storage, not by archive. Do not
+// attribute an older site's counts to a newly paired archive or renamed profile.
+export function statusForPairing(status, settings) {
+  if (!settings.archiveId) return {};
+  return Object.fromEntries(
+    Object.entries(status ?? {}).filter(([provider, entry]) => {
+      if (typeof entry?.captureScope !== 'string') return false;
+      try {
+        const scope = JSON.parse(entry.captureScope);
+        return (
+          Array.isArray(scope) &&
+          scope.length === 5 &&
+          scope[0] === settings.archiveId &&
+          scope[1] === provider &&
+          scope[3] === settings.account
+        );
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
+// The status is the receiver's acknowledgement, never a promise of Google consent or retrieval.
+export function captureOutcome(status, providers, since = 0) {
+  const runs = Object.entries(status).filter(
+    ([id, entry]) => providers[id] && entry?.lastRunMs && entry.lastRunMs >= since,
+  );
+  if (!runs.length) return '';
+  if (runs.some(([, entry]) => entry.running)) return 'Capturing selected chats…';
+  if (runs.some(([, entry]) => entry.continuationPending))
+    return 'More selected chats are queued for the next batch.';
+  const totals = { created: 0, updated: 0, unchanged: 0, skipped: 0 };
+  const problems = [];
+  let complete = 0;
+  for (const [id, entry] of runs) {
+    for (const key of ['created', 'updated', 'unchanged'])
+      totals[key] += entry.progress?.[key] ?? 0;
+    totals.skipped += entry.selection?.skipped ?? 0;
+    if (entry.lastErrorCode || entry.lastError || entry.selectionWarning) {
+      const name = PROVIDERS[id]?.name ?? 'Website';
+      problems.push(
+        entry.lastErrorCode === 'not_logged_in'
+          ? `${name}: sign in and retry`
+          : entry.selectionWarning
+            ? `${name}: some chats could not be classified`
+            : `${name}: ${friendlyError('', entry.lastErrorCode)}`,
+      );
+    } else complete++;
+  }
+  const { created, updated, unchanged, skipped } = totals;
+  const counts = `${created} new · ${updated} updated · ${unchanged} unchanged · ${skipped} skipped`;
+  if (problems.length)
+    return `${complete || created + updated + unchanged > 0 ? 'Partial capture' : 'Capture needs attention'} — ${problems.join('. ')}. ${counts}.`;
+  return `${created + updated + unchanged ? 'Saved locally' : 'No matching chats'} — ${counts}.`;
+}
+
+export function enterToggles(input) {
+  // Space is native checkbox activation. Enter should activate once, including
+  // when assistive technology follows keyboard focus on the switch.
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.repeat) {
+      event.preventDefault();
+      input.click();
+    }
+  });
+}
+
+export function progressSemantics(element, name, percent) {
+  element.setAttribute('role', 'progressbar');
+  element.setAttribute('aria-label', `${name} local capture`);
+  element.setAttribute('aria-valuemin', '0');
+  element.setAttribute('aria-valuemax', '100');
+  if (percent !== null) element.setAttribute('aria-valuenow', String(percent));
+}
+
+// Rebuilt controls have stable IDs. If a focused action no longer exists,
+// continue at its provider switch (or another visible, actionable control).
+export function restoreControl(id, fallback) {
+  if (!id) return;
+  const first = document.getElementById(id);
+  const target =
+    first && !first.disabled && !first.closest?.('[hidden]')
+      ? first
+      : document.getElementById(fallback);
+  if (target && document.activeElement !== target) target.focus?.({ preventScroll: true });
 }

@@ -8,22 +8,22 @@ export function parseConnectionFile(text) {
   } catch {
     throw invalid();
   }
+  if (file?.schema === 1 && file?.application === 'ai-memory' && file?.host === '127.0.0.1')
+    throw new Error(
+      'Legacy connection file. Run ai-memory connect --extension-id with your extension ID and choose the new connection file.',
+    );
   if (
     !file ||
-    Array.isArray(file) ||
-    file.schema !== 1 ||
+    file.schema !== 2 ||
     file.application !== 'ai-memory' ||
-    file.host !== '127.0.0.1' ||
-    !Number.isInteger(file.port) ||
-    file.port < 1 ||
-    file.port > 65535 ||
-    typeof file.token !== 'string' ||
-    file.token.length < 24 ||
-    file.token.length > 512 ||
-    /[^\x21-\x7e]/.test(file.token)
+    file.transport !== 'native' ||
+    typeof file.archive_instance_id !== 'string' ||
+    !/^[a-f0-9]{32}$/.test(file.archive_instance_id) ||
+    file.native_host !== 'org.ai_memory.archive_' + file.archive_instance_id ||
+    Object.keys(file).length !== 5
   )
     throw invalid();
-  return { port: file.port, token: file.token };
+  return { nativeHost: file.native_host, archiveId: file.archive_instance_id };
 }
 
 export function connectionPresentation(result) {
@@ -40,15 +40,25 @@ export function connectionPresentation(result) {
       'Not connected',
       'Start the local app, then choose its connection file below.',
     ],
+    legacy_pairing: [
+      'Upgrade your connection',
+      'Reconnect',
+      'Run ai-memory connect --extension-id with this extension ID and select the new connection file.',
+    ],
+    archive_changed: [
+      'Your archive changed',
+      'Reconnect',
+      'Verify the intended archive, then select its connection file again.',
+    ],
     unauthorized: [
       'Your connection needs an update',
       'Check connection',
-      'Choose the latest connection file, or check the token in manual settings.',
+      'Register the native host for this extension ID, then choose its connection file.',
     ],
     offline: [
       'Your computer is not connected',
       'Offline',
-      'Keep the local app running on this computer, then try again.',
+      'Register the native host for this browser and extension ID, then try again.',
     ],
     incompatible_server: [
       'Update your local app',

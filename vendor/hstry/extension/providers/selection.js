@@ -150,3 +150,15 @@ export function recordSelection(summary, decision) {
   else summary.skipped++;
   for (const category of decision.categories) summary.byType[category]++;
 }
+
+// Provider capabilities describe what its discovery API can verify, not where
+// a chat happens to be displayed. All three capture entry points use this gate.
+export const supportedCaptureTypes = Object.freeze({
+  chatgpt: Object.freeze(['projects', 'pinned', 'agents', 'recents']),
+  claude: Object.freeze(['projects', 'pinned', 'recents']),
+  gemini: Object.freeze(['recents']),
+});
+export function eligibleCapture(providerId, captureTypes) {
+  const selected = normalizeCaptureTypes(captureTypes);
+  return (supportedCaptureTypes[providerId] ?? []).some((key) => selected[key]);
+}

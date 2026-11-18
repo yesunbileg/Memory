@@ -23,12 +23,21 @@ class Remote:
     async def list_sources(self):
         return [dict(id=k, **v) for k, v in self.sources.items()]
 
+    async def get_source_text(self, source_id):
+        return self.sources[source_id]["text"]
+
     async def upload(self, path, title):
         self.operations.append(("upload", title))
         if self.fail_upload:
-            raise ConnectionError("synthetic network failure")
+            exc = ConnectionError("synthetic network failure before registration")
+            exc.definitely_not_sent = True
+            raise exc
         key = f"source-{len(self.operations)}"
-        self.sources[key] = {"title": title, "ready": False, "text": path.read_text()}
+        self.sources[key] = {
+            "title": title,
+            "ready": False,
+            "text": path.read_bytes().decode("utf-8"),
+        }
         self.peak_sources = max(self.peak_sources, len(self.sources))
         if self.lose_response:
             self.lose_response = False
@@ -275,7 +284,9 @@ async def test_terminal_partial_upload_can_recover_without_deleting_old_source(t
             sid = await super().upload(path, title)
             if self.partial_id is None:
                 self.partial_id = sid
-                raise NotebookLMError("partial upload failed", source_id=sid)
+                error = NotebookLMError("partial upload failed")
+                error.source_id = sid
+                raise error
             return sid
 
         async def wait_ready(self, source_id):
@@ -310,6 +321,7 @@ async def test_known_body_upload_failure_reuploads_partial_and_keeps_mapping_unt
             if self.fail_finalize:
                 self.fail_finalize = False
                 error = NotebookLMError("upload body failed", code="network_error")
+                error.definitely_not_sent = True  # Explicit rejection before body transfer.
                 error.source_id = sid
                 raise error
             return sid
@@ -430,7 +442,7 @@ async def test_terminal_error_never_adopts_ready_source_with_a_different_title(t
         original, safe_text, safe_title = SyncEngine(
             store, builder, Remote(), tmp_path / "md"
         )._prepare_snapshot(segment["id"], segment["revision"])
-        assert safe_text == original
+        assert safe_text != original and "archive_receipt: " in safe_text
         md = tmp_path / "md"
         md.mkdir()
         (md / safe_title).write_text(safe_text, encoding="utf-8")
@@ -466,6 +478,7 @@ async def test_failed_partial_at_notebook_quota_yields_only_its_uncommitted_slot
             if self.fail_finalize:
                 self.fail_finalize = False
                 error = NotebookLMError("upload body failed", code="network_error")
+                error.definitely_not_sent = True  # Explicit rejection before body transfer.
                 error.source_id = sid
                 raise error
             return sid
@@ -594,7 +607,12 @@ async def test_legacy_sensitive_pending_snapshot_is_redacted_before_resume(
         job = store.connection.execute("SELECT * FROM sync_jobs WHERE id=?", (job_id,)).fetchone()
         assert job["stage"] == "done"
         assert job["title"] != old_title
-        assert job["title"] == f"{segment['id']}-r{segment['revision']}-{digest(uploaded)[:16]}.md"
+        from hashlib import sha256
+
+        assert (
+            job["title"]
+            == f"{segment['id']}-r{segment['revision']}-{sha256(uploaded.encode()).hexdigest()[:16]}.md"
+        )
         assert not old_path.exists()
         assert (
             store.get_conversation(
@@ -622,7 +640,7 @@ def add_legacy_source(engine_store, builder, remote, segment_id="SEG-001"):
 
 
 @pytest.mark.asyncio
-async def test_legacy_mapped_raw_source_is_replaced_before_it_is_deleted(tmp_path):
+async def test_legacy_mapped_raw_source_replaced_but_unproven_copy_never_deleted(tmp_path):
     secret = "password = 'SyntheticPass987654!'"
     with Store(tmp_path / "db") as store:
         store.ingest(
@@ -639,11 +657,10 @@ async def test_legacy_mapped_raw_source_is_replaced_before_it_is_deleted(tmp_pat
         result = await SyncEngine(store, builder, remote, tmp_path / "md").run_once()
         assert not result["blocked"]
         assert "SyntheticPass987654!" in original
-        assert "SyntheticPass987654!" not in remote.sources[next(iter(remote.sources))]["text"]
-        assert len(remote.sources) == 1
-        assert old_title not in [source["title"] for source in remote.sources.values()]
-        operations = [op[0] for op in remote.operations]
-        assert operations.index("ready") < operations.index("delete")
+        assert remote.sources["legacy-raw"]["text"] == original
+        published = [row for sid, row in remote.sources.items() if sid != "legacy-raw"]
+        assert len(published) == 1 and "SyntheticPass987654!" not in published[0]["text"]
+        assert not [op for op in remote.operations if op[0] == "delete"]
         assert store.connection.execute("SELECT revision FROM segments").fetchone()[0] == 2
         mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
         assert mapped in remote.sources
@@ -652,7 +669,7 @@ async def test_legacy_mapped_raw_source_is_replaced_before_it_is_deleted(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["uploading", "processing"])
-async def test_legacy_inflight_raw_source_is_replaced_not_reconciled_as_safe(tmp_path, stage):
+async def test_legacy_inflight_unproven_source_never_claimed_or_deleted(tmp_path, stage):
     secret = "password = 'SyntheticPass987654!'"
     with Store(tmp_path / "db") as store:
         store.ingest(
@@ -690,20 +707,14 @@ async def test_legacy_inflight_raw_source_is_replaced_not_reconciled_as_safe(tmp
                     "UPDATE sync_jobs SET old_source_ids='[]' WHERE id=?", (cursor.lastrowid,)
                 )
         result = await SyncEngine(store, builder, remote, snapshot_dir).run_once()
-        assert not result["blocked"]
-        assert len(remote.sources) == 1
-        safe_source = next(iter(remote.sources.values()))
-        assert safe_source["text"] != original
-        assert "SyntheticPass987654!" not in safe_source["text"]
-        assert all(source["title"] != old_title for source in remote.sources.values())
-        assert remote.operations.index(("ready", "source-1")) < remote.operations.index(
-            ("delete", "legacy-raw")
-        )
-        job = store.connection.execute("SELECT * FROM sync_jobs").fetchone()
-        assert job["stage"] == "done"
-        assert (
-            store.connection.execute("SELECT source_id FROM source_map").fetchone()[0] == "source-1"
-        )
+        if stage == "uploading":
+            assert result["blocked"][0]["reason"] == "UploadUncertain"
+            await SyncEngine(store, builder, remote, snapshot_dir).run_once()
+        assert remote.sources["legacy-raw"]["text"] == original
+        assert not [op for op in remote.operations if op[0] == "delete"]
+        mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
+        assert mapped != "legacy-raw"
+        assert "SyntheticPass987654!" not in remote.sources[mapped]["text"]
 
 
 @pytest.mark.asyncio
@@ -756,19 +767,14 @@ async def test_stale_raw_source_cleanup_moves_to_current_revision_job(tmp_path, 
         result = await SyncEngine(store, builder, remote, snapshot_dir).run_once()
 
         assert not result["blocked"]
-        assert len(remote.sources) == 1
-        safe_source = next(iter(remote.sources.values()))
-        assert "SyntheticPass987654!" not in safe_source["text"]
-        assert "legacy-raw" not in remote.sources
-        assert remote.operations.index(("ready", "source-1")) < remote.operations.index(
-            ("delete", "legacy-raw")
+        assert "legacy-raw" in remote.sources and remote.sources["legacy-raw"]["text"] == original
+        assert not [op for op in remote.operations if op[0] == "delete"]
+        mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
+        assert (
+            mapped != "legacy-raw" and "SyntheticPass987654!" not in remote.sources[mapped]["text"]
         )
-        jobs = store.connection.execute(
-            "SELECT revision,stage,old_source_ids FROM sync_jobs ORDER BY id"
-        ).fetchall()
-        assert jobs[0]["stage"] == "superseded"
-        assert jobs[1]["stage"] == "done"
-        assert '"legacy-raw"' in jobs[1]["old_source_ids"]
+        jobs = store.connection.execute("SELECT stage FROM sync_jobs ORDER BY id").fetchall()
+        assert [r[0] for r in jobs] == ["superseded", "done"]
 
 
 @pytest.mark.asyncio
@@ -805,7 +811,7 @@ async def test_failed_unregistered_upload_then_edit_recovers_without_losing_revi
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
         first = store.connection.execute("SELECT * FROM sync_jobs").fetchone()
-        assert first["stage"] == "uploading" and not remote.sources
+        assert first["stage"] == "pending" and not remote.sources
         c["messages"][0]["text"] = "new exact content"
         store.ingest(c)
         remote.fail_upload = False
@@ -818,7 +824,7 @@ async def test_failed_unregistered_upload_then_edit_recovers_without_losing_revi
         assert "new exact content\n" in next(iter(remote.sources.values()))["text"]
         assert [
             r[0] for r in store.connection.execute("SELECT stage FROM sync_jobs ORDER BY id")
-        ] == ["done", "done"]
+        ] == ["superseded", "done"]
 
 
 @pytest.mark.asyncio
@@ -888,7 +894,7 @@ async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
 
 
 @pytest.mark.asyncio
-async def test_missing_current_managed_source_is_repaired_by_identity(tmp_path):
+async def test_missing_current_managed_source_requires_republish_by_identity(tmp_path):
     with Store(tmp_path / "db") as store:
         store.ingest(conversation(), consent=True)
         remote = Remote()
@@ -899,11 +905,17 @@ async def test_missing_current_managed_source_is_repaired_by_identity(tmp_path):
         remote.sources["foreign"] = {"title": "Foreign", "ready": True, "text": "untouched"}
         result = await engine.run_once()
         assert not result["blocked"]
+        assert result["status"]["sync_status"] == "pending"
+        assert set(remote.sources) == {"foreign"}
+        assert store.connection.execute("SELECT stage FROM sync_jobs").fetchone()[0] == "missing"
+        from ai_memory.sync import republish
+
+        assert republish(store, "SEG-001")["republish_authorized"] == "SEG-001"
+        result = await engine.run_once()
+        assert not result["blocked"]
         mapped = store.connection.execute("SELECT source_id FROM source_map").fetchone()[0]
-        assert mapped != lost and mapped in remote.sources
-        assert "foreign" in remote.sources
+        assert mapped != lost and set(remote.sources) == {"foreign", mapped}
         assert result["status"]["sync_status"] == "up_to_date"
-        assert store.connection.execute("SELECT revision FROM segments").fetchone()[0] == 1
 
 
 @pytest.mark.asyncio
@@ -975,6 +987,13 @@ async def test_missing_cleanup_replacement_after_another_edit_transfers_obligati
         remote.fail_delete = False
         with store.connection:
             store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        assert not result["blocked"]
+        assert result["status"]["sync_status"] == "pending"
+        assert set(remote.sources) == {predecessor}
+        from ai_memory.sync import republish
+
+        republish(store, "SEG-001")
         result = await engine.run_once()
         assert not result["blocked"]
         assert result["status"]["sync_status"] == "up_to_date"

@@ -58,10 +58,13 @@ async def test_real_source_budget_recovers_with_a_pair_when_three_render_too_lar
                 store.connection.execute(
                     "INSERT INTO source_map VALUES(?,?,?)", (row["id"], source_id, row["revision"])
                 )
+                safe = builder.render_outbound(row["id"])
+                store.save_outbound(row["id"], row["revision"], safe)
+                store.attest_source(source_id, row["id"], row["revision"])
                 remote.sources[source_id] = {
                     "title": source_id,
                     "ready": True,
-                    "text": builder.render(row["id"]),
+                    "text": safe,
                 }
         store.ingest(
             conversation(

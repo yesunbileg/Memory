@@ -2,15 +2,22 @@
 
 import json
 import sys
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
+import ai_memory
+
 
 class SimulatedNotebook:
     def __init__(self, references=None):
-        self.references = references or []
+        self.references = (
+            [{"source_id": "owned-source", "citation_number": 1, "cited_text": "Which project?"}]
+            if references is None
+            else references
+        )
         self.queries = []
 
     async def list_sources(self):
@@ -28,10 +35,11 @@ class SimulatedNotebook:
 
 
 def decode(result):
-    assert result.isError is False
-    if result.structuredContent is not None:
-        return result.structuredContent
-    return json.loads(result.content[0].text)
+    payload = result.structuredContent
+    assert isinstance(payload, dict)
+    assert result.isError == ("error" in payload)
+    assert json.loads(result.content[0].text) == payload
+    return payload
 
 
 def seed_archive(db_path, *, map_source=True):
@@ -81,6 +89,10 @@ def seed_archive(db_path, *, map_source=True):
                 "INSERT INTO source_map(segment_id, source_id, revision) VALUES (?, ?, ?)",
                 (segment_id, "owned-source", segment["revision"]),
             )
+            store.save_outbound(
+                segment_id, segment["revision"], SegmentBuilder(store).render_outbound(segment_id)
+            )
+            store.attest_source("owned-source", segment_id, segment["revision"])
             store.connection.commit()
         store.set_setting("notebook_id", "test-notebook")
         messages = store.get_conversation(conversation_id)["messages"]
@@ -103,7 +115,7 @@ async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
         assert status["notebook"]["connected"] is True
         answer = decode(await client.call_tool("memory_ask", {"question": "Earlier decision?"}))
         assert answer["answer"] == "NotebookLM answer [1]"
-        assert answer["sources"] == []
+        assert [s["source_id"] for s in answer["sources"]] == ["owned-source"]
     assert notebook.queries == [("Earlier decision?", ["owned-source"])]
     assert capsys.readouterr().out == ""
 
@@ -124,11 +136,6 @@ async def test_citations_identify_only_exact_verified_headings(tmp_path):
             },
             {"source_id": "owned-source", "citation_number": 2, "cited_text": "Which project?"},
             {
-                "source_id": "unknown-source",
-                "citation_number": 3,
-                "cited_text": f"### {conversation_id} · 0001 · User · 2026-11-10T10:00:00Z",
-            },
-            {
                 "source_id": "owned-source",
                 "citation_number": 4,
                 "cited_text": f"### {conversation_id} · 0001 · Assistant · 2026-11-10T10:00:00Z",
@@ -145,10 +152,8 @@ async def test_citations_identify_only_exact_verified_headings(tmp_path):
     assert sources[0]["message_ids"] == [message_ids[1]]
     assert "conversation_id" not in sources[1]
     assert "message_ids" not in sources[1]
-    assert "segment_id" not in sources[2]
-    assert "conversation_id" not in sources[2]
-    assert sources[2]["source_id"] == "unknown-source"
-    assert "message_ids" not in sources[3]
+    assert sources[2]["segment_id"] == segment_id
+    assert "message_ids" not in sources[2]
 
 
 def test_quoted_message_heading_does_not_authorize_another_message_id(tmp_path):
@@ -204,6 +209,8 @@ def test_quoted_message_heading_does_not_authorize_another_message_id(tmp_path):
             "INSERT INTO source_map(segment_id,source_id,revision) VALUES(?,?,?)",
             (segment_id, "owned-source", revision),
         )
+        store.save_outbound(segment_id, revision, SegmentBuilder(store).render_outbound(segment_id))
+        store.attest_source("owned-source", segment_id, revision)
         store.connection.commit()
 
         sources = _reference_sources(
@@ -271,13 +278,18 @@ async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_p
     """A genuine MCP handshake parses stdout from the production gateway process."""
     from datetime import timedelta
 
+    from ai_memory.store import Store
+
     db = tmp_path / "stdio.sqlite"
+    with Store(db):
+        pass
     parameters = StdioServerParameters(
+        env={"PYTHONPATH": str(Path(ai_memory.__file__).resolve().parents[1])},
         command=sys.executable,
         args=[
             "-c",
-            "from pathlib import Path; import sys; from ai_memory.gateway import create_server; "
-            "create_server(Path(sys.argv[1])).run()",
+            "from pathlib import Path; import sys, asyncio; from ai_memory.gateway import stdio_main; "
+            "asyncio.run(stdio_main(Path(sys.argv[1])))",
             str(db),
         ],
     )
@@ -323,3 +335,86 @@ async def test_edited_archive_does_not_attribute_old_cloud_passage_to_current_me
     assert answer["sources"][0]["segment_id"] == segment_id
     assert "message_ids" not in answer["sources"][0]
     assert "conversation_id" not in answer["sources"][0]
+
+
+async def test_foreign_or_absent_citation_withholds_entire_answer(tmp_path):
+    from ai_memory.gateway import create_server
+
+    db = tmp_path / "db"
+    seed_archive(db)
+    for refs in (
+        [],
+        [
+            {"source_id": "owned-source", "cited_text": "Which project?"},
+            {"source_id": "foreign", "cited_text": "PRIVATE_TEST_PASSAGE"},
+        ],
+    ):
+        async with create_connected_server_and_client_session(
+            create_server(db, adapter=SimulatedNotebook(refs))
+        ) as client:
+            result = await client.call_tool("memory_ask", {"question": "Шийдвэр?"})
+            assert decode(result)["error"]["code"] == "unverified_sources"
+            assert "PRIVATE_TEST_PASSAGE" not in str(result)
+            assert "NotebookLM answer" not in str(result)
+
+
+async def test_legacy_receipt_and_oversized_or_malformed_question_never_dispatch(tmp_path):
+    from ai_memory.gateway import create_server
+    from ai_memory.store import Store
+
+    db = tmp_path / "db"
+    seed_archive(db)
+    with Store(db) as store, store.connection:
+        store.connection.execute("DELETE FROM source_receipts")
+    remote = SimulatedNotebook()
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=remote)
+    ) as client:
+        for q in (
+            {"question": "SENSITIVE_SYNTHETIC" * 500},
+            {"question": {"private": "SENSITIVE_SYNTHETIC"}},
+        ):
+            result = await client.call_tool("memory_ask", q)
+            assert decode(result)["error"]["code"] == "invalid_question"
+            assert "SENSITIVE_SYNTHETIC" not in str(result)
+        result = await client.call_tool("memory_ask", {"question": "Past?"})
+        assert decode(result)["error"]["code"] == "no_synced_sources"
+    assert not remote.queries
+
+
+async def test_scope_is_frozen_and_rechecked_across_provider_wait(tmp_path):
+    from ai_memory.gateway import create_server
+    from ai_memory.store import Store
+
+    db = tmp_path / "db"
+    cid, _, _ = seed_archive(db)
+
+    class Changed(SimulatedNotebook):
+        async def ask(self, question, source_ids=None):
+            assert source_ids == ["owned-source"]
+            with Store(db) as store, store.connection:
+                store.connection.execute("UPDATE conversations SET consent=0 WHERE id=?", (cid,))
+            return {
+                "answer": "SYNTHETIC_PRIVATE_ANSWER",
+                "references": [
+                    {"source_id": "owned-source", "cited_text": "SYNTHETIC_PRIVATE_PASSAGE"}
+                ],
+            }
+
+    async with create_connected_server_and_client_session(
+        create_server(db, adapter=Changed())
+    ) as client:
+        res = await client.call_tool("memory_ask", {"question": "Өмнөх шийдвэр?"})
+        assert decode(res)["error"]["code"] == "unverified_sources"
+        assert "SYNTHETIC_PRIVATE" not in str(res)
+
+
+async def test_mcp_missing_archive_never_creates_file(tmp_path):
+    from ai_memory.gateway import create_server
+
+    db = tmp_path / "typo" / "absent.sqlite"
+    async with create_connected_server_and_client_session(create_server(db)) as client:
+        for tool, args in (("memory_status", {}), ("memory_ask", {"question": "Past?"})):
+            res = await client.call_tool(tool, args)
+            assert decode(res)["error"]["code"] == "archive_missing"
+    assert not db.parent.exists()

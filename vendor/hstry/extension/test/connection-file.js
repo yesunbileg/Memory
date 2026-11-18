@@ -3,12 +3,34 @@ import { parseConnectionFile, connectionPresentation } from '../connection-file.
 import { normalizeSettings } from '../ui.js';
 
 const token = 'synthetic-private-connection-token';
-const config = { schema: 1, application: 'ai-memory', host: '127.0.0.1', port: 41770, token };
-assert.deepEqual(parseConnectionFile(JSON.stringify(config)), { port: 41770, token });
+const archiveId = 'a'.repeat(32),
+  nativeHost = 'org.ai_memory.archive_' + archiveId;
+const config = {
+  schema: 2,
+  application: 'ai-memory',
+  transport: 'native',
+  archive_instance_id: archiveId,
+  native_host: nativeHost,
+};
+assert.deepEqual(parseConnectionFile(JSON.stringify(config)), { archiveId, nativeHost });
+assert.throws(
+  () =>
+    parseConnectionFile(
+      JSON.stringify({
+        schema: 1,
+        application: 'ai-memory',
+        host: '127.0.0.1',
+        port: 41770,
+        token,
+      }),
+    ),
+  /legacy connection file/i,
+);
 for (const patch of [
-  { host: 'example.com' },
-  { host: 'localhost.evil.test' },
-  { schema: 2 },
+  { native_host: 'other.test' },
+  { archive_instance_id: 'bad' },
+  { schema: 1 },
+  { transport: 'http' },
   { application: 'other' },
   { port: 0 },
   { port: 65536 },

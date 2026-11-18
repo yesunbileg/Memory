@@ -50,6 +50,26 @@ for (const [name, sync, field, empty, malformed] of [
     { mapping: {}, current_node: null },
     [
       {},
+      {
+        mapping: {
+          n: {
+            message: {
+              author: { role: 'user' },
+              content: { content_type: 'unknown-visible-record', text: 'synthetic' },
+            },
+          },
+        },
+      },
+      {
+        mapping: {
+          n: {
+            message: {
+              author: { role: 'user' },
+              content: { content_type: 'text', parts: [{ type: 'unknown' }] },
+            },
+          },
+        },
+      },
       { mapping: null },
       { mapping: [] },
       { mapping: { n: {} } },
@@ -68,6 +88,16 @@ for (const [name, sync, field, empty, malformed] of [
     { uuid: 'chat', chat_messages: [] },
     [
       {},
+      {
+        uuid: 'chat',
+        chat_messages: [
+          { sender: 'human', content: [{ type: 'future-visible-content', data: 'synthetic' }] },
+        ],
+      },
+      {
+        uuid: 'chat',
+        chat_messages: [{ sender: 'human', content: [{ type: 'text', text: { unknown: true } }] }],
+      },
       { uuid: 'chat', chat_messages: null },
       { uuid: 'chat', chat_messages: {} },
       { uuid: 'chat', chat_messages: [{}] },

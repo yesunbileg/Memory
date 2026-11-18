@@ -27,7 +27,7 @@ Google ашиглахгүй үндсэн шалгалт:
 1. Brave дээр `brave://extensions/` нээнэ (`chrome://extensions/` мөн болно).
 2. **Developer mode** асаана.
 3. **Load unpacked** → repository доторх `vendor/hstry/extension` хавтсыг сонгоно.
-4. Өмнө суулгасан бол **Reload** дарна. Settings дээр **0.5.3** харагдана.
+4. Өмнө суулгасан бол **Reload** дарна. Settings дээр **0.6.0** харагдана.
 
 ZIP хэрэгтэй бол:
 
@@ -35,15 +35,15 @@ ZIP хэрэгтэй бол:
 .venv/bin/python scripts/package_extension.py
 ```
 
-`dist/ai-memory-extension-0.5.3.zip` үүснэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон license орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
+`dist/ai-memory-extension-0.6.0.zip` үүснэ. Задалсан, `manifest.json` нь шууд дотроо байгаа хавтсыг **Load unpacked**-д сонгоно. Багцад icon, UI, provider код болон төслийн ба upstream MIT лиценз орно; token, connection/auth файл, тест болон хувийн архив орохгүй.
 
 ## 3. Компьютертэй холбох
 
 ```bash
-.venv/bin/ai-memory connect
+.venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-Terminal-ийг нээлттэй байлгана. Extension → Settings → **Choose connection file** → terminal дээр гарсан `extension-connection.json` файлыг сонгоно. Default архивт энэ нь `data/extension-connection.json` байна. **Connected to your computer** гэж гарахад token болон архивын холболт батлагдсан гэсэн үг.
+Linux дээр ажиллана. `YOUR_EXTENSION_ID`-ийн оронд Extensions хуудаст харуулсан 32 үсэгтэй ID-г оруулна. Хөтөчдөө тааруулж `brave`, `chrome` эсвэл `chromium` сонгоно. Settings → **Choose connection file** дээр командын хэвлэсэн `connection_file` замыг сонго. Хөтөч локал програмыг өөрөө асаана. Terminal-ийг нээлттэй байлгах шаардлагагүй. Хуучин bearer файлтай бол шинэ файл үүсгэж дахин холбоно. [Дэлгэрэнгүй](native-pairing.md).
 
 ChatGPT эсвэл Claude-оо асааж, дараах checklist-ийг сонгоно:
 
@@ -102,17 +102,21 @@ Chrome/Firefox бол `brave`-ийг `chrome`/`firefox` гэж солино. Pro
 
 Өмнө `NOTEBOOKLM_HOME` эсвэл тусгай storage файл тохируулсан бол тэрийгээ хэрэглэнэ. Тусгай файлтай login жишээ: `notebooklm login --browser-cookies brave --storage /private/path/storage_state.json`. MCP/worker мөн ижил auth location ашиглана. Дахин нэвтрэхдээ шинэ notebook үүсгэх шаардлагагүй. Анхны notebook тохиргоо бол [README](../README.md#connect-notebooklm)-ийн `init --notebook-id` алхмыг ашиглана.
 
-Хиймэл өгөгдөлтэй тусдаа Google notebook дээр upload/query шалгах:
+Хиймэл өгөгдлөөр туршихдаа хоосон notebook зориуд үүсгэж ID-г нь ав. Локал гаралтын хавтас мөн хоосон байна. Нэр нь таарсан notebook эсвэл хуучин архив ашиглахгүй.
 
 ```bash
-.venv/bin/python scripts/live_demo.py --output data/live-local-demo
+.venv/bin/python scripts/live_demo.py --notebook-id YOUR_EMPTY_DEMO_NOTEBOOK_ID --output data/new-live-demo
 ```
 
 `live_notebooklm_test: executed_review_answer` гарвал хүсэлт гүйцэтгэсэн гэсэн үг. Хариултын SQLite/NotebookLM шийдвэрүүд source-той таарч байгааг шалгана. Free-form хариулт доторх conversation ID-г дангаар нь баталгаатай гэж үзэхгүй; structured source/segment reference болон эх архивтай тулгана.
 
+`pending` хүлээгдэж буй яриаг жагсаана. `preview ID` нь илгээх масктай текстийг локалд харуулна. `approve ID...` нь тухайн ярианы ирээдүйн үргэлжлэлийг мөн зөвшөөрнө. `revoke ID...` цаашдын илгээлтийг зогсооно, Google дээрх хуучин хуулбарыг устгахгүй. [Зөвшөөрөл, нөөцлөлт ба сэргээх](consent-backup.md).
+
 Өөрийн жинхэнэ ярианаас Google руу дамжуулахыг зөвшөөрсөн ID-уудыг л `ai-memory approve ID1 ID2` командад өгч, дараа нь `ai-memory sync` ажиллуулна. Web capture нь Google upload зөвшөөрлийг автоматаар өгөхгүй.
 
-Upload хийх хувилбарт танигдсан API key, password/token, cookie, JWT болон private key-ийн нууц утгыг урттай нь тэнцүү тооны `*` тэмдэгтээр солино. Нэр, хашилт, бусад текст, мөрийн шилжилт хадгалагдана. SQLite болон локал Markdown export эх текстээ хадгална; `data/sync/` доторх cloud snapshot масктай байна. Таних дүрэмд хамрагдаагүй нууц байж болох тул зөвшөөрөл өгөхөөс өмнө эх яриагаа шалгана.
+Upload хийх хувилбарт танигдсан API key, password/token, cookie, JWT болон private key-ийн нууц утгыг урттай нь тэнцүү тооны `*` тэмдэгтээр солино. Нэр, хашилт, бусад текст, мөрийн шилжилт хадгалагдана. SQLite болон локал Markdown export эх текстээ хадгална; архив бүрийн `ARCHIVE.sqlite.files/sync/` хавтас дахь cloud snapshot масктай байна. Өөр архивтай хавтас хуваалцахгүй. Таних дүрэмд хамрагдаагүй нууц байж болох тул зөвшөөрөл өгөхөөс өмнө эх яриагаа шалгана.
+
+Google дээр өмнө хадгалсан source алга болбол автоматаар дахин илгээхгүй, retrieval-д ашиглахгүй. Дахин илгээхээр шийдвэл `ai-memory republish SEGMENT_ID` командаар тухайн segment-ийг зааж дараа нь `ai-memory sync` ажиллуулна.
 
 ## 6. Codex/OpenCode болон background worker
 
@@ -128,17 +132,15 @@ Upload хийх хувилбарт танигдсан API key, password/token, c
 .venv/bin/ai-memory watch --codex-path ~/.codex/sessions --opencode-path ~/.local/share/opencode
 ```
 
-Terminal-ийг нээлттэй байлгавал 30 секунд тутам scan хийж, зөвшөөрсөн өгөгдлийг default 12 цагийн давтамжтай sync хийнэ. Хүлээгдэж буй retry нь queue дахь хугацаагаа дагана. Google login/quota/import алдааг terminal дээр нууц утга гаргалгүй мэдээлнэ.
+Terminal-ийг нээлттэй байлгавал 30 секунд тутам scan хийж, зөвшөөрсөн өгөгдлийг default 12 цагийн давтамжтай sync хийнэ. Удаан remote шалгалт локал scan-ийг зогсоохгүй. `status`-ын `watch` хэсгээс амжилттай уншсан сүүлийн хугацаа, дараагийн scan, remote ажил болон алдааг шалгана. Хүлээгдэж буй retry нь queue дахь хугацаагаа дагана. Google login/quota/import алдааг terminal дээр нууц утга гаргалгүй мэдээлнэ.
 
-Terminal-гүй автоматаар асаахыг хүсвэл `config/ai-memory.service.example` болон `config/ai-memory-receiver.service.example` доторх executable, repository, **ижил archive**-ын абсолют замуудыг өөрийн замаар солино. Custom auth directory хэрэглэдэг бол service-д мөн ижил `NOTEBOOKLM_HOME` өгнө. Хоёр файлыг `~/.config/systemd/user/` руу `.service` нэрээр байрлуулаад foreground receiver/worker-ээ Ctrl+C-ээр зогсоосны дараа:
+Локал цуглуулагчийг арын горимоор асаах бол `config/ai-memory.service.example`-д executable, repository болон архивын абсолют замаа тохируулна. Үүнийг `~/.config/systemd/user/ai-memory.service` болгон хадгалаад ажиллуулна. Browser өргөтгөлийн шинэ холболтод тусдаа HTTP receiver үйлчилгээ хэрэггүй.
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now ai-memory.service ai-memory-receiver.service
-journalctl --user -u ai-memory.service -u ai-memory-receiver.service -f
+systemctl --user enable --now ai-memory.service
+journalctl --user -u ai-memory.service -f
 ```
-
-Эдгээр нь таны локал Linux-д суулгах жишээ; cloud agent таны user service-ийг автоматаар асаахгүй.
 
 ## 7. MCP болон хөгжүүлэлтийн тест
 
@@ -153,9 +155,10 @@ journalctl --user -u ai-memory.service -u ai-memory-receiver.service -f
 Optional browser UI шалгалт нь Playwright library болон таны суулгасан Brave/Chrome-ийг ашиглана; Google login хийхгүй, хувийн profile нээхгүй:
 
 ```bash
-uv run --frozen --extra login --with playwright python scripts/extension_ui_check.py
+.venv/bin/python scripts/extension_ui_check.py --browser-executable /usr/bin/chromium
+xvfb-run -a .venv/bin/python scripts/extension_toolbar_check.py --browser-executable /usr/bin/chromium
 ```
 
-Browser автоматаар олдохгүй бол `--browser-executable /бүтэн/зам/browser` нэмнэ. Зургууд `data/ui-check/`-д гарна. Энэ harness тэнцэх нь бодит account-ын private API болон installed-extension шалгалтыг орлохгүй.
+Browser автоматаар олдохгүй бол `--browser-executable /бүтэн/зам/browser` нэмнэ. Зургууд `data/ui-check/`-д гарна. Эхний тест хөтчийн API-г дуурайлган хуудсуудыг шалгана. Хоёр дахь нь тусгаарласан profile-д өргөтгөл суулгаж toolbar-ийг шалгана. Аль аль нь бодит account-ын API-г шалгахгүй.
 
 Одоогоор Claude Code/Gemini CLI local adapter байхгүй. Gemini organized category, бодит Google quota, урт хугацааны login, Монгол retrieval чанарыг бүрэн батлагдсан гэж тэмдэглэхгүй. Гол V1 урсгалын regression болон суулгах алхмуудыг [validation](validation.md)-д бүртгэнэ.

@@ -1,82 +1,42 @@
-// Only an authenticated identity check establishes an AI Memory connection.
+// Native Messaging launches only the OS-registered host with a matching allowed extension origin.
+// A loopback HTTP response (even with a matching archive ID) is never sufficient.
+const errors = {
+  missing_token: 'Choose a native connection file from AI Memory first.',
+  legacy_pairing:
+    'Upgrade your connection using ai-memory connect --extension-id and choose its new connection file.',
+  unauthorized: 'The native host does not allow this extension.',
+  offline: 'The native host is unavailable. Register it for this browser and extension ID.',
+  archive_changed: 'The registered archive has changed. Reconnect the intended archive.',
+  incompatible_server: 'Choose a valid native AI Memory connection file.',
+};
+
+export function validPair(settings) {
+  return (
+    typeof settings?.archiveId === 'string' &&
+    /^[a-f0-9]{32}$/.test(settings.archiveId) &&
+    settings.nativeHost === 'org.ai_memory.archive_' + settings.archiveId
+  );
+}
+
 export async function checkConnection(
   settings,
-  { fetchImpl = globalThis.fetch, requireArchive = false } = {},
+  { sendNative = (host, message) => chrome.runtime.sendNativeMessage(host, message) } = {},
 ) {
-  const port = Number(settings?.port);
-  const validPort = Number.isInteger(port) && port >= 1 && port <= 65535;
-  const url = `http://127.0.0.1:${validPort ? port : 41770}/auth/check`;
-  const token = typeof settings?.token === 'string' ? settings.token.trim() : '';
-  if (!token || token.length > 512 || /[^\x21-\x7e]/.test(token)) {
-    return {
-      ok: false,
-      url,
-      code: 'missing_token',
-      error: 'Connect AI Memory using your private connection file first.',
-    };
-  }
-  if (!validPort) {
-    return {
-      ok: false,
-      url,
-      code: 'incompatible_server',
-      error: 'Choose a valid AI Memory connection file.',
-    };
-  }
-  let response;
+  const failed = (code) => ({ ok: false, code, error: errors[code] });
+  if (!settings?.nativeHost && !settings?.archiveId)
+    return failed(settings?.token ? 'legacy_pairing' : 'missing_token');
+  if (!validPair(settings)) return failed('incompatible_server');
   try {
-    response = await fetchImpl(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: '{}',
-      redirect: 'error',
-      credentials: 'omit',
-      cache: 'no-store',
-      signal: AbortSignal.timeout(4000),
+    const reply = await sendNative(settings.nativeHost, {
+      op: 'check',
+      archive_instance_id: settings.archiveId,
     });
+    if (reply?.error && Object.hasOwn(errors, reply.error)) return failed(reply.error);
+    if (reply?.status !== 'ok' || reply.service !== 'ai-memory' || reply.schema !== 2)
+      return failed('incompatible_server');
+    if (reply.archive_instance_id !== settings.archiveId) return failed('archive_changed');
+    return { ok: true, archiveId: settings.archiveId };
   } catch {
-    return {
-      ok: false,
-      url,
-      code: 'offline',
-      error: 'AI Memory is offline. Run ai-memory connect and keep its terminal open.',
-    };
+    return failed('offline');
   }
-  if (response.status === 401 || response.status === 403) {
-    return {
-      ok: false,
-      url,
-      code: 'unauthorized',
-      error: 'This connection file does not match the running AI Memory receiver.',
-    };
-  }
-  let data;
-  try {
-    data = response.ok ? await response.json() : null;
-  } catch {
-    data = null;
-  }
-  if (data?.status !== 'ok' || data?.service !== 'ai-memory' || data?.schema !== 1) {
-    return {
-      ok: false,
-      url,
-      code: 'incompatible_server',
-      error: 'This port is not a compatible AI Memory receiver. Run ai-memory connect.',
-    };
-  }
-  // Legacy probes remain recognizable, but capture requires a logical archive identity.
-  const archiveId =
-    typeof data.archive_instance_id === 'string' && data.archive_instance_id
-      ? data.archive_instance_id
-      : null;
-  if (requireArchive && !archiveId) {
-    return {
-      ok: false,
-      url,
-      code: 'incompatible_server',
-      error:
-        'This receiver cannot identify its archive. Restart AI Memory with the current version before capturing.',
-    };
-  }
-  return { ok: true, url, archiveId };
 }
