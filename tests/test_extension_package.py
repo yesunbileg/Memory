@@ -51,8 +51,7 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
             "popup.html",
             "popup.css",
             "popup.js",
-            "popup-picker.js",
-            "popup-scope.js",
+            "page-picker.js",
             "providers/chatgpt.js",
             "providers/claude.js",
             "providers/gemini.js",
@@ -65,10 +64,35 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["background"]["service_worker"] in names
         assert "options_page" not in manifest and "options_ui" not in manifest
-        assert not manifest.get("content_scripts")
+        trusted_sites = {
+            "https://chatgpt.com/*",
+            "https://claude.ai/*",
+            "https://gemini.google.com/*",
+        }
+        assert set(manifest["host_permissions"]) == trusted_sites
+        (picker,) = manifest["content_scripts"]
+        assert set(picker["matches"]) == trusted_sites
+        assert picker.get("world", "ISOLATED") == "ISOLATED"
+        assert picker.get("all_frames", False) is False
+        assert not any(
+            picker.get(k) for k in ("match_about_blank", "match_origin_as_fallback", "css")
+        )
+        assert picker["js"] == ["page-picker-routes.js", "page-picker.js"]
+        assert not manifest.get("externally_connectable") and not manifest.get(
+            "web_accessible_resources"
+        )
         assert not ({"scripting", "tabs", "activeTab", "downloads"} & set(manifest["permissions"]))
         assert {name for name in names if name.endswith(".html")} == {"popup.html"}
-        assert not {"options.html", "options.js", "sidebar-picker.js", "sidebar-picker.css"} & names
+        assert (
+            not {
+                "options.html",
+                "options.js",
+                "popup-picker.js",
+                "sidebar-picker.js",
+                "sidebar-picker.css",
+            }
+            & names
+        )
         runtime = b"\n".join(
             archive.read(name) for name in names if name.endswith((".html", ".js"))
         )
@@ -82,7 +106,9 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         assert sentinel.encode() not in b"".join(archive.read(name) for name in names)
 
 
-@pytest.mark.parametrize("missing", ["icons/icon-128.png", "popup.js", "providers/chatgpt.js"])
+@pytest.mark.parametrize(
+    "missing", ["icons/icon-128.png", "popup.js", "page-picker.js", "providers/chatgpt.js"]
+)
 def test_extension_package_rejects_missing_runtime_dependencies(tmp_path, missing):
     source = package_source(tmp_path)
     (source / missing).unlink()

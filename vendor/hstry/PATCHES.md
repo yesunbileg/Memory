@@ -69,3 +69,8 @@ Patch history:
     scheduled browser capture both require a saved, account-scoped selection.
     The supplied ChatVault example informed the provider catalog and grouped
     selection workflow. Its exporter, content scripts and code are not bundled.
+17. Extension 0.9 restores selection to provider pages as an explicit, temporary
+    list mode. Visible sidebar links have individual chat or project controls;
+    only an authenticated, verified choice changes a saved identifier. Selection
+    is distinct from native archive capture. The toolbar keeps connection
+    settings, provider status, the mode switch and manual sync.

@@ -130,7 +130,6 @@ async function gather(spec, selected, guard) {
         const id = spec.id(item);
         if (!nativeId(id)) throw invalid();
         if (scope && !direct.has(id) && !wantedProjects.has(where)) return;
-        const title = label(item.title, item.name);
         const parents = new Set([
           ...memberships(item),
           ...(where ? [where] : []),
@@ -144,7 +143,11 @@ async function gather(spec, selected, guard) {
           skipped.add(id);
           return;
         }
-        if (!title && !convs.has(id)) {
+        // A verified project member can be untitled. Its collection ID, not its display
+        // name, establishes membership. Ordinary-list rows still need a real title.
+        const title =
+          label(item.title, item.name) ?? convs.get(id)?.title ?? (where && 'Untitled chat');
+        if (!title) {
           entryIncomplete = true;
           return;
         }
@@ -157,7 +160,7 @@ async function gather(spec, selected, guard) {
         else if (!convs.has(id)) legacyOrdinary.add(id);
         convs.set(id, {
           id,
-          title: title ?? convs.get(id).title,
+          title,
           ...(projectId ? { projectId } : {}),
         });
       }
@@ -166,8 +169,16 @@ async function gather(spec, selected, guard) {
       let membershipComplete = true;
       const verifiedMember = new Set();
       const required = (e) => ['selection_changed', 'storage_unavailable'].includes(e?.code);
-      for (const [id] of projects) {
-        if (scope && !direct.size && !wantedProjects.has(id)) continue;
+      // Independent chat selections may require searching the remaining projects. Give whole
+      // projects the page budget first, even when the provider orders them last.
+      const projectOrder = scope
+        ? [
+            ...wantedProjects,
+            ...(direct.size ? [...projects.keys()].filter((id) => !wantedProjects.has(id)) : []),
+          ]
+        : projects.keys();
+      for (const id of projectOrder) {
+        if (!projects.has(id)) continue;
         try {
           const seen = [];
           for await (const item of spec.members(p, id, read)) {

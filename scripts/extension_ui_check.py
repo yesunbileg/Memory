@@ -17,7 +17,10 @@ ORIGIN = "http://127.0.0.1:17771"
 
 BRIDGE = """() => {
   const data = {}, listeners = [];
+  const supported = !location.search.includes('unsupported');
+  let mode = false;
   window.qaMessages=[];
+  window.qaPageCommands=[];
   const copy = v => structuredClone(v);
   window.chrome = {
     runtime:{
@@ -25,12 +28,18 @@ BRIDGE = """() => {
       getManifest:()=>({version:'fixture'}),
       sendMessage:async m=>{
         qaMessages.push(m.type);
-        if(m.type==='LIST_SYNC_CATALOG') return {ok:true,catalogToken:'fixture',incomplete:false,
-          entries:[{principalId:'fixture',title:'Personal',projects:[{id:'project-1',title:'Project one'}],
-          conversations:[{id:'chat-1',title:'Conversation one'}]}],selectedScope:{entries:[]}};
-        if(m.type==='SAVE_SYNC_SELECTION') return {ok:true,selectedScope:m.selection};
         if(m.type==='checkApi') return {ok:false,code:'missing_token'};
-        return {ok:true};
+        return {ok:false};
+      }
+    },
+    tabs:{
+      query:async()=>[{id:17,url:supported?'https://chatgpt.com/':'https://example.org/'}],
+      sendMessage:async(id,m,target)=>{
+        if(id!==17 || !supported || target?.frameId!==0) throw Error('Unsupported tab or frame');
+        qaPageCommands.push(m.type);
+        if(m.type==='SET_PAGE_LIST_MODE') mode=m.enabled;
+        else if(m.type!=='GET_PAGE_LIST_MODE') throw Error('Unexpected tab command');
+        return {ok:true,provider:'chatgpt',enabled:mode};
       }
     },
     storage:{local:{
@@ -98,15 +107,18 @@ async def verify(output, executable):
             assert await page.locator("#connection-file").count() == 1
             await page.locator("#settings").press("Space")
             await expect(page.locator("#settings-panel")).to_be_hidden()
-            await page.locator("#load-catalog").press("Enter")
-            box = page.locator('#catalog-items input[data-id="chat-1"]')
-            await box.focus()
-            await page.keyboard.press("Space")
-            await expect(box).to_be_checked()
-            assert not await page.evaluate("qaMessages.includes('SAVE_SYNC_SELECTION')")
-            assert not await page.evaluate("qaMessages.includes('syncNow')")
-            await page.locator("#picker-search").fill("Conversation")
-            await expect(page.locator("#catalog-items input")).to_have_count(1)
+            mode = page.get_by_role("button", name="List mode", exact=True)
+            await expect(mode).to_be_enabled()
+            await expect(mode).to_have_attribute("aria-pressed", "false")
+            await mode.press("Enter")
+            await expect(mode).to_have_attribute("aria-pressed", "true")
+            await mode.press("Space")
+            await expect(mode).to_have_attribute("aria-pressed", "false")
+            assert not await page.evaluate("qaMessages.some(t=>t!=='checkApi')")
+            assert (
+                await page.evaluate("qaPageCommands.filter(t=>t==='SET_PAGE_LIST_MODE').length")
+                == 2
+            )
             for width in (320, 380, 440):
                 await page.set_viewport_size({"width": width, "height": 600})
                 assert_layout(await page.evaluate(f"({LAYOUT})(document)"))
@@ -115,8 +127,11 @@ async def verify(output, executable):
                     await page.screenshot(
                         path=output / f"popup-{width}-{theme}.png", full_page=True
                     )
+            await page.goto(ORIGIN + "/popup.html?unsupported")
+            await expect(mode).to_be_disabled()
+            await expect(mode).to_have_attribute("aria-pressed", "false")
+            assert await page.evaluate("qaPageCommands") == []
             assert len(context.pages) == 1
-            assert page.url == ORIGIN + "/popup.html"
             assert not errors, errors
             print(
                 json.dumps(

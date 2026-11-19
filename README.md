@@ -100,16 +100,16 @@ For a standalone extension, run `.venv/bin/python scripts/package_extension.py`.
 
 Click **AI Memory** in the browser toolbar. Open **Settings** inside the popup, choose the `connection_file` printed by the command and verify the local connection. If the system file chooser dismisses the popup, use **Paste connection file contents instead** inside Settings and verify the same file there. The browser launches the registered native host as needed. A v1 bearer file cannot authenticate it. See [native pairing](docs/native-pairing.md) for custom browser data directories.
 
-Select and capture from that same popup. No provider tab, separate settings tab or controls on the provider’s website are required. Sign in to the provider in the same browser profile first.
+Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the AI Memory toolbar popup. Checkboxes appear beside supported links on that page. After installing or reloading the extension, refresh any provider tab that was already open. List mode is per tab and starts off on each new document.
 
-| In the popup | What it does |
+| What you do | What happens |
 | --- | --- |
-| Choose ChatGPT, Claude or Gemini and click **Load items** | Reads the signed-in account’s list metadata for the picker, not conversation transcripts. Search or filter the returned titles. ChatGPT and Claude offer projects and chats. Gemini offers chats only. |
-| Tick rows, then click **Add to sync list** | Saves the selected identifiers for that account. A saved project includes its conversations. Adding does not capture text, contact NotebookLM or grant upload consent. |
-| Enable the provider and click **Sync now** | Fetches the saved items into the paired **local SQLite archive**. Enabled automatic checks use the same saved list. |
-| Remove a saved item | Stops future capture through that item. An empty list captures nothing. This neither deletes archived text nor revokes any earlier upload approval. |
+| Check a project in the sidebar | Saves the project ID immediately. At sync, its eligible chats are included, even when the project was collapsed or a chat was not visible. Gemini offers chats only. |
+| Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |
+| Uncheck an item or turn off List mode | Unchecking removes that explicit selection. Turning the mode off hides the controls without changing the list. Neither action deletes archived content. |
+| Enable the provider and click **Sync now** | Fetches the saved items into the paired **local SQLite archive**. Enabled automatic checks use the same saved list. Choosing an item does not start a sync or approve a Google upload. |
 
-On upgrade, existing ChatGPT project/chat IDs remain subject to their original selection restrictions. Old provider/category switches alone do not authorize capture, even if automatic checks are enabled. A missing or unverifiable account does not fall back to importing all chats. A partial catalog means a provider limit or an unavailable listing was reached. Only verified, listed items can be added. Reloading may recover a failed request. Existing saved items are not removed by a partial result.
+Existing selections keep their account and workspace restrictions on upgrade. A provider switch alone does not authorize capture. If the account or item cannot be verified, it cannot be added. Sync reports incomplete provider listings rather than treating them as a complete project. An empty list captures nothing.
 
 To send an archived conversation to NotebookLM, separately review it, approve it and run `ai-memory sync`. This is different from the popup’s **Sync now**. Private provider interfaces can change. Offline verification uses synthetic data, not personal accounts. See the [Mongolian setup guide](docs/extension-setup.mn.md).
 

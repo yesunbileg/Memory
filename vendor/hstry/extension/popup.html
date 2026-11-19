@@ -55,7 +55,7 @@
           <code id="setup-command"></code>
         </details>
         <h2>Sync preferences</h2>
-        <p class="muted">Only saved items from enabled providers can sync.</p>
+        <p class="muted">Only checked items from enabled providers can sync.</p>
         <div class="toggles">
           <label><input id="toggle-chatgpt" type="checkbox" />ChatGPT</label
           ><label><input id="toggle-claude" type="checkbox" />Claude</label
@@ -78,59 +78,22 @@
         </details>
         <small id="version" class="muted"></small>
       </section>
-      <div id="picker-view">
-        <section class="picker" aria-labelledby="choose-title">
-          <div class="line">
-            <h1 id="choose-title">Choose chats</h1>
-            <span class="eyebrow">SYNC LIST</span>
-          </div>
-          <div id="picker-provider" role="group" aria-label="Choose a provider">
-            <button id="tab-chatgpt" aria-pressed="true">ChatGPT</button
-            ><button id="tab-claude" aria-pressed="false">Claude</button
-            ><button id="tab-gemini" aria-pressed="false">Gemini</button>
-          </div>
-          <div class="line">
-            <h2 id="catalog-heading">ChatGPT catalog</h2>
-            <button id="load-catalog">Load items</button>
-          </div>
-          <label class="check-line"
-            ><input type="checkbox" id="enable-current" /><span id="enable-label"
-              >Enable ChatGPT sync</span
-            ></label
-          >
-          <p id="catalog-note" class="muted" role="status"></p>
-          <div id="filters" class="filters" hidden>
-            <label class="field grow"
-              ><span class="sr-only">Search loaded items</span
-              ><input
-                id="picker-search"
-                type="search"
-                placeholder="Search by title or account"
-                autocomplete="off" /></label
-            ><label class="field"
-              ><span class="sr-only">Item type</span
-              ><select id="picker-kind">
-                <option value="all">All types</option>
-                <option id="project-filter" value="project">Projects</option>
-                <option value="conversation">Chats</option>
-              </select></label
-            >
-          </div>
-          <div id="catalog-items" class="rows" role="group" aria-label="Available items"></div>
-          <button id="show-more" class="more" hidden>Show more</button>
-          <div class="line pick-actions">
-            <span id="pick-count" class="muted">0 selected</span
-            ><button id="add-selection" disabled>Add to sync list</button>
-          </div>
-        </section>
-        <details class="saved-panel" id="saved-panel">
-          <summary id="saved-heading">Saved list</summary>
-          <p id="saved-note" class="muted"></p>
-          <div id="saved-items" class="rows" role="group" aria-label="Saved items"></div>
-          <button id="more-saved" class="more" hidden>Show more saved items</button>
-        </details>
-        <p id="picker-status" class="feedback" role="status"></p>
-      </div>
+      <section id="list-panel" aria-labelledby="list-title">
+        <div class="line">
+          <h1 id="list-title">Sync list</h1>
+          <span id="mode-site" class="eyebrow">Current tab</span>
+        </div>
+        <button
+          type="button"
+          id="list-mode"
+          aria-pressed="false"
+          aria-describedby="mode-status"
+          disabled
+        >
+          List mode <span aria-hidden="true" id="mode-state">Off</span>
+        </button>
+        <p id="mode-status" class="muted" role="status">Checking the current tab…</p>
+      </section>
     </main>
     <footer>
       <div class="line">

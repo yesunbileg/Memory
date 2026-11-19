@@ -65,7 +65,7 @@ function parseRpcResponse(text, rpcId) {
   throw new Error(`Gemini returned an unreadable ${rpcId} response`);
 }
 
-async function getSession() {
+async function getSession(context) {
   const res = await fetch(`${BASE}/app`, {
     credentials: 'include',
     cache: 'no-store',
@@ -78,6 +78,12 @@ async function getSession() {
   const session = extractSession(await res.text());
   if (!session.at) throw new NotLoggedInError('gemini.google.com');
   const userIndex = res.url.match(/\/u\/(\d+)\//)?.[1] ?? null;
+  // A foreground /u/N tab must not grant access to the default account's rows.
+  // The slot is routing evidence, never the durable Google account identity.
+  if (context?.slot != null && context.slot !== userIndex)
+    throw Object.assign(new Error('The active Gemini account does not match this tab.'), {
+      code: 'principal_changed',
+    });
   return { ...session, userIndex };
 }
 
@@ -135,8 +141,8 @@ async function captureBinding(session, preferAccount = true) {
   return { accountId: fingerprint && 'gemini-session-' + fingerprint, fingerprint };
 }
 
-export async function geminiPrincipalIds() {
-  const { accountId: id } = await captureBinding(await getSession());
+export async function geminiPrincipalIds(context) {
+  const { accountId: id } = await captureBinding(await getSession(context));
   return id ? [id] : [];
 }
 
@@ -192,14 +198,14 @@ async function catalogSummaries(session, guard = async () => {}) {
   return { summaries: [...rows.values()].slice(0, 5000), incomplete: true };
 }
 
-export async function listGeminiCatalog() {
-  const session = await getSession();
+export async function listGeminiCatalog(context) {
+  const session = await getSession(context);
   const { accountId: id } = await captureBinding(session);
   if (!id) return { entries: [], incomplete: true };
   const { summaries, incomplete } = await catalogSummaries(session);
   // A sign-in change while the picker was loading must not label the rows with
   // a stale account. Save independently rechecks the same principal.
-  if (!(await geminiPrincipalIds()).includes(id)) return { entries: [], incomplete: true };
+  if (!(await geminiPrincipalIds(context)).includes(id)) return { entries: [], incomplete: true };
   return {
     entries: [
       {
@@ -471,10 +477,11 @@ export async function syncGemini({
   const previousDiscovery = matchingSession ? state.discovery : null;
   const runStartedMs = pending?.runStartedMs ?? previousDiscovery?.runStartedMs ?? Date.now();
   let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint, ...scopeState };
-  const discovery = Array.isArray(pending?.summaries)
-    ? { summaries: pending.summaries, incomplete: Boolean(pending?.discoveryIncomplete) }
-    : explicit
-      ? await catalogSummaries(session, guard)
+  const resuming = Array.isArray(pending?.summaries);
+  const discovery = explicit
+    ? await catalogSummaries(session, guard)
+    : resuming
+      ? { summaries: pending.summaries, incomplete: Boolean(pending.discoveryIncomplete) }
       : await listChats(session, since, previousDiscovery, guard, async (progress) => {
           if (!fingerprint) return;
           discoveryState = {
@@ -498,13 +505,38 @@ export async function syncGemini({
       selectionWarning,
     };
   }
-  const known = new Set(discovery.summaries.map((s) => s.id));
-  const missing = explicit && !pending && [...wanted].some((id) => !known.has(id));
-  const summaries = explicit
-    ? discovery.summaries.filter(
-        (s) => wanted.has(s.id) && (pending || !since || !s.updatedAt || s.updatedAt > since),
-      )
-    : discovery.summaries;
+  const startIndex =
+    resuming && Number.isInteger(pending.nextIndex)
+      ? Math.max(0, Math.min(pending.nextIndex, pending.summaries.length))
+      : 0;
+  let summaries = discovery.summaries;
+  let retrySummaries = [...(pending?.retrySummaries ?? [])];
+  let missing = false;
+  if (explicit) {
+    const listed = new Map(summaries.map((s) => [s.id, s]));
+    if (resuming) {
+      // A saved ID is not proof that its transcript is still available. Recheck the
+      // unprocessed and retry queues against one fresh listing, in original queue order.
+      const recheck = (queued) =>
+        queued.flatMap(({ id }) => {
+          if (!wanted.has(id)) return [];
+          if (listed.has(id)) return [listed.get(id)];
+          missing = true;
+          return [];
+        });
+      summaries = [
+        ...pending.summaries.slice(0, startIndex),
+        ...recheck(pending.summaries.slice(startIndex)),
+      ];
+      retrySummaries = recheck(retrySummaries);
+      discovery.incomplete ||= Boolean(pending.discoveryIncomplete);
+    } else {
+      missing = [...wanted].some((id) => !listed.has(id));
+      summaries = summaries.filter(
+        (s) => wanted.has(s.id) && (!since || !s.updatedAt || s.updatedAt > since),
+      );
+    }
+  }
   if (missing)
     selectionWarning =
       'Some saved Gemini chats are unavailable. Refresh the list to review your choices.';
@@ -524,7 +556,6 @@ export async function syncGemini({
         ? { selected: true, categories: [], unknown: false }
         : selectConversation(null, policy, { recents: true }),
     );
-  const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
   await report({
     phase: 'importing',
@@ -534,7 +565,6 @@ export async function syncGemini({
     selectionWarning,
   });
   let total = 0;
-  const retrySummaries = [...(pending?.retrySummaries ?? [])];
   let failures = discovery.incomplete || missing ? 1 : 0;
   let processed = startIndex;
   const batch = [];

@@ -2,13 +2,22 @@
   "manifest_version": 3,
   "minimum_chrome_version": "125",
   "name": "AI Memory",
-  "version": "0.8.0",
-  "description": "Choose projects and chats in the AI Memory popup, then sync only your saved selection to your local archive.",
+  "version": "0.9.0",
+  "description": "Choose chats and projects on their own website, then sync your selections to your local archive.",
   "permissions": ["alarms", "storage", "nativeMessaging"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://claude.ai/*", "https://gemini.google.com/*"],
+      "js": ["page-picker-routes.js", "page-picker.js"],
+      "run_at": "document_idle",
+      "all_frames": false,
+      "world": "ISOLATED"
+    }
   ],
   "background": {
     "service_worker": "background.js",

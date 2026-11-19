@@ -1,14 +1,11 @@
-// The persistent permission list contains identities and IDs only. A catalog
-// grants no permission; its short-lived proof contains no titles or content.
+// Existing profiles store the same verified principal and native ID lists across versions.
 import { readSyncList } from './chatgpt-sync-list.js';
 const MAX_IDS = 10000,
-  MAX_OWNERS = 128,
-  MAX_CATALOG = MAX_IDS,
-  TTL_MS = 15 * 60 * 1000;
+  MAX_OWNERS = 128;
 const keys = ['projectIds', 'conversationIds'];
 const own = (obj, k) => Object.hasOwn(obj, k);
 const record = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const validOwner = (v) =>
+export const validOwner = (v) =>
   typeof v === 'string' && v.trim() !== '' && v.length <= 600 && !/[\x00-\x1f\x7f]/.test(v);
 const validId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(v);
 const fail = (code) => {
@@ -85,166 +82,51 @@ export function scopeFor(provider, rawScopes, legacy) {
 export const nonempty = (scope) =>
   scope?.entries.some((e) => e.projectIds.length || e.conversationIds.length) === true;
 
-function visible(scope, owners) {
-  return {
-    entries: scope.entries
-      .filter((e) => owners.has(e.principalId))
-      .map(({ principalId, projectIds, conversationIds }) => ({
-        principalId,
-        projectIds,
-        conversationIds,
-      })),
-  };
-}
-function title(v, fallback) {
-  return typeof v === 'string' && v.trim() ? v.trim().slice(0, 320) : fallback;
-}
-function catalog(raw) {
-  if (!record(raw) || !Array.isArray(raw.entries)) fail('catalog_unavailable');
-  const entries = [],
-    owners = new Set();
-  let incomplete = raw.incomplete === true || raw.entries.length > MAX_OWNERS;
-  let budget = MAX_CATALOG;
-  for (const e of raw.entries.slice(0, MAX_OWNERS)) {
-    if (
-      !validOwner(e?.principalId) ||
-      owners.has(e.principalId) ||
-      !Array.isArray(e.projects) ||
-      !Array.isArray(e.conversations)
-    )
-      fail('catalog_unavailable');
-    owners.add(e.principalId);
-    const next = { principalId: e.principalId, title: title(e.title, 'Current account') };
-    for (const key of ['projects', 'conversations']) {
-      const seen = new Set();
-      next[key] = [];
-      if (e[key].length > MAX_CATALOG) incomplete = true;
-      for (const row of e[key].slice(0, MAX_CATALOG)) {
-        if (!budget) {
-          incomplete = true;
-          break;
-        }
-        if (!validId(row?.id)) {
-          incomplete = true;
-          continue;
-        }
-        if (seen.has(row.id)) continue;
-        seen.add(row.id);
-        const item = {
-          id: row.id,
-          title: title(row.title, key === 'projects' ? 'Untitled project' : 'Untitled chat'),
-        };
-        if (key === 'conversations' && validId(row.projectId)) item.projectId = row.projectId;
-        next[key].push(item);
-        budget--;
-      }
-    }
-    entries.push(next);
-  }
-  return { entries, incomplete };
-}
 async function currentSettings(provider) {
   const [{ providerSyncScopes }, { chatgptSyncList }] = await Promise.all([
     chrome.storage.local.get('providerSyncScopes'),
     chrome.storage.local.get('chatgptSyncList'),
-  ]);
+  ]).catch(() => fail('storage_unavailable'));
+  // Refuse to replace an unreadable saved list with a partially reconstructed one.
+  if (providerSyncScopes !== undefined && !record(providerSyncScopes)) fail('selection_invalid');
+  if (providerSyncScopes && own(providerSyncScopes, provider))
+    return { providerSyncScopes, scope: normalize(providerSyncScopes[provider], true) };
   return { providerSyncScopes, ...scopeFor(provider, providerSyncScopes, chatgptSyncList) };
 }
-const memoryProof = new Map(),
-  sequence = new Map();
-const proofKey = (p) => 'popupCatalog_' + p;
-async function readProof(p, token) {
-  const key = proofKey(p);
-  const proof = chrome.storage.session
-    ? (await chrome.storage.session.get(key))[key]
-    : memoryProof.get(p);
-  if (!proof || proof.token !== token || typeof token !== 'string' || proof.expires < Date.now())
-    fail('catalog_expired');
-  return proof;
-}
 
-export async function listPopupCatalog(provider, adapter) {
-  const generation = (sequence.get(provider) ?? 0) + 1;
-  sequence.set(provider, generation);
-  const { entries, incomplete } = catalog(await adapter.listCatalog());
-  const { scope } = await currentSettings(provider);
-  if (sequence.get(provider) !== generation) fail('catalog_expired');
-  const token = crypto.randomUUID();
-  const proof = {
-    token,
-    expires: Date.now() + TTL_MS,
-    entries: entries.map((e) => ({
-      principalId: e.principalId,
-      projectIds: e.projects.map((i) => i.id),
-      conversationIds: e.conversations.map((i) => i.id),
-    })),
-  };
-  if (chrome.storage.session) await chrome.storage.session.set({ [proofKey(provider)]: proof });
-  else memoryProof.set(provider, proof);
-  return {
-    ok: true,
-    catalogToken: token,
-    entries,
-    incomplete,
-    selectedScope: visible(scope, new Set(entries.map((e) => e.principalId))),
-  };
-}
+export const readPageScope = async (provider) => (await currentSettings(provider)).scope;
 
-// One critical section for all providers: local storage has no read-modify-write transaction.
+// Local storage has no read-modify-write transaction. Serialize these short ID edits across all tabs/providers.
 let writes = Promise.resolve();
-export function savePopupScope(provider, adapter, message, remove) {
+export function setPageItem(provider, principalId, kind, id, checked, sameId, verify) {
   const work = writes
     .catch(() => {})
     .then(async () => {
-      const requested = normalize(message.selection).entries;
-      const proof = await readProof(provider, message.catalogToken);
-      const allowed = new Map(proof.entries.map((e) => [e.principalId, e]));
-      if (requested.some((e) => !allowed.has(e.principalId))) fail('selection_invalid');
-      const identities = await adapter.principalIds();
-      if (
-        !Array.isArray(identities) ||
-        !identities.every(validOwner) ||
-        proof.entries.some((e) => !identities.includes(e.principalId))
-      )
-        fail('principal_changed');
       const { scope, providerSyncScopes, legacy } = await currentSettings(provider);
-      const changes = new Map(requested.map((e) => [e.principalId, e]));
-      const merged = new Map(scope.entries.map((e) => [e.principalId, e]));
-      for (const [principalId, shown] of allowed) {
-        const old = merged.get(principalId) ?? { principalId, projectIds: [], conversationIds: [] };
-        const input = changes.get(principalId) ?? { projectIds: [], conversationIds: [] };
-        const next = { principalId };
-        for (const key of keys) {
-          const permitted = new Set(remove ? old[key] : shown[key]);
-          if (input[key].some((id) => !permitted.has(id))) fail('selection_invalid');
-          const delta = new Set(input[key]);
-          next[key] = remove
-            ? old[key].filter((id) => !delta.has(id))
-            : ordered([...old[key], ...delta]);
-        }
-        if (old.legacyConversationIds) {
-          const touched = new Set(input.conversationIds);
-          const remaining = old.legacyConversationIds.filter((id) => !touched.has(id));
-          if (remaining.length) next.legacyConversationIds = remaining;
-        }
-        if (next.projectIds.length || next.conversationIds.length) merged.set(principalId, next);
-        else merged.delete(principalId);
+      const entries = new Map(scope.entries.map((e) => [e.principalId, e]));
+      const old = entries.get(principalId) ?? { principalId, projectIds: [], conversationIds: [] };
+      const key = kind === 'project' ? 'projectIds' : 'conversationIds';
+      const next = { ...old, [key]: old[key].filter((v) => !sameId(v, id)) };
+      if (checked) next[key].push(id);
+      if (kind === 'conversation' && old.legacyConversationIds) {
+        const untouched = old.legacyConversationIds.filter((v) => !sameId(v, id));
+        if (untouched.length) next.legacyConversationIds = untouched;
+        else delete next.legacyConversationIds;
       }
-      const saved = normalize({ entries: [...merged.values()] }, true);
-      await readProof(provider, message.catalogToken);
-      if (providerSyncScopes !== undefined && !record(providerSyncScopes))
-        fail('selection_invalid');
+      if (next.projectIds.length || next.conversationIds.length) entries.set(principalId, next);
+      else entries.delete(principalId);
+      const saved = normalize({ entries: [...entries.values()] }, true);
+      await verify();
+      if (!legacy && JSON.stringify(saved) === JSON.stringify(scope)) return;
       try {
         await chrome.storage.local.set({
           providerSyncScopes: { ...providerSyncScopes, [provider]: saved },
-          // All legacy principals were copied, including unseen IDs with their original restrictions.
-          // Retire the older copy in the same write: a removed ID must not reappear on fallback.
+          // All v1 owners and their untouched restrictions were copied. A removed ID cannot reappear on fallback.
           ...(legacy ? { chatgptSyncList: { version: 1, entries: [] } } : {}),
         });
       } catch {
         fail('storage_unavailable');
       }
-      return { ok: true, selectedScope: visible(saved, new Set(allowed.keys())) };
     });
   writes = work;
   return work;

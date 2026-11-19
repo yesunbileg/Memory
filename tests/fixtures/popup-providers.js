@@ -2,15 +2,24 @@
 (() => {
   const project = 'g-p-11111111111141118111111111111111';
   const member = '33333333-3333-4333-8333-333333333333';
+  const lateMember = '88888888-8888-4888-8888-888888888888';
+  const standalone = '22222222-2222-4222-8222-222222222222';
   const claude = '44444444-4444-4444-8444-444444444444';
   const spare = '55555555-5555-4555-8555-555555555555';
   const org = '66666666-6666-4666-8666-666666666666';
   const claudeProject = '77777777-7777-4777-8777-777777777777';
+  const claudeMember = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const gemini = 'abcdef123456abcd';
   const rpc = (id, value) =>
     new Response(")]}'\n" + JSON.stringify([['wrb.fr', id, JSON.stringify(value), null]]) + '\n');
   const result = (value, status = 200) => Response.json(value, { status });
-  self.qa = { detail: [], requests: [], unexpected: [], signedIn: false };
+  self.qa = { detail: [], requests: [], unexpected: [], native: [], signedIn: false, late: false };
+  // Observe the real native host, never replace its responses or store the packet contents.
+  const native = chrome.runtime.sendNativeMessage.bind(chrome.runtime);
+  chrome.runtime.sendNativeMessage = (host, packet) => {
+    self.qa.native.push(packet.op ?? 'ingest');
+    return native(host, packet);
+  };
   self.fetch = async (input, init = {}) => {
     const u = new URL(input),
       path = u.pathname;
@@ -30,27 +39,27 @@
         });
       if (path === '/backend-api/conversations')
         return result({
-          total: 1,
-          items: [
-            {
-              id: spare,
-              title: 'Unselected GPT chat',
-              is_pinned: false,
-              gizmo_id: null,
-              project_id: null,
-            },
-          ],
+          total: 3,
+          items: [spare, standalone, member].map((id) => ({
+            id,
+            title: 'Chat ' + id,
+            is_pinned: false,
+            gizmo_id: null,
+            project_id: id === member ? project : null,
+          })),
         });
       if (path.endsWith('/snorlax/sidebar'))
         return result({
           items: [{ gizmo: { gizmo: { id: project, display: { name: 'Selected GPT project' } } } }],
           cursor: null,
         });
-      if (path === '/backend-api/gizmos/' + project + '/conversations')
+      if (path === '/backend-api/gizmos/' + project + '/conversations') {
+        const next = u.searchParams.get('cursor') === 'more';
         return result({
-          items: [{ id: member, title: 'Project member', project_id: project }],
-          cursor: null,
+          items: [{ id: next ? lateMember : member, title: 'Project member', project_id: project }],
+          cursor: self.qa.late && !next ? 'more' : null,
         });
+      }
       if (path.startsWith('/backend-api/conversation/')) {
         const id = path.split('/').pop();
         self.qa.detail.push(id);
@@ -81,11 +90,11 @@
       if (path === '/api/organizations')
         return result([{ uuid: org, name: 'Fixture workspace', capabilities: ['claude_pro'] }]);
       if (path === '/api/organizations/' + org + '/projects')
-        return result([
-          { uuid: claudeProject, name: 'Unselected Claude project', archived_at: null },
-        ]);
+        return result([{ uuid: claudeProject, name: 'Claude project', archived_at: null }]);
       if (path === '/api/organizations/' + org + '/projects/' + claudeProject + '/conversations_v2')
-        return result({ data: [] });
+        return result({
+          data: [{ uuid: claudeMember, name: 'Unrendered project chat', project_uuid: claudeProject }],
+        });
       if (path === '/api/organizations/' + org + '/chat_conversations_v2')
         return result(
           [claude, spare].map((id, i) => ({

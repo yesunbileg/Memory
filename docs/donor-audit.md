@@ -100,9 +100,9 @@ It validates Host, Origin and bearer credentials, bounds the payload (16 MiB,
 100 conversations), and uses the same archive ingest boundary. The browser
 extension does not fall back to this endpoint.
 
-## Popup catalogs and earlier category classification
+## On-page selection and earlier category classification
 
-The current toolbar popup reads account-bound listing metadata on request, lets users search and select projects or chats, and saves only explicit scope identifiers. The user-supplied ChatVault reference showed a provider selector and grouped item picker. AI Memory adapts those interaction ideas to its existing provider readers and native archive transport. No ChatVault code is imported. There is no provider-page injection, whole-account export or new upload destination.
+The user-supplied ChatVault reference discovers sidebar chat links by route rather than by a provider’s generated CSS classes. It adds a checkbox only in multi-selection mode and removes it when leaving that mode. AI Memory applies this visible-link pattern to the provider page. The worker, not page text or a link alone, verifies allowed IDs and project membership against signed-in listing metadata. Only deliberate choices change the local sync scope. No exporter, donor code or new upload destination is bundled.
 
 The earlier category classifier described below is still relevant to restricted legacy selections and the synthetic reader fixtures. It is **not** permission for an extension capture. An account with no saved IDs collects nothing. ChatGPT binds selections to the active user and account from the session; a [public client](https://github.com/bigfei/chats2md) uses those same identity fields. See the [current extension guide](extension-handoff.md).
 
@@ -119,13 +119,13 @@ implemented, not that a live account was tested:
 | Claude project conversations | [withLinda exporter `6a204107a23ce224c75c60cb61b71a67bfa59d97`](https://github.com/withLinda/claude-project-conversations-exporter/blob/6a204107a23ce224c75c60cb61b71a67bfa59d97/claude_project_export_script.js#L207): `GET /api/organizations/{org}/projects/{project}/conversations_v2?limit=…&offset=…`, response `{data:[…]}` (or an array). AI Memory requests 50-item pages until a short page and deduplicates against the ordinary list. |
 | Claude native metadata | [Claude-voyager `db192e6b4943073df90c1014dfc32dd8eef9a1fb` captured-response type](https://github.com/TanChuping/Claude-voyager/blob/db192e6b4943073df90c1014dfc32dd8eef9a1fb/src/features/conversationApi/types.ts#L102) identifies `is_starred` and `project_uuid`. Pin membership is used when explicitly present in list metadata. No trustworthy separate pinned-list route was found; absent pin/agent metadata produces a visible warning and an excluded conversation. Third-party extensions' own local stars/folders are not native provider membership. |
 
-Earlier category-mode fixtures exercise classification, project enumeration, deduplication and unknown membership. Current popup project capture uses account-scoped saved project IDs and verified collection membership. Saved individual chat IDs do not require selecting a whole category. Gemini exposes conversations but no reliable project/folder membership, so its picker offers chats only. Unavailable or malformed listings never select all chats.
+Earlier category-mode fixtures exercise classification, project enumeration, deduplication and unknown membership. Current project capture uses account-scoped saved project IDs and verified collection membership. Saved individual chat IDs do not require selecting a whole category. Gemini exposes conversations but no reliable project/folder membership, so it offers chat selection only. Unavailable or malformed listings never select all chats.
 
 ChatGPT and Claude distinguish recognized empty detail collections from absent or
 malformed collections/message shapes. Unsupported details warn and retain the
 retry watermark. A saved selection cannot authorize a different or unidentified workspace.
 
-Gemini’s popup catalog talks to the listing RPC and projects only chat identifiers and titles into the picker. Selected capture requests message detail separately. It binds the visible scope to a hash of a corroborated active Google account ID when available. An unrecognized bootstrap falls back to a hash of the active session, not an email address, name or slot number. Rotating that session can require reselecting the chats. Raw credentials, names and emails are not persisted as scope identifiers. Gemini does not infer project membership from undocumented tuple flags.
+Gemini uses its listing RPC to verify chat IDs without reading message details. Selected capture requests message detail separately. It binds the visible scope to a hash of a corroborated active Google account ID when available. An unrecognized bootstrap falls back to a hash of the active session, not an email address, name or slot number. Rotating that session can require reselecting the chats. Raw credentials, names and emails are not persisted as scope identifiers. Gemini does not infer project membership from undocumented tuple flags.
 
 Incomplete runs keep only a matching session's previous completion watermark.
 Native turn IDs deduplicate overlapping pages. Completed conversations

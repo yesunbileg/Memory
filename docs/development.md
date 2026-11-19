@@ -43,7 +43,7 @@ collectors, extension or Python checks does not require npm packages.
 | `src/ai_memory/connection.py`, `ingest.py` | Legacy authenticated HTTP receiver and shared validation for browser packets |
 | `src/ai_memory/native.py` | Linux native messaging host registration, pairing verification and browser packets |
 | `vendor/hstry/adapters/` | Audited upstream TypeScript parsers |
-| `vendor/hstry/extension/` | Toolbar popup, provider listing catalogs, account-scoped selections and provider readers |
+| `vendor/hstry/extension/` | Toolbar settings and sync, on-page list mode, account-scoped selections and provider readers |
 | `tests/`, `vendor/hstry/extension/test/` | Synthetic behavior and recovery regressions |
 | `scripts/` | Checks, smoke tests, UI verification and extension packaging |
 | `config/` | Client/service examples and explicitly named cloud executor helpers |

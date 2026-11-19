@@ -138,3 +138,19 @@ test('corroborated active Google account survives token rotation but never an ac
   const cat = await listGeminiCatalog();
   assert.doesNotMatch(JSON.stringify(cat), /10000000000000000000|person@example/);
 });
+
+test('website catalog and proof reject a foreground Google slot that is not the active verified session', async (t) => {
+  const { calls } = fixture(() => [null, null, [row('one')]]);
+  const req = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const response = await req(url, init);
+    if (new URL(url).pathname === '/app')
+      Object.defineProperty(response, 'url', { value: 'https://gemini.google.com/u/0/app' });
+    return response;
+  });
+  await assert.rejects(listGeminiCatalog({ slot: '1' }), { code: 'principal_changed' });
+  await assert.rejects(geminiPrincipalIds({ slot: '1' }), { code: 'principal_changed' });
+  assert.deepEqual(calls.list, []);
+  assert.equal((await listGeminiCatalog({ slot: '0' })).entries.length, 1);
+  assert.equal((await geminiPrincipalIds({ slot: '0' })).length, 1);
+});

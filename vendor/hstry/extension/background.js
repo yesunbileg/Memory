@@ -1,6 +1,7 @@
 // Poll selected AI conversations and save them to the local AI Memory receiver.
 
-import { scopeFor, nonempty, listPopupCatalog, savePopupScope } from './popup-scope.js';
+import { scopeFor, nonempty } from './popup-scope.js';
+import { pageSelection, forgetPageTab } from './page-selection.js';
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { PROVIDERS } from './providers/index.js';
 import { normalizeSettings } from './ui.js';
@@ -287,7 +288,7 @@ async function runSync(
     return {
       ok: false,
       code: 'no_saved_selection',
-      error: 'Enable a provider and save chats or projects in the popup first.',
+      error: 'Enable a provider and check chats or projects on its website in list mode first.',
     };
   }
   const status = await getStatus();
@@ -581,7 +582,39 @@ function popupSender(sender) {
   );
 }
 
+// Page content scripts use only the broker; provider settings, pairing, and other accounts stay worker/popup-only.
+chrome.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
+chrome.tabs?.onRemoved?.addListener(forgetPageTab);
+
+const pageErrors = {
+  untrusted_sender: 'Open a supported chat page to use list mode.',
+  selection_invalid: 'This row cannot be changed. Refresh list mode and try again.',
+  catalog_expired: 'List mode expired. Refresh the checkboxes and try again.',
+  principal_changed:
+    'The active account or workspace changed. Refresh list mode in the intended account.',
+  ambiguous_selection: 'These rows cannot be assigned to one verified account or workspace.',
+  catalog_unavailable:
+    'The provider could not verify these rows. Check your sign-in and try again.',
+  not_logged_in: 'Sign in to this provider to use list mode.',
+  rate_limited: 'The provider is busy. Wait a few minutes, then try again.',
+  storage_unavailable: 'The selection could not be saved locally. Check browser storage and retry.',
+};
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    ['READ_PAGE_SELECTION', 'SET_PAGE_SELECTION', 'CLOSE_PAGE_SELECTION'].includes(message?.type)
+  ) {
+    pageSelection(message, sender, PROVIDERS).then(sendResponse, (err) => {
+      const code = Object.hasOwn(pageErrors, err?.code)
+        ? err.code
+        : err instanceof NotLoggedInError
+          ? 'not_logged_in'
+          : err instanceof RateLimitedError
+            ? 'rate_limited'
+            : 'catalog_unavailable';
+      sendResponse({ ok: false, code, error: pageErrors[code] });
+    });
+    return true;
+  }
   if (!popupSender(sender)) {
     sendResponse({
       ok: false,
@@ -589,46 +622,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       error: 'Open the extension popup to perform this action.',
     });
     return false;
-  }
-  if (
-    ['LIST_SYNC_CATALOG', 'SAVE_SYNC_SELECTION', 'REMOVE_SYNC_SELECTION'].includes(message?.type)
-  ) {
-    if (typeof message.provider !== 'string' || !Object.hasOwn(PROVIDERS, message.provider)) {
-      sendResponse({ ok: false, code: 'selection_invalid', error: 'Unknown provider.' });
-      return false;
-    }
-    const provider = message.provider;
-    const errorCopy = {
-      storage_unavailable:
-        'Could not save the selection locally. Check available browser storage and retry.',
-      catalog_expired: 'The catalog expired. Reload the list to select again.',
-      principal_changed: 'The signed-in account changed. Reload the list.',
-      selection_invalid: 'The selection is invalid. Reload the list and try again.',
-      catalog_unavailable:
-        'The provider could not return a verified list. Check your sign-in and retry.',
-      not_logged_in: 'Sign in to this provider before loading its list.',
-      rate_limited: 'The provider is busy. Wait a few minutes, then retry.',
-    };
-    const op =
-      message.type === 'LIST_SYNC_CATALOG'
-        ? listPopupCatalog(provider, PROVIDERS[provider])
-        : savePopupScope(
-            provider,
-            PROVIDERS[provider],
-            message,
-            message.type === 'REMOVE_SYNC_SELECTION',
-          );
-    op.then(sendResponse, (error) => {
-      const code = Object.hasOwn(errorCopy, error?.code)
-        ? error.code
-        : error?.name === 'NotLoggedInError'
-          ? 'not_logged_in'
-          : error?.name === 'RateLimitedError'
-            ? 'rate_limited'
-            : 'catalog_unavailable';
-      sendResponse({ ok: false, code, error: errorCopy[code] });
-    });
-    return true;
   }
   // Hold the channel only through the bounded local authentication check.
   // Once a run starts, report progress through storage instead of waiting for

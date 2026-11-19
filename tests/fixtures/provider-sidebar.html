@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><link rel="icon" href="data:,"><title>Provider page fixture</title>
+<style>
+  body { margin: 0; display: flex; font: 16px/1.4 sans-serif }
+  aside { width: 310px; padding: 8px; background: #eee }
+  li { margin: 4px; list-style: none }
+  ul { padding: 0 }
+  a { display: inline-flex; align-items: center; min-width: 150px; min-height: 28px }
+  main { padding: 16px }
+</style>
+<aside><nav aria-label="Chat history" id="stage-slideover-sidebar">
+  <section id="pinned-section"><h2>Pinned</h2><ul id="pinned"></ul></section>
+  <section id="projects-section"><h2>Projects</h2><ul id="projects"></ul></section>
+  <section><h2>Chats</h2><ul id="history"></ul></section>
+</nav></aside>
+<main><article>A quoted chat link is not a sidebar row. <a id="quoted">Quoted chat</a></article></main>
+<script>
+  const historyRows = document.getElementById('history');
+  const projects = document.getElementById('projects');
+  const pinned = document.getElementById('pinned');
+  const project = '/g/g-p-11111111111141118111111111111111-agents/project';
+  const member = '/g/g-p-11111111111141118111111111111111-agents/c/33333333-3333-4333-8333-333333333333';
+  const standalone = '/c/22222222-2222-4222-8222-222222222222';
+  const spare = '55555555-5555-4555-8555-555555555555';
+  function row(id, href, text) {
+    const li = document.createElement('li'), a = document.createElement('a');
+    li.id = id; a.href = href; a.textContent = text; li.append(a); return li;
+  }
+  function collapsed(id, href) {
+    const li = row('project', href, 'Project ' + id);
+    const toggle = document.createElement('button');
+    toggle.type = 'button'; toggle.textContent = 'Expand project';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.onclick = () => {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(!expanded));
+      if (expanded) li.querySelector('ul')?.remove();
+      else {
+        const children = li.appendChild(document.createElement('ul'));
+        if (location.hostname === 'chatgpt.com')
+          children.append(row('child', member, 'Nested project chat'));
+      }
+    };
+    li.append(toggle); projects.append(li);
+  }
+  if (location.hostname === 'chatgpt.com') {
+    pinned.append(row('project-copy', project, 'Pinned copy of project'));
+    collapsed('Agents', project);
+    historyRows.append(row('member', member, 'Recent project chat'),
+      row('individual', standalone, 'Standalone chat'), row('spare', '/c/' + spare, 'Other chat'));
+    // Replace the site row, not just its text, to mimic a virtualized sidebar.
+    window.replaceSelectedRow = () => document.querySelector('#individual')
+      .replaceWith(row('individual', standalone, 'Renamed standalone chat'));
+  } else if (location.hostname === 'claude.ai') {
+    collapsed('Claude', '/project/77777777-7777-4777-8777-777777777777');
+    historyRows.append(row('individual', '/chat/44444444-4444-4444-8444-444444444444', 'Claude chat'),
+      row('spare', '/chat/' + spare, 'Other chat'));
+  } else if (location.hostname === 'gemini.google.com') {
+    historyRows.append(row('individual', '/u/0/app/abcdef123456abcd', 'Gemini chat'),
+      row('spare', '/u/0/app/ffffffffffffffff', 'Other chat'));
+  }
+  document.getElementById('pinned-section').hidden = !pinned.children.length;
+  document.getElementById('projects-section').hidden = !projects.children.length;
+  document.getElementById('quoted').href = document.querySelector('#individual a').href;
+  window.hostClicks = [];
+  document.querySelector('nav').addEventListener('click', event => {
+    // A genuine click leaking through to a site's row would navigate its SPA.
+    const host = event.target.closest('li');
+    if (host && event.target.closest('button')?.textContent !== 'Expand project')
+      window.hostClicks.push(host.id);
+  });
+</script>
+</html>

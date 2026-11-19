@@ -1,4 +1,4 @@
-"""Exercise the installed MV3 toolbar and a real framed native host using an empty profile.
+"""Select on synthetic provider pages using the installed toolbar and a real framed native host.
 
 All three provider APIs are replaced by local, synthetic metadata and messages.
 On Linux use xvfb-run -a python scripts/extension_toolbar_check.py --browser-executable PATH.
@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -18,12 +19,23 @@ from pathlib import Path
 
 from extension_ui_check import EXTENSION, LAYOUT, ROOT, assert_layout, browser_path
 from package_extension import build_extension
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 PROVIDERS = (ROOT / "tests/fixtures/popup-providers.js").read_text()
+SIDEBAR = ROOT / "tests/fixtures/provider-sidebar.html"
+SITES = {
+    "chatgpt": "https://chatgpt.com/",
+    "claude": "https://claude.ai/new",
+    "gemini": "https://gemini.google.com/u/0/app",
+}
+BOX = "input[data-memory-sync-id]"
 PROJECT = "g-p-11111111111141118111111111111111"
 MEMBER = "33333333-3333-4333-8333-333333333333"
+STANDALONE = "22222222-2222-4222-8222-222222222222"
+LATE_MEMBER = "88888888-8888-4888-8888-888888888888"
 CLAUDE = "44444444-4444-4444-8444-444444444444"
+CLAUDE_PROJECT = "77777777-7777-4777-8777-777777777777"
+CLAUDE_MEMBER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 GEMINI = "abcdef123456abcd"
 
 
@@ -67,65 +79,96 @@ async def wait_for(check, message):
         raise AssertionError(message) from exc
 
 
-async def exercise(worker, page, descriptor, db):
-    # The driver is empty HTML in the test copy. Nothing ever opens popup.html as a web tab.
-    # Interactive elements, the storage writes and the sync all belong to the real popup.
-    extension_id = worker.url.split("/")[2]
-    await worker.evaluate(PROVIDERS)
-    await page.goto(f"chrome-extension://{extension_id}/test-driver.html")
-    await page.evaluate("""async () => {
-        window.newTabIds = [];
-        chrome.tabs.onCreated.addListener(tab => window.newTabIds.push(tab.id));
-        window.originalTabIds = (await chrome.tabs.query({})).map(tab => tab.id).sort();
-    }""")
-    refused = await page.evaluate("()=>chrome.runtime.sendMessage({type:'syncNow'})")
-    assert not refused.get("ok") and refused.get("code") == "untrusted_sender", refused
-    await page.evaluate("() => chrome.action.openPopup()")
-    await page.wait_for_function(
-        "() => chrome.extension.getViews({type:'popup'})[0]?.document.querySelector('#load-catalog')"
-    )
-    popup_contexts = await page.evaluate(
-        "()=>chrome.runtime.getContexts({contextTypes:['POPUP']}).then(items=>items.map(i=>i.contextType))"
-    )
-    assert popup_contexts == ["POPUP"], popup_contexts
+class Toolbar:
+    """Address the *actual popup view* while an ordinary provider tab stays active."""
 
-    async def popup(expression, arg=None):
-        return await page.evaluate(
+    def __init__(self, driver):
+        self.driver = driver
+
+    async def open(self, active):
+        await active.bring_to_front()
+        await wait_for(
+            lambda: self.driver.evaluate(
+                "url=>chrome.tabs.query({active:true,currentWindow:true}).then(([tab])=>tab?.url===url)",
+                active.url,
+            ),
+            "the provider fixture is not the active tab",
+        )
+        await self.driver.evaluate("() => chrome.action.openPopup()")
+        # The driver is a background tab; its requestAnimationFrame may be suspended.
+        await wait_for(
+            lambda: self.driver.evaluate(
+                "()=>!!chrome.extension.getViews({type:'popup'})[0]?.document.querySelector('#list-mode')"
+            ),
+            "the toolbar popup did not open",
+        )
+        contexts = await self.driver.evaluate(
+            "()=>chrome.runtime.getContexts({contextTypes:['POPUP']}).then(xs=>xs.map(x=>x.contextType))"
+        )
+        assert contexts == ["POPUP"], contexts
+
+    async def ui(self, expression, arg=None):
+        return await self.driver.evaluate(
             "arg => {const w=chrome.extension.getViews({type:'popup'})[0];"
             "const d=w.document; const q=s=>d.querySelector(s); return (" + expression + ")(arg);}",
             arg,
         )
 
-    async def click(selector):
-        enabled = (
-            "s => {const el=q(s);return !!el && !el.disabled && !!el.getClientRects().length;}"
-        )
+    async def click(self, selector):
         await wait_for(
-            lambda: popup(enabled, selector), f"disabled/missing popup control {selector}"
+            lambda: self.ui(
+                "s=>{const el=q(s); return !!el && !el.disabled && !!el.getClientRects().length}",
+                selector,
+            ),
+            f"disabled/missing popup control {selector}",
         )
-        await popup("s=>q(s).click()", selector)
+        await self.ui("s=>q(s).click()", selector)
 
-    async def state(key):
-        return await worker.evaluate("key=>chrome.storage.local.get(key).then(x=>x[key])", key)
+    async def close(self):
+        await self.ui("()=>w.close()")
+        await wait_for(
+            lambda: self.driver.evaluate("()=>!chrome.extension.getViews({type:'popup'}).length"),
+            "the toolbar popup did not close",
+        )
 
+    async def expect_mode(self, enabled):
+        await wait_for(
+            lambda: self.ui(
+                "v=>!q('#list-mode').disabled && q('#list-mode').getAttribute('aria-pressed')===v",
+                str(enabled).lower(),
+            ),
+            f"popup did not report list mode {enabled}",
+        )
+
+    async def toggle(self, enabled):
+        await self.expect_mode(not enabled)
+        await self.click("#list-mode")
+        await self.expect_mode(enabled)
+        await self.close()
+
+
+async def state(worker, key):
+    return await worker.evaluate("k=>chrome.storage.local.get(k).then(x=>x[k])", key)
+
+
+async def pair_and_enable(toolbar, worker, descriptor):
     async def settings_match(test):
-        return test(await state("settings") or {})
+        return test(await state(worker, "settings") or {})
 
-    assert not await worker.evaluate("qa.requests.length")
-    assert await popup("()=>q('#sync').disabled")
-    await click("#settings")
-    await popup("""()=>{const input=q('#connection-json');
+    assert await toolbar.ui("()=>q('#sync').disabled")
+    await toolbar.click("#settings")
+    await toolbar.ui("""()=>{const input=q('#connection-json');
       input.closest('details').open=true; input.value='not JSON'; q('#verify-json').click();}""")
     await wait_for(
-        lambda: popup(
+        lambda: toolbar.ui(
             "()=>!!q('#pair-status').textContent && !q('#pair-status').textContent.includes('Verifying')"
         ),
         "invalid pairing did not report an error",
     )
-    assert not (await state("settings") or {}).get("archiveId"), (
+    assert not (await state(worker, "settings") or {}).get("archiveId"), (
         "invalid JSON changed the connection"
     )
-    await popup(
+    await toolbar.ui(
         """value=>{
       const input=q('#connection-file'), dt=new w.DataTransfer();
       dt.items.add(new w.File([JSON.stringify(value)],'connection.json',{type:'application/json'}));
@@ -137,106 +180,236 @@ async def exercise(worker, page, descriptor, db):
         lambda: settings_match(lambda s: s.get("archiveId") == descriptor["archive_instance_id"]),
         "popup did not pair",
     )
-    await click("#auto-paused")
+    await toolbar.click("#auto-paused")
     await wait_for(
         lambda: settings_match(lambda s: s.get("autoPaused")), "could not pause automatic runs"
     )
-    for provider in ("chatgpt", "claude", "gemini"):
-        await click("#toggle-" + provider)
+    for provider in SITES:
+        await toolbar.click("#toggle-" + provider)
         await wait_for(
             lambda name=provider: settings_match(lambda s: s.get("providers", {}).get(name)),
             f"could not enable {provider}",
         )
-    await click("#settings")
-    assert not await worker.evaluate("qa.requests.length"), "setup opened/read a provider"
-    assert await popup("()=>q('#sync').disabled"), "no saved items must mean no sync"
+    await toolbar.click("#settings")
+    assert not await worker.evaluate("qa.requests.length"), "setup read a provider"
+    assert await toolbar.ui("()=>q('#sync').disabled"), "no saved items must mean no sync"
 
-    # Explicit catalog load may authenticate but must not open the sign-in site.
-    await click("#load-catalog")
-    await wait_for(lambda: worker.evaluate("qa.requests.length>0"), "no authentication request")
+
+async def expect_scope(worker, provider, projects=(), chats=()):
+    """Compare the complete persisted allowlist, not just membership of the last click."""
+
+    async def matches():
+        scopes = (await state(worker, "providerSyncScopes")) or {}
+        entries = scopes.get(provider, {}).get("entries", [])
+        if not entries:
+            return not projects and not chats
+        return (
+            len(entries) == 1
+            and bool(entries[0].get("principalId"))
+            and sorted(entries[0]["projectIds"]) == sorted(projects)
+            and sorted(entries[0]["conversationIds"]) == sorted(chats)
+        )
+
     await wait_for(
-        lambda: popup("()=>!q('#load-catalog').disabled && !q('#catalog-items input')"),
-        "sign-in error did not recover to retryable state",
+        matches, f"incorrect {provider} scope; expected projects={projects}, chats={chats}"
     )
-    assert await popup("()=>/sign.in|retry/i.test(q('#picker-status').textContent)")
-    assert not archived(db)
+
+
+def box(site, item, kind="conversation"):
+    return site.locator(f'input[data-memory-sync-kind="{kind}"][data-memory-sync-id="{item}"]')
+
+
+async def click_row(control):
+    # Storage can finish in the worker just before the page processes its reply.
+    await expect(control).not_to_have_attribute("aria-busy", "true")
+    await control.click()
+
+
+async def no_capture(worker, db):
+    assert not archived(db), "selection changed the archive before sync"
+    assert not await worker.evaluate("qa.detail.length"), "selection read transcript bodies"
+    assert await worker.evaluate("qa.native.filter(op=>op!=='check')") == [], (
+        "selection sent data to the native host"
+    )
+
+
+async def mode_off(toolbar, site, provider):
+    assert site.url == SITES[provider], "the page changed while checking a row"
+    assert await site.evaluate("hostClicks") == [], "checkbox input leaked to the site's rows"
+    await toolbar.open(site)
+    await toolbar.toggle(False)
+    await expect(site.locator(BOX)).to_have_count(0)
+
+
+async def chatgpt_checks(worker, toolbar, site):
+    await toolbar.toggle(True)
+    project = box(site, PROJECT, "project")
+    member, standalone = box(site, MEMBER), box(site, STANDALONE)
+    await expect(project).to_have_count(2)  # Pinned and Projects refer to the same ID.
+    await expect(standalone).to_have_accessible_name(re.compile(".+"))
+    anchor_rect = await site.locator("#individual a").bounding_box()
+    box_rect = await standalone.bounding_box()
+    assert anchor_rect and box_rect
+    box_center_y = box_rect["y"] + box_rect["height"] / 2
+    assert anchor_rect["y"] <= box_center_y <= anchor_rect["y"] + anchor_rect["height"], (
+        "the checkbox is not aligned with its website row",
+        anchor_rect,
+        box_rect,
+    )
+    await expect(site.locator("main").get_by_role("checkbox")).to_have_count(0)
+    await expect(site.locator("#project > button")).to_have_attribute("aria-expanded", "false")
+    await expect(site.locator("#project ul a")).to_have_count(0)
+    # Host scripts cannot silently opt a user in via an element.click().
+    native_before = await worker.evaluate("qa.native.length")
+    await standalone.evaluate("el=>el.click()")
+    await expect(standalone).not_to_be_checked()
+    await click_row(project.first)
+    await expect_scope(worker, "chatgpt", [PROJECT])
+    await expect(project.last).to_be_checked()
+    await expect(member).to_have_js_property("indeterminate", True)
+    # A user can keep an inherited chat explicitly. Removing the project then keeps only that chat.
+    await member.press("Space")
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER])
+    await click_row(project.last)
+    await expect_scope(worker, "chatgpt", chats=[MEMBER])
+    await expect(project.first).not_to_be_checked()
+    await expect(member).to_be_checked()
+    await expect(member).to_have_js_property("indeterminate", False)
+    await click_row(project.first)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER])
+    await click_row(member)
+    await expect_scope(worker, "chatgpt", [PROJECT])
+    await expect(member).to_have_js_property("indeterminate", True)
+    # Keep explicit/project overlap for the actual capture de-duplication check.
+    await click_row(member)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER])
+    await click_row(standalone)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER, STANDALONE])
+    assert await worker.evaluate("qa.native.length") == native_before, (
+        "a website checkbox contacted the native host"
+    )
+    await site.evaluate("replaceSelectedRow()")
+    await expect(standalone).to_have_count(1)
+    await expect(standalone).to_be_checked()
+    await click_row(standalone)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER])
+    await click_row(standalone)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER, STANDALONE])
+    await mode_off(toolbar, site, "chatgpt")
+    # Leaving list mode must only hide UI, not erase choices. Reopening restores the checkmarks.
+    await toolbar.open(site)
+    await toolbar.toggle(True)
+    await expect(project.first).to_be_checked()
+    await expect(standalone).to_be_checked()
+    await mode_off(toolbar, site, "chatgpt")
+
+
+async def exercise(context, worker, driver, descriptor, db):
+    # Only the two fixture tabs below are created by the harness. Never put popup.html in a tab.
+    extension_id = worker.url.split("/")[2]
+    await worker.evaluate(PROVIDERS)
+    await driver.goto(f"chrome-extension://{extension_id}/test-driver.html")
+    refused = await driver.evaluate("()=>chrome.runtime.sendMessage({type:'syncNow'})")
+    assert not refused.get("ok") and refused.get("code") == "untrusted_sender", refused
+    site = await context.new_page()
+    unexpected_navigation = []
+
+    async def fixture(route):
+        if route.request.is_navigation_request() and route.request.frame == site.main_frame:
+            if route.request.url in SITES.values():
+                return await route.fulfill(content_type="text/html", path=SIDEBAR)
+            unexpected_navigation.append(route.request.url)
+        await route.abort()
+
+    await site.route("**/*", fixture)
+    await driver.evaluate("""async () => {
+        window.newTabIds = [];
+        chrome.tabs.onCreated.addListener(tab => window.newTabIds.push(tab.id));
+        window.originalTabIds = (await chrome.tabs.query({})).map(tab => tab.id).sort();
+    }""")
+    toolbar = Toolbar(driver)
+    await site.goto(SITES["chatgpt"])
+    await expect(site.locator(BOX)).to_have_count(0)
+    await toolbar.open(site)
+    await toolbar.expect_mode(False)
+    await pair_and_enable(toolbar, worker, descriptor)
+    # A signed-out visit cannot authorize anything. A retry stays on the same site.
+    await toolbar.click("#list-mode")
+    await wait_for(lambda: worker.evaluate("qa.requests.length>0"), "sign-in was not verified")
+    await wait_for(
+        lambda: toolbar.ui(
+            "()=>!q('#list-mode').disabled && /sign.in|retry|account|verif|could not|unavailable/i.test(q('#mode-status').textContent)"
+        ),
+        "sign-in error did not recover to a retryable state",
+    )
+    await expect(site.locator(BOX)).to_have_count(0)
+    await expect_scope(worker, "chatgpt")
+    await no_capture(worker, db)
+    if await toolbar.ui("()=>q('#list-mode').getAttribute('aria-pressed')==='true'"):
+        await toolbar.toggle(False)
+        await toolbar.open(site)
     await worker.evaluate("qa.signedIn=true")
+    await chatgpt_checks(worker, toolbar, site)
+    await no_capture(worker, db)
 
-    for provider, kind, item in (
-        ("chatgpt", "project", PROJECT),
-        ("claude", "conversation", CLAUDE),
-        ("gemini", "conversation", GEMINI),
-    ):
-        await click("#tab-" + provider)
-        await click("#load-catalog")
-        # Gemini summary IDs are opaque and may retain the provider's c_ prefix.
-        row = ",".join(
-            f'#catalog-items input[data-kind="{kind}"][data-id="{i}"]'
-            for i in ([item, "c_" + item] if provider == "gemini" else [item])
-        )
-        await click(row)
-        assert not archived(db) and not await worker.evaluate("qa.detail.length")
-        await click("#add-selection")
+    for provider, item in [("claude", CLAUDE), ("gemini", GEMINI)]:
+        await site.goto(SITES[provider])
+        await expect(site.locator(BOX)).to_have_count(0)
+        await toolbar.open(site)
+        await toolbar.toggle(True)
+        individual = box(site, item)
+        await expect(individual).to_be_visible()
+        projects = [CLAUDE_PROJECT] if provider == "claude" else []
+        if projects:
+            await click_row(box(site, CLAUDE_PROJECT, "project"))
+            await expect_scope(worker, provider, projects)
+            await expect(site.locator("#project ul a")).to_have_count(0)
+        await click_row(individual)
+        await expect_scope(worker, provider, projects, [item])
+        await click_row(individual)
+        await expect_scope(worker, provider, projects)
+        await click_row(individual)
+        await expect_scope(worker, provider, projects, [item])
+        await mode_off(toolbar, site, provider)
+        await no_capture(worker, db)
 
-        async def has_saved(name=provider, expected=item):
-            scope = (await state("providerSyncScopes") or {}).get(name)
-            return any(
-                expected
-                in {
-                    v.removeprefix("c_")
-                    for v in e.get("projectIds", []) + e.get("conversationIds", [])
-                }
-                for e in (scope or {}).get("entries", [])
-            )
-
-        await wait_for(has_saved, f"selection not saved for {provider}")
-        saved_row = row.replace("#catalog-items input", "#saved-items button").replace(
-            f'[data-kind="{kind}"]', ""
-        )
-        await wait_for(
-            lambda selector=saved_row: popup("s=>!!q(s)", selector),
-            f"saved {provider} row is not manageable",
-        )
-        assert await popup("s=>d.querySelectorAll(s).length", saved_row) == 1
-        if provider == "gemini":
-            await click("#saved-heading")
-            await click(saved_row)
-            await wait_for(
-                lambda selector=saved_row: popup("s=>!q(s)", selector), "Remove failed inside popup"
-            )
-            assert not await worker.evaluate("qa.detail.length") and not archived(db)
-            await click(row)
-            await click("#add-selection")
-            await wait_for(has_saved, "could not re-add removed item")
-            await click("#saved-heading")
-        assert not await worker.evaluate("qa.detail.length"), "catalog or Save read a transcript"
-        assert not archived(db), "Save wrote conversations before Sync"
-    layout = await popup(f"()=>({LAYOUT})(d)")
-    assert_layout(layout)
-    await click("#sync")
-    target = sorted([MEMBER, CLAUDE, GEMINI])
+    # The new member exists only on a second API page, after mode ended. No visible row ever had its ID.
+    await worker.evaluate("qa.late=true")
+    await toolbar.open(site)
+    assert_layout(await toolbar.ui(f"()=>({LAYOUT})(d)"))
+    started = await worker.evaluate("Date.now()")
+    await toolbar.click("#sync")
 
     async def completed():
-        status = await state("status") or {}
+        status = await state(worker, "status") or {}
         return all(
-            status.get(k, {}).get("running") is False for k in ("chatgpt", "claude", "gemini")
+            status.get(k, {}).get("running") is False
+            and status[k].get("lastRunMs", 0) >= started
+            and status[k].get("trigger") == "manual"
+            for k in SITES
         )
 
     await wait_for(completed, "manual popup sync did not complete")
-    report = await worker.evaluate("({detail:qa.detail,unexpected:qa.unexpected})")
-    assert archived(db) == target, (archived(db), report, await state("status"))
-    assert sorted(report["detail"]) == target, report
-    assert not report["unexpected"], report
-    opened = await page.evaluate("window.newTabIds")
-    assert not opened, ("popup opened a web/extension tab", opened)
-    assert await page.evaluate("""async()=>JSON.stringify((await chrome.tabs.query({})).map(t=>t.id).sort())
+    target = sorted([MEMBER, STANDALONE, LATE_MEMBER, CLAUDE, CLAUDE_MEMBER, GEMINI])
+    report = await worker.evaluate("({detail:qa.detail,unexpected:qa.unexpected,native:qa.native})")
+    status = await state(worker, "status")
+    assert all(status[k]["progress"]["phase"] == "complete" for k in SITES), status
+    assert archived(db) == target, (archived(db), report, status)
+    assert sorted(report["detail"]) == target, (
+        "missing, extra, or duplicate transcript reads: " + str(report)
+    )
+    assert "ingest" in report["native"] and not report["unexpected"], report
+    assert not unexpected_navigation, unexpected_navigation
+    opened = await driver.evaluate("window.newTabIds")
+    assert not opened, ("extension opened a new tab", opened)
+    assert await driver.evaluate("""async()=>JSON.stringify((await chrome.tabs.query({})).map(t=>t.id).sort())
       === JSON.stringify(window.originalTabIds)""")
-    assert page.url.endswith("/test-driver.html")
+    assert driver.url.endswith("/test-driver.html") and site.url == SITES["gemini"]
     print(
         json.dumps(
             {
-                "installed_mv3_popup": "passed",
-                "actual_popup_contexts": len(popup_contexts),
+                "installed_mv3_popup_and_site_selection": "passed",
+                "actual_popup_contexts_per_open": 1,
                 "extra_tabs": len(opened),
                 "real_native_archive_records": len(target),
                 "providers": ["ChatGPT", "Claude", "Gemini"],
@@ -273,7 +446,9 @@ async def verify(executable):
                     else await context.wait_for_event("serviceworker")
                 )
                 descriptor = register(folder, profile, worker.url.split("/")[2], env)
-                await exercise(worker, context.pages[0], descriptor, folder / "fixture.sqlite")
+                await exercise(
+                    context, worker, context.pages[0], descriptor, folder / "fixture.sqlite"
+                )
             finally:
                 await context.close()
 

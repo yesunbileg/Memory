@@ -1,5 +1,5 @@
-import { catalogRows, filterRows, idKey, savedRows, selectionFor } from './popup-picker.js';
 import {
+  PROVIDERS,
   normalizeSettings,
   enterToggles,
   sameConnection,
@@ -8,11 +8,11 @@ import {
   friendlyError,
 } from './ui.js';
 import { parseConnectionFile, connectionPresentation } from './connection-file.js';
-import { scopeFor } from './popup-scope.js';
+import { nonempty, scopeFor } from './popup-scope.js';
 
 const el = (id) => document.getElementById(id);
-const names = { chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini' };
-const providers = Object.keys(names);
+const providers = Object.keys(PROVIDERS);
+const names = Object.fromEntries(providers.map((p) => [p, PROVIDERS[p].name]));
 const send = (message) => chrome.runtime.sendMessage(message);
 const create = (tag, cls, text) => {
   const node = document.createElement(tag);
@@ -20,25 +20,7 @@ const create = (tag, cls, text) => {
   if (text !== undefined) node.textContent = text;
   return node;
 };
-const size = (scope) =>
-  (scope?.entries || []).reduce(
-    (n, e) => n + (e.projectIds?.length || 0) + (e.conversationIds?.length || 0),
-    0,
-  );
-const models = Object.fromEntries(
-  providers.map((id) => [
-    id,
-    {
-      pending: new Set(),
-      kind: id === 'gemini' ? 'conversation' : 'all',
-      query: '',
-      limit: 50,
-      savedLimit: 50,
-    },
-  ]),
-);
-let current = 'chatgpt',
-  settings = normalizeSettings(),
+let settings = normalizeSettings(),
   scopes = {},
   status = {},
   activity = [],
@@ -53,7 +35,7 @@ let syncPending = false,
 
 function setSettings(open) {
   el('settings-panel').hidden = !open;
-  el('picker-view').hidden = open;
+  el('list-panel').hidden = open;
   el('settings').setAttribute('aria-expanded', String(open));
   el('settings').textContent = open ? 'Done' : 'Settings';
 }
@@ -70,16 +52,10 @@ el('browser-family').addEventListener('change', updateCommand);
 el('version').textContent = 'AI Memory ' + chrome.runtime.getManifest().version;
 updateCommand();
 
-function activeSaved(p) {
-  if (models[p].catalog) return size(models[p].catalog.selectedScope);
-  return size(scopes[p]);
-}
 function summary() {
-  const enabled = providers.filter((p) => settings.providers[p] && activeSaved(p) > 0);
+  const enabled = providers.filter((p) => settings.providers[p] && nonempty(scopes[p]));
   const runs = statusForPairing(status, settings);
   const working = Object.entries(runs).some(([p, v]) => settings.providers[p] && v.running);
-  el('enable-current').checked = settings.providers[current];
-  el('enable-label').textContent = 'Enable ' + names[current] + ' sync';
   el('provider-status').replaceChildren();
   for (const p of providers) {
     const state = runs[p],
@@ -111,12 +87,12 @@ function summary() {
     ? 'Connect your archive in Settings to sync.'
     : enabled.length
       ? 'Saved items from ' + enabled.map((p) => names[p]).join(', ') + '.'
-      : providers.some((p) => activeSaved(p))
-        ? 'Enable a saved provider in Settings to sync.'
-        : 'Add projects or chats to your sync list first.';
+      : providers.some((p) => nonempty(scopes[p]))
+        ? 'Enable the selected provider in Settings to sync.'
+        : 'Check a chat or project on its website to sync it.';
   el('notice').textContent = captureOutcome(runs, settings.providers, syncSince) || notice;
 }
-async function readStorage(updateCatalogs = false) {
+async function readStorage() {
   const ticket = ++storageTicket;
   const data = await chrome.storage.local.get([
     'settings',
@@ -153,19 +129,10 @@ async function readStorage(updateCatalogs = false) {
         ),
       );
   if (!activity.length) el('activity').textContent = 'No runs recorded.';
-  if (updateCatalogs)
-    for (const p of providers) {
-      const model = models[p];
-      if (!model.catalog) continue;
-      const owners = new Set(model.catalog.entries.map((e) => e.principalId));
-      setScope(model, { entries: scopes[p].entries.filter((e) => owners.has(e.principalId)) });
-      for (const key of model.savedKeys) model.pending.delete(key);
-    }
   for (const p of providers) el('toggle-' + p).checked = settings.providers[p];
   el('auto-paused').checked = settings.autoPaused;
   if (document.activeElement !== el('interval')) el('interval').value = settings.intervalMinutes;
-  if (updateCatalogs) draw();
-  else summary();
+  summary();
 }
 function writeSettings(update) {
   const job = writes.then(async () => {
@@ -200,12 +167,6 @@ for (const p of providers) {
     return (prev) => ({ ...prev, providers: { ...prev.providers, [p]: on } });
   });
 }
-enterToggles(el('enable-current'));
-preference(el('enable-current'), () => {
-  const p = current,
-    on = el('enable-current').checked;
-  return (prev) => ({ ...prev, providers: { ...prev.providers, [p]: on } });
-});
 enterToggles(el('auto-paused'));
 preference(el('auto-paused'), () => {
   const paused = el('auto-paused').checked;
@@ -280,217 +241,91 @@ async function pair(read) {
   }
 }
 
-function copy(item) {
-  const wrap = create('span', 'copy');
-  wrap.append(
-    create('strong', '', item.title),
-    create(
-      'small',
-      '',
-      (item.kind === 'project' ? 'Project' : 'Chat') + ' · ' + item.principalTitle,
-    ),
+// Mode belongs to the current top-level document, not extension storage. Reading it
+// on popup open never starts discovery, enables a provider or changes a saved item.
+let modePage = null,
+  modeBusy = false;
+async function activePage() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!Number.isInteger(tab?.id) || tab.id < 0 || !tab.url) return null;
+  const url = new URL(tab.url);
+  const provider = providers.find(
+    (p) => url.protocol === 'https:' && url.host === PROVIDERS[p].site,
   );
-  return wrap;
+  return provider ? { tabId: tab.id, provider } : null;
 }
-function draw() {
-  const p = current,
-    m = models[p],
-    cat = m.catalog;
-  for (const id of providers) el('tab-' + id).setAttribute('aria-pressed', String(id === p));
-  el('catalog-heading').textContent = names[p] + ' catalog';
-  el('filters').hidden = !cat;
-  el('picker-search').value = m.query;
-  el('picker-kind').value = m.kind;
-  el('project-filter').hidden = p === 'gemini';
-  el('picker-kind').disabled = p === 'gemini';
-  el('load-catalog').disabled = !!m.busy;
-  el('load-catalog').textContent =
-    m.busy === 'load' ? 'Loading…' : cat ? 'Reload items' : 'Load items';
-  el('catalog-items').replaceChildren();
-  el('saved-items').replaceChildren();
-  el('catalog-note').textContent =
-    m.busy === 'load'
-      ? 'Reading titles and IDs…'
-      : !cat
-        ? 'Load ' +
-          (p === 'gemini' ? 'chat titles' : 'projects and chat titles') +
-          ' from your signed-in ' +
-          names[p] +
-          ' account.'
-        : '';
-  el('saved-heading').textContent =
-    'Saved list · ' + names[p] + (cat ? ' (' + m.saved.length + ')' : '');
-  el('saved-note').textContent = !cat
-    ? 'Load items to review the saved list for your signed-in account.'
-    : m.saved.length
-      ? 'Removing an item stops future syncs; it does not delete the local copy.'
-      : 'No saved items for this account.';
-  el('show-more').hidden = true;
-  el('more-saved').hidden = true;
-  if (cat) {
-    const filtered = filterRows(m.rows, m.query, m.kind);
-    const count = filtered.length;
-    el('catalog-note').textContent =
-      (cat.incomplete ? 'Partial catalog. ' : '') +
-      (count
-        ? count + ' matching item' + (count === 1 ? '' : 's')
-        : m.rows.length
-          ? 'No matches. Change your search or filter.'
-          : 'No items available for this account.');
-    if (cat.warning) el('catalog-note').textContent += ' ' + cat.warning;
-    for (const item of filtered.slice(0, m.limit)) {
-      const key = idKey(item),
-        saved = m.savedKeys.has(key),
-        row = create('div', 'row'),
-        label = create('label'),
-        box = create('input');
-      box.type = 'checkbox';
-      box.dataset.kind = item.kind;
-      box.dataset.id = item.id;
-      box.checked = saved || m.pending.has(key);
-      box.disabled = saved || !!m.busy;
-      label.append(box, copy(item));
-      row.append(label);
-      if (saved) row.append(create('small', 'muted', 'Saved'));
-      box.addEventListener('change', () => {
-        if (box.checked) m.pending.add(key);
-        else m.pending.delete(key);
-        m.note = '';
-        updateActions(m);
-      });
-      el('catalog-items').append(row);
-    }
-    el('show-more').hidden = count <= m.limit;
-    for (const item of m.saved.slice(0, m.savedLimit)) {
-      const row = create('div', 'row'),
-        button = create('button', '', 'Remove');
-      button.dataset.id = item.id;
-      button.dataset.kind = item.kind;
-      button.disabled = !!m.busy;
-      button.setAttribute('aria-label', 'Remove ' + item.title + ' from sync list');
-      button.addEventListener('click', () => edit(p, item));
-      row.append(copy(item), button);
-      el('saved-items').append(row);
-    }
-    el('more-saved').hidden = m.saved.length <= m.savedLimit;
-  }
-  updateActions(m);
-  summary();
-}
-function updateActions(m) {
-  el('pick-count').textContent = m.pending.size + ' selected';
-  el('add-selection').disabled = !m.pending.size || !!m.busy;
-  el('picker-status').textContent = m.note || '';
-}
-function setScope(m, scope) {
-  m.catalog.selectedScope = scope || { entries: [] };
-  m.saved = savedRows(m.catalog.selectedScope, m.catalog, m.known);
-  m.savedKeys = new Set(m.saved.map(idKey));
-}
-function reset(m) {
-  m.catalog = null;
-  m.saved = [];
-  m.savedKeys = new Set();
-  m.rows = [];
-  m.known = new Map();
-  m.pending.clear();
-  m.limit = m.savedLimit = 50;
-}
-function redraw(p) {
-  if (p === current) draw();
-}
-async function load(p, after = '') {
-  const m = models[p];
-  if (m.busy) return;
-  m.busy = 'load';
-  reset(m);
-  m.note = '';
-  redraw(p);
+
+async function updateListMode(toggle = false) {
+  if (modeBusy || (toggle && !modePage)) return;
+  const button = el('list-mode');
+  modeBusy = true;
+  button.setAttribute('aria-busy', 'true');
+  let page,
+    next = null;
+  let hint = 'Open ChatGPT, Claude, or Gemini in this tab to use list mode.';
   try {
-    const result = await send({ type: 'LIST_SYNC_CATALOG', provider: p });
-    if (!result?.ok || !result.catalogToken || !Array.isArray(result.entries))
-      throw Error(
-        result?.error ||
-          'Could not load items. Sign in to ' + names[p] + ' in this browser, then retry.',
-      );
-    m.catalog = result;
-    m.rows = catalogRows(result);
-    m.known = new Map(m.rows.map((item) => [idKey(item), item]));
-    setScope(m, result.selectedScope);
-    m.note = after;
-  } catch (error) {
-    reset(m);
-    m.note = error.message || 'Could not load items.';
-  } finally {
-    m.busy = '';
-    redraw(p);
-  }
-}
-async function edit(p, remove) {
-  const m = models[p];
-  if (m.busy || !m.catalog || (!remove && !m.pending.size)) return;
-  // Add only new picks. The worker merges them with saved (including unseen)
-  // items for their original identities. Removal is a separate explicit action.
-  const rows = remove ? [remove] : m.rows.filter((item) => m.pending.has(idKey(item)));
-  m.busy = 'save';
-  m.note = 'Saving…';
-  redraw(p);
-  let reload = false;
-  try {
-    const result = await send({
-      type: remove ? 'REMOVE_SYNC_SELECTION' : 'SAVE_SYNC_SELECTION',
-      provider: p,
-      catalogToken: m.catalog.catalogToken,
-      selection: selectionFor(rows),
-    });
-    if (!result?.ok) {
-      reload = ['catalog_expired', 'principal_changed'].includes(result?.code);
-      throw Error(result?.error || 'Could not save. Try again.');
+    page = await activePage();
+    if (page) {
+      const name = names[page.provider];
+      const change =
+        toggle && modePage?.tabId === page.tabId && modePage.provider === page.provider;
+      // If the active tab changed, read its state first. Do not apply the other tab’s click.
+      const message = change
+        ? { type: 'SET_PAGE_LIST_MODE', enabled: !modePage.enabled }
+        : { type: 'GET_PAGE_LIST_MODE' };
+      if (change)
+        el('mode-status').textContent = message.enabled
+          ? 'Checking the list on ' + name + '…'
+          : 'Hiding checkboxes…';
+      const reply = await chrome.tabs.sendMessage(page.tabId, message, { frameId: 0 });
+      if (
+        reply?.ok === true &&
+        reply.provider === page.provider &&
+        typeof reply.enabled === 'boolean'
+      ) {
+        next = { ...page, enabled: reply.enabled };
+        const items = page.provider === 'gemini' ? 'chats' : 'chats or whole projects';
+        hint = next.enabled
+          ? 'Check or uncheck ' + items + ' on ' + name + '. Your sync list updates immediately.'
+          : 'Turn on list mode to show checkboxes beside ' + items + ' on ' + name + '.';
+      } else if (reply?.ok === false && reply.code === 'page_unavailable') {
+        hint = 'Open the ' + name + ' chat list in this tab to use list mode.';
+      } else if (reply?.ok === false && reply.code === 'page_unverified') {
+        next = { ...page, enabled: false };
+        const item = page.provider === 'gemini' ? 'chat' : 'chat or project';
+        hint = `Cannot verify this ${item}. Open the ${name} home page and try list mode there.`;
+      } else if (change && reply?.ok === false) {
+        next = typeof reply.enabled === 'boolean' ? { ...page, enabled: reply.enabled } : modePage;
+        hint =
+          reply.code === 'not_logged_in'
+            ? 'Sign in to ' + name + ', then try list mode again.'
+            : reply.code === 'catalog_unavailable'
+              ? 'Could not read the list on ' + name + '. Check that you are signed in and retry.'
+              : 'Could not change list mode on ' + name + '. Try again.';
+      } else {
+        throw Error('page unavailable');
+      }
     }
-    setScope(m, result.selectedScope);
-    if (!remove) m.pending.clear();
-    m.note = remove
-      ? 'Removed from the sync list.'
-      : 'Added to the sync list. No chats were synced.';
-  } catch (error) {
-    m.note = error.message || 'Could not save. Try again.';
-  } finally {
-    m.busy = '';
-    if (reload) await load(p, 'Account or catalog changed. Check your choices again.');
-    else redraw(p);
+  } catch {
+    if (page) hint = 'Reload this ' + names[page.provider] + ' tab, then reopen AI Memory.';
   }
+  modePage = next;
+  button.disabled = !next;
+  button.setAttribute('aria-pressed', String(next?.enabled === true));
+  button.setAttribute('aria-busy', 'false');
+  el('mode-state').textContent = next?.enabled ? 'On' : 'Off';
+  el('mode-site').textContent = page ? names[page.provider] : 'Current tab';
+  el('mode-status').textContent = hint;
+  modeBusy = false;
 }
-for (const id of providers)
-  el('tab-' + id).addEventListener('click', () => {
-    current = id;
-    draw();
-  });
-el('load-catalog').addEventListener('click', () => load(current));
-el('picker-search').addEventListener('input', (e) => {
-  models[current].query = e.target.value;
-  models[current].limit = 50;
-  draw();
-});
-el('picker-kind').addEventListener('change', (e) => {
-  models[current].kind = e.target.value;
-  models[current].limit = 50;
-  draw();
-});
-el('show-more').addEventListener('click', () => {
-  models[current].limit += 50;
-  draw();
-});
-el('more-saved').addEventListener('click', () => {
-  models[current].savedLimit += 50;
-  draw();
-});
-el('add-selection').addEventListener('click', () => edit(current));
+el('list-mode').addEventListener('click', () => updateListMode(true));
+
 el('sync').addEventListener('click', () => requestSync());
 async function requestSync(provider) {
   if (
     el('sync').disabled ||
     syncPending ||
-    (provider && (!settings.providers[provider] || !activeSaved(provider)))
+    (provider && (!settings.providers[provider] || !nonempty(scopes[provider])))
   )
     return;
   syncPending = true;
@@ -525,9 +360,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
     ++checking;
     connected = false;
   }
-  await readStorage(!!(changes.providerSyncScopes || changes.chatgptSyncList));
+  await readStorage();
   if (repair) await check();
 });
-await readStorage();
-draw();
-await check();
+await Promise.all([updateListMode(), readStorage().then(check)]);
