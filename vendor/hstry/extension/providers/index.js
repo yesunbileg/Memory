@@ -1,6 +1,6 @@
-import { syncChatGPT } from './chatgpt.js';
-import { syncClaude } from './claude.js';
-import { syncGemini } from './gemini.js';
+import * as chatgptProvider from './chatgpt.js';
+import * as claudeProvider from './claude.js';
+import * as geminiProvider from './gemini.js';
 
 // Shared provider seam for the worker and both extension surfaces. A provider
 // owns its sync implementation; callers only need this small descriptor.
@@ -12,7 +12,9 @@ export const PROVIDERS = {
     defaultEnabled: false,
     sourceId: 'chatgpt-web',
     adapter: 'chatgpt-web',
-    sync: syncChatGPT,
+    sync: chatgptProvider.syncChatGPT,
+    listCatalog: chatgptProvider.listChatGPTCatalog,
+    principalIds: chatgptProvider.chatGPTPrincipalIds,
   },
   claude: {
     name: 'Claude',
@@ -21,7 +23,9 @@ export const PROVIDERS = {
     defaultEnabled: false,
     sourceId: 'claude-web',
     adapter: 'claude-web',
-    sync: syncClaude,
+    sync: claudeProvider.syncClaude,
+    listCatalog: claudeProvider.listClaudeCatalog,
+    principalIds: claudeProvider.claudePrincipalIds,
   },
   gemini: {
     name: 'Gemini',
@@ -30,7 +34,9 @@ export const PROVIDERS = {
     defaultEnabled: false,
     sourceId: 'gemini-web',
     adapter: 'gemini',
-    sync: syncGemini,
+    sync: geminiProvider.syncGemini,
+    listCatalog: geminiProvider.listGeminiCatalog,
+    principalIds: geminiProvider.geminiPrincipalIds,
   },
 };
 

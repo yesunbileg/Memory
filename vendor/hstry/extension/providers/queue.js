@@ -7,6 +7,7 @@ export async function drainSelected({
   field,
   provider,
   read,
+  beforeRead,
   push,
   report,
   checkpoint,
@@ -29,6 +30,9 @@ export async function drainSelected({
     for (const id of ids) {
       await guard();
       if (budget < 10) await sleep(400);
+      // An invalidated scope is not a failed conversation. Leave the durable
+      // frontier untouched so it cannot resume on behalf of a different user.
+      if (beforeRead) await beforeRead(group.principalId);
       try {
         const item = await read(group.principalId, id);
         if (item) batch.push(item);

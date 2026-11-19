@@ -1,3 +1,4 @@
+import { listPopupCatalog, syncPopupScope, nativeId, unavailable } from './popup-catalog.js';
 import { drainSelected, preparePrincipalRun } from './queue.js';
 // Claude provider: syncs conversations from claude.ai via its web API,
 // authenticated with the browser session cookies (no bearer token needed).
@@ -35,14 +36,16 @@ async function listOrganizations() {
   return available;
 }
 
-async function* listUpdatedConversations(orgId, sinceMs, readPage) {
+async function* listUpdatedConversations(orgId, sinceMs, readPage, v2 = false) {
   const seen = new Set();
   for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
     const offset = page * PAGE_SIZE;
     const data = await readPage(
-      `${BASE}/api/organizations/${orgId}/chat_conversations?limit=${PAGE_SIZE}&offset=${offset}&consistency=eventual`,
+      `${BASE}/api/organizations/${encodeURIComponent(orgId)}/${v2 ? 'chat_conversations_v2' : 'chat_conversations'}?limit=${PAGE_SIZE}&offset=${offset}&consistency=eventual`,
     );
-    const items = Array.isArray(data) ? data : data?.data;
+    const items = Array.isArray(data)
+      ? data
+      : (data?.data ?? data?.items ?? data?.chat_conversations);
     if (!Array.isArray(items)) throw new Error('Claude conversation list shape is unavailable');
     if (items.length && items.every((item) => seen.has(item?.uuid)))
       throw new Error('Claude conversation pagination did not advance');
@@ -198,9 +201,58 @@ function toParsedConversation(detail, orgId) {
   };
 }
 
+async function signedInAccount() {
+  const account = await fetchJson(`${BASE}/api/account`, { cache: 'no-store' });
+  if (!nativeId(account?.uuid) || !Array.isArray(account.memberships))
+    throw new Error('Current Claude account is not verified.');
+  const allowed = new Set(
+    account.memberships
+      .filter((m) => !unavailable(m) && !unavailable(m?.organization))
+      .map((m) => m?.organization?.uuid)
+      .filter(nativeId),
+  );
+  return { userId: account.uuid, allowed };
+}
+async function popupPrincipals() {
+  const { userId, allowed } = await signedInAccount();
+  const orgs = await listOrganizations();
+  const result = orgs
+    .filter((o) => allowed.has(o.id))
+    .map((o) => ({
+      id: o.id,
+      principalId: JSON.stringify([userId, o.id]),
+      title: o.name,
+      sourceId: orgs.length > 1 ? `claude-web-${shortId(o.id)}` : 'claude-web',
+    }));
+  if (!result.length) throw new Error('Current Claude organization is not verified.');
+  return result;
+}
+const popup = {
+  name: 'Claude',
+  field: 'orgs',
+  adapter: 'claude-web',
+  principals: popupPrincipals,
+  id: (item) => item?.uuid,
+  projects: (p, read) => listProjects(p.id, read),
+  chats: (p, read) => listUpdatedConversations(p.id, null, read, true),
+  members: (p, id, read) => listProjectConversations(p.id, id, read),
+  owns: async (p) => {
+    const { userId, allowed } = await signedInAccount();
+    return JSON.stringify([userId, p.id]) === p.principalId && allowed.has(p.id);
+  },
+  detail: (p, id) =>
+    fetchJson(
+      `${BASE}/api/organizations/${encodeURIComponent(p.id)}/chat_conversations/${encodeURIComponent(id)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`,
+    ),
+  parse: (detail, id, p) => toParsedConversation(detail, p.id),
+};
+export const listClaudeCatalog = () => listPopupCatalog(popup);
+export const claudePrincipalIds = async () => (await popupPrincipals()).map((p) => p.principalId);
+
 export async function syncClaude({
   state = {},
   captureTypes,
+  selectedScope,
   push,
   register = async () => {},
   log = () => {},
@@ -208,6 +260,16 @@ export async function syncClaude({
   guard = async () => {},
   report = async () => {},
 }) {
+  if (selectedScope !== undefined)
+    return syncPopupScope(popup, {
+      selectedScope,
+      state,
+      push,
+      register,
+      guard,
+      report,
+      checkpoint,
+    });
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
   if (!Object.values(policy).some(Boolean)) {

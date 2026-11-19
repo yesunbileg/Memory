@@ -1,16 +1,8 @@
 // Poll selected AI conversations and save them to the local AI Memory receiver.
 
-import {
-  editSyncList,
-  hasItems,
-  itemIds,
-  readSyncList,
-  sessionPrincipal,
-} from './chatgpt-sync-list.js';
-import { getChatGPTSession } from './providers/chatgpt.js';
+import { scopeFor, nonempty, listPopupCatalog, savePopupScope } from './popup-scope.js';
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { PROVIDERS } from './providers/index.js';
-import { eligibleCapture } from './providers/selection.js';
 import { normalizeSettings } from './ui.js';
 import { checkConnection } from './worker-auth.js';
 import { requestGroups } from './transport.js';
@@ -57,23 +49,23 @@ function observeSettings(settings) {
 async function assertCurrentCapture(epoch, provider, listKey) {
   const latest = await getSettings();
   observeSettings(latest);
-  if (
-    epoch !== captureEpoch ||
-    (provider === 'chatgpt' && JSON.stringify(latest.chatgptSyncList) !== listKey)
-  )
+  if (epoch !== captureEpoch || JSON.stringify(latest.scopes[provider]?.scope) !== listKey)
     throw localError('selection_changed');
 }
 
 async function getSettings() {
-  const [{ settings }, { chatgptSyncList }] = await Promise.all([
+  const [{ settings }, { chatgptSyncList }, { providerSyncScopes }] = await Promise.all([
     chrome.storage.local.get('settings'),
     chrome.storage.local.get('chatgptSyncList'),
+    chrome.storage.local.get('providerSyncScopes'),
   ]);
   // Keep raw pairing fields: an array or other malformed value must never
   // become a valid host name through display-oriented string normalization.
   return {
     ...normalizeSettings(settings),
-    chatgptSyncList: readSyncList(chatgptSyncList),
+    scopes: Object.fromEntries(
+      Object.keys(PROVIDERS).map((p) => [p, scopeFor(p, providerSyncScopes, chatgptSyncList)]),
+    ),
     nativeHost: settings?.nativeHost,
     archiveId: settings?.archiveId,
   };
@@ -264,7 +256,7 @@ async function ensureAlarm() {
   for (const [name, entry] of Object.entries(status)) {
     if (
       !settings.providers[name] ||
-      !eligibleCapture(name, settings.captureTypes, settings.chatgptSyncList) ||
+      !nonempty(settings.scopes[name]?.scope) ||
       (!entry?.continuationPending && !entry?.nextRetryMs) ||
       (settings.autoPaused && !entry.manualContinuation)
     )
@@ -287,16 +279,17 @@ async function runSync(
   await startupReady;
   const settings = await getSettings();
   const epoch = observeSettings(settings);
-  const listKey = JSON.stringify(settings.chatgptSyncList);
   if (
-    !Object.values(settings.captureTypes).some(Boolean) &&
-    !(settings.providers.chatgpt && hasItems(settings.chatgptSyncList))
-  )
+    !(onlyProvider ? [onlyProvider] : Object.keys(PROVIDERS)).some(
+      (name) => settings.providers[name] && nonempty(settings.scopes[name]?.scope),
+    )
+  ) {
     return {
       ok: false,
-      code: 'no_capture_types',
-      error: 'Choose at least one chat type before capturing.',
+      code: 'no_saved_selection',
+      error: 'Enable a provider and save chats or projects in the popup first.',
     };
+  }
   const status = await getStatus();
   if (
     settings.autoPaused &&
@@ -313,7 +306,7 @@ async function runSync(
   const eligible = Object.entries(PROVIDERS).filter(
     ([name]) =>
       settings.providers[name] &&
-      eligibleCapture(name, settings.captureTypes, settings.chatgptSyncList) &&
+      nonempty(settings.scopes[name]?.scope) &&
       (!onlyProvider || name === onlyProvider),
   );
   const selected = eligible.filter(([name]) => !activeProviders.has(name));
@@ -369,25 +362,22 @@ async function runSync(
     const settled = await Promise.allSettled(
       selected.map(async ([name, provider]) => {
         const startedAt = Date.now();
+        const saved = settings.scopes[name];
+        const listKey = JSON.stringify(saved.scope);
         const guard = () => assertCurrentCapture(epoch, name, listKey);
         // A changed list invalidates both discovery pages and queued detail IDs.
         // Do not duplicate the saved IDs into the public status summary.
-        const listHash =
-          name === 'chatgpt' && listKey
-            ? Array.from(
-                new Uint8Array(
-                  await crypto.subtle.digest('SHA-256', new TextEncoder().encode(listKey)),
-                ),
-                (b) => b.toString(16).padStart(2, '0'),
-              ).join('')
-            : null;
+        const listHash = Array.from(
+          new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(listKey))),
+          (b) => b.toString(16).padStart(2, '0'),
+        ).join('');
         const captureScope = connection.archiveId
           ? JSON.stringify([
               connection.archiveId,
               name,
               profile,
               settings.account,
-              listHash ? { savedList: listHash } : settings.captureTypes,
+              { savedList: listHash },
             ])
           : null;
         const scopeChanged = !captureScope || status[name]?.captureScope !== captureScope;
@@ -469,7 +459,7 @@ async function runSync(
           const result = await provider.sync({
             state: entry.state ?? {},
             captureTypes: { ...settings.captureTypes },
-            ...(name === 'chatgpt' ? { chatgptSyncList: settings.chatgptSyncList } : {}),
+            selectedScope: saved.scope,
             push,
             report,
             guard,
@@ -581,101 +571,64 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.action.onClicked.addListener(() => runSync('manual'));
-
-// Serialize list edits across tabs. Page code cannot invoke this API; the only
-// content-script message accepted is an ID-only Add from our top-level ChatGPT script.
-let listWrites = Promise.resolve();
-function settingsSender(sender) {
+function popupSender(sender) {
   return (
-    sender.id === chrome.runtime.id &&
-    sender.url?.split(/[?#]/, 1)[0] === chrome.runtime.getURL('options.html')
+    typeof chrome.runtime.id === 'string' &&
+    sender?.id === chrome.runtime.id &&
+    !sender.tab &&
+    sender.url?.split(/[?#]/, 1)[0] === 'chrome-extension://' + chrome.runtime.id + '/popup.html' &&
+    (sender.frameId === undefined || sender.frameId === 0)
   );
-}
-async function inspectList(sender) {
-  if (!settingsSender(sender)) throw new Error('Open extension Settings.');
-  const principal = sessionPrincipal(await getChatGPTSession());
-  const { chatgptSyncList } = await chrome.storage.local.get('chatgptSyncList');
-  const entry = readSyncList(chatgptSyncList)?.entries.find(
-    (e) => e.accountId === principal.accountId && e.userId === principal.userId,
-  );
-  return { ok: true, entry: entry ?? null };
-}
-function changeList(message, sender, remove) {
-  if (sender.id !== chrome.runtime.id) throw new Error('Untrusted extension sender.');
-  if (remove) {
-    if (!settingsSender(sender)) throw new Error('Open extension Settings to remove items.');
-  } else if (
-    !Number.isInteger(sender.tab?.id) ||
-    sender.frameId !== 0 ||
-    new URL(sender.url).origin !== 'https://chatgpt.com' ||
-    (sender.origin && sender.origin !== 'https://chatgpt.com')
-  ) {
-    throw new Error('Open ChatGPT and select rows from its sidebar.');
-  }
-  const fields = [
-    'type',
-    'projectIds',
-    'conversationIds',
-    ...(remove ? ['accountId', 'userId'] : []),
-  ];
-  if (Object.keys(message).some((k) => !fields.includes(k)))
-    throw new Error('Unexpected selection fields.');
-  const ids = itemIds(message);
-  if (!ids.projectIds.length && !ids.conversationIds.length)
-    throw new Error('Select at least one item.');
-  // Resolve the active session at the user's gesture, not later when a queued write runs.
-  const identity = getChatGPTSession().then(sessionPrincipal);
-  // Attach a rejection handler immediately even while an earlier edit holds the write queue.
-  const resolved = identity.then(
-    (principal) => ({ principal }),
-    (error) => ({ error }),
-  );
-  const next = listWrites
-    .catch(() => {})
-    .then(async () => {
-      const { principal, error } = await resolved;
-      if (error) throw error;
-      if (
-        remove &&
-        (principal.userId !== message.userId || principal.accountId !== message.accountId)
-      )
-        throw new Error('Active workspace changed.');
-      const { chatgptSyncList } = await chrome.storage.local.get('chatgptSyncList');
-      const saved = editSyncList(chatgptSyncList, principal, ids, remove);
-      if (JSON.stringify(saved) !== JSON.stringify(chatgptSyncList))
-        await chrome.storage.local.set({ chatgptSyncList: saved });
-      return { ok: true };
-    });
-  listWrites = next;
-  return next;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === 'GET_CHATGPT_SYNC_SELECTION') {
-    inspectList(sender).then(sendResponse, () =>
-      sendResponse({ ok: false, error: 'Could not verify your ChatGPT workspace.' }),
-    );
-    return true;
-  }
-  const add = message?.type === 'ADD_CHATGPT_SYNC_SELECTION';
-  if (add || message?.type === 'REMOVE_CHATGPT_SYNC_SELECTION') {
-    Promise.resolve()
-      .then(() => changeList(message, sender, !add))
-      .then(sendResponse, () =>
-        sendResponse({
-          ok: false,
-          error: add
-            ? 'Could not save. Check your ChatGPT sign-in and active workspace, then select the rows again.'
-            : 'Could not remove the selected item.',
-        }),
-      );
-    return true;
-  }
-  // Website content scripts have no authority to initiate capture or pairing.
-  if (sender.url && !sender.url.startsWith('chrome-extension://' + chrome.runtime.id + '/')) {
-    sendResponse({ ok: false, error: 'Use the extension to perform this action.' });
+  if (!popupSender(sender)) {
+    sendResponse({
+      ok: false,
+      code: 'untrusted_sender',
+      error: 'Open the extension popup to perform this action.',
+    });
     return false;
+  }
+  if (
+    ['LIST_SYNC_CATALOG', 'SAVE_SYNC_SELECTION', 'REMOVE_SYNC_SELECTION'].includes(message?.type)
+  ) {
+    if (typeof message.provider !== 'string' || !Object.hasOwn(PROVIDERS, message.provider)) {
+      sendResponse({ ok: false, code: 'selection_invalid', error: 'Unknown provider.' });
+      return false;
+    }
+    const provider = message.provider;
+    const errorCopy = {
+      storage_unavailable:
+        'Could not save the selection locally. Check available browser storage and retry.',
+      catalog_expired: 'The catalog expired. Reload the list to select again.',
+      principal_changed: 'The signed-in account changed. Reload the list.',
+      selection_invalid: 'The selection is invalid. Reload the list and try again.',
+      catalog_unavailable:
+        'The provider could not return a verified list. Check your sign-in and retry.',
+      not_logged_in: 'Sign in to this provider before loading its list.',
+      rate_limited: 'The provider is busy. Wait a few minutes, then retry.',
+    };
+    const op =
+      message.type === 'LIST_SYNC_CATALOG'
+        ? listPopupCatalog(provider, PROVIDERS[provider])
+        : savePopupScope(
+            provider,
+            PROVIDERS[provider],
+            message,
+            message.type === 'REMOVE_SYNC_SELECTION',
+          );
+    op.then(sendResponse, (error) => {
+      const code = Object.hasOwn(errorCopy, error?.code)
+        ? error.code
+        : error?.name === 'NotLoggedInError'
+          ? 'not_logged_in'
+          : error?.name === 'RateLimitedError'
+            ? 'rate_limited'
+            : 'catalog_unavailable';
+      sendResponse({ ok: false, code, error: errorCopy[code] });
+    });
+    return true;
   }
   // Hold the channel only through the bounded local authentication check.
   // Once a run starts, report progress through storage instead of waiting for
@@ -697,7 +650,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'syncProvider') {
     const providerName = message.provider;
-    if (!Object.hasOwn(PROVIDERS, providerName)) {
+    if (typeof providerName !== 'string' || !Object.hasOwn(PROVIDERS, providerName)) {
       sendResponse({ ok: false, error: 'Unknown provider' });
       return false;
     }
@@ -706,7 +659,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'fullSyncProvider') {
     const providerName = message.provider;
-    if (!Object.hasOwn(PROVIDERS, providerName)) {
+    if (typeof providerName !== 'string' || !Object.hasOwn(PROVIDERS, providerName)) {
       sendResponse({ ok: false, error: 'Unknown provider' });
       return false;
     }

@@ -1,5 +1,6 @@
 // Nonvisual transport integration, exercising the real background worker.
 import assert from 'node:assert/strict';
+import { runtimeId, popup, providerSyncScopes } from './fixtures/worker-popup.js';
 import { PROVIDERS } from '../providers/index.js';
 const LIMIT = 16 * 1024 * 1024;
 let status = {},
@@ -26,17 +27,20 @@ globalThis.chrome = {
   storage: {
     local: {
       get: async (key) =>
-        key === 'settings'
-          ? { settings }
-          : key === 'status'
-            ? { status: structuredClone(status) }
-            : {},
+        key === 'providerSyncScopes'
+          ? { providerSyncScopes }
+          : key === 'settings'
+            ? { settings }
+            : key === 'status'
+              ? { status: structuredClone(status) }
+              : {},
       set: async (data) => {
         if (data.status) status = structuredClone(data.status);
       },
     },
   },
   runtime: {
+    id: runtimeId,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: {
@@ -99,7 +103,7 @@ PROVIDERS.chatgpt.sync = async ({ push }) => {
 await import('../background.js?byte-batches');
 async function run() {
   await new Promise((resolve) =>
-    listener({ type: 'syncProvider', provider: 'chatgpt' }, {}, resolve),
+    listener({ type: 'syncProvider', provider: 'chatgpt' }, popup, resolve),
   );
   for (let i = 0; i < 100 && status.chatgpt?.running; i++)
     await new Promise((r) => setTimeout(r, 2));

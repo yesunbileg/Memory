@@ -2,28 +2,18 @@
   "manifest_version": 3,
   "minimum_chrome_version": "125",
   "name": "AI Memory",
-  "version": "0.7.0",
-  "description": "Choose ChatGPT projects and individual chats in the sidebar and sync selected conversations to your local archive.",
+  "version": "0.8.0",
+  "description": "Choose projects and chats in the AI Memory popup, then sync only your saved selection to your local archive.",
   "permissions": ["alarms", "storage", "nativeMessaging"],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": ["https://chatgpt.com/*"],
-      "js": ["sidebar-picker.js"],
-      "css": ["sidebar-picker.css"],
-      "run_at": "document_idle"
-    }
   ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
-  "options_page": "options.html",
   "action": {
     "default_title": "AI Memory",
     "default_popup": "popup.html",

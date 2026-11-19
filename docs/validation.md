@@ -10,7 +10,7 @@ Historical counts and digests do not describe a newer build.
 | --- | --- |
 | Python and Node | The run log reports Ruff, pytest and all extension test scripts, with actual suite counts. Dependencies come from the frozen uv and npm locks. |
 | Synthetic browser pages | The page harness supplies a test Chrome API bridge. Passing does not prove a toolbar extension ran. |
-| Installed extension | A separate Chromium test loads the real MV3 extension in a new profile and opens its toolbar. It also checks the sidebar picker against a synthetic ChatGPT page, then verifies that Add leaves SQLite untouched and a later capture saves only the selected chat and project member. It uses no personal browser account. |
+| Installed extension | A separate Chromium test loads the real MV3 extension in a new profile and opens its toolbar. The popup-only workflow uses synthetic provider data to check that catalog loading and Add leave SQLite untouched and a later sync captures selected items. It does not inject controls on a provider website or use a separate options tab. It uses no personal browser account. |
 | Local plugins | Synthetic Codex Stop events and OpenCode idle events exercise the real adapters. Installer tests run against temporary configuration. A successful fixture does not establish deployment in a personal client. |
 | Packaging | CI installs the built wheel in an empty environment, changes directory outside the checkout, runs the synthetic demo, and calls a real MCP server over stdio. |
 | Live NotebookLM | Not part of offline CI. Only an explicitly selected empty demo notebook and newly generated synthetic data are supported by the live script. |

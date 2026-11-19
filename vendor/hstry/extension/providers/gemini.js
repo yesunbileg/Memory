@@ -20,7 +20,29 @@ const REQUEST_TIMEOUT_MS = 20_000;
 function extractSession(html) {
   const read = (key) => html.match(new RegExp(`"${key}":"((?:\\\\.|[^"\\\\])*)"`))?.[1];
   const decode = (value) => (value ? JSON.parse(`"${value}"`) : '');
+  // Read an account identity only from Google's own bootstrap assignment, never
+  // from a chat title, arbitrary inline JSON, another account menu, or a URL slot.
+  const bootstrap = html.match(
+    /<script\b[^>]*>\s*(?:window\.)?WIZ_global_data\s*=\s*([\s\S]*?)\s*;?\s*<\/script>/i,
+  );
+  let gaia = null;
+  if (bootstrap) {
+    try {
+      const data = JSON.parse(bootstrap[1]);
+      if (
+        typeof data.S06Grb === 'string' &&
+        /^\d{21}$/.test(data.S06Grb) &&
+        data.W3Yyqf === data.S06Grb &&
+        typeof data.oPEP7c === 'string' &&
+        /^[^\s@]+@[^\s@]+$/.test(data.oPEP7c)
+      )
+        gaia = data.S06Grb;
+    } catch {
+      /* Unsupported bootstrap: require continuity of the active session instead. */
+    }
+  }
   return {
+    gaia,
     at: decode(read('SNlM0e')),
     sid: decode(read('FdrFJe')),
     bl: decode(read('cfb2h')),
@@ -46,6 +68,7 @@ function parseRpcResponse(text, rpcId) {
 async function getSession() {
   const res = await fetch(`${BASE}/app`, {
     credentials: 'include',
+    cache: 'no-store',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (res.status === 401 || res.status === 403 || res.url.includes('accounts.google.com')) {
@@ -66,6 +89,10 @@ async function sessionFingerprint(session) {
   const bytes = new TextEncoder().encode(
     JSON.stringify(['gemini-session-v1', session.at, session.sid, session.userIndex]),
   );
+  return hashHex(bytes);
+}
+
+async function hashHex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -97,6 +124,95 @@ async function batchExecute(session, rpcId, arg) {
   if (res.status === 401 || res.status === 403) throw new NotLoggedInError('gemini.google.com');
   if (!res.ok) throw new Error(`Gemini ${rpcId} -> ${res.status}`);
   return parseRpcResponse(await res.text(), rpcId);
+}
+
+async function captureBinding(session, preferAccount = true) {
+  if (preferAccount && session.gaia) {
+    const hash = await hashHex(new TextEncoder().encode('gemini-gaia-v1:' + session.gaia));
+    return { accountId: 'gemini-account-' + hash, fingerprint: 'account:' + hash };
+  }
+  const fingerprint = await sessionFingerprint(session);
+  return { accountId: fingerprint && 'gemini-session-' + fingerprint, fingerprint };
+}
+
+export async function geminiPrincipalIds() {
+  const { accountId: id } = await captureBinding(await getSession());
+  return id ? [id] : [];
+}
+
+// Only the list RPC is allowed here. Older responses expose a cursor; newer
+// ones may cap a plain [limit] window without returning any continuation.
+async function catalogSummaries(session, guard = async () => {}) {
+  const rows = new Map(),
+    seen = new Set();
+  const limits = [200, 1000, 5000];
+  let stage = 0,
+    cursor = null;
+  for (let page = 0; page < 25; page++) {
+    await guard();
+    try {
+      const limit = limits[stage];
+      const response = await batchExecute(
+        session,
+        'MaZiqc',
+        cursor === null ? [limit] : [limit, cursor],
+      );
+      if (!Array.isArray(response) || !Array.isArray(response[2])) break;
+      for (const item of response[2]) {
+        if (!Array.isArray(item) || typeof item[0] !== 'string') throw Error();
+        const id = item[0].replace(/^c_/, '');
+        if (!/^[a-zA-Z0-9_-]{1,256}$/.test(id)) throw Error();
+        rows.set(id, {
+          id,
+          rawId: item[0],
+          title:
+            typeof item[1] === 'string' && item[1]
+              ? item[1].slice(0, 500)
+              : 'Untitled conversation',
+          updatedAt: toMs(item[5]?.[0]),
+        });
+        if (rows.size > 5000) throw Error();
+      }
+      const next = response[1] ?? null;
+      if (next !== null) {
+        const key = JSON.stringify(next);
+        if (seen.has(key) || !response[2].length || rows.size >= 5000) break;
+        seen.add(key);
+        cursor = next;
+      } else if (cursor === null && response[2].length >= limit) {
+        if (stage + 1 === limits.length) break;
+        stage++;
+      } else {
+        return { summaries: [...rows.values()], incomplete: false };
+      }
+    } catch {
+      break;
+    }
+  }
+  return { summaries: [...rows.values()].slice(0, 5000), incomplete: true };
+}
+
+export async function listGeminiCatalog() {
+  const session = await getSession();
+  const { accountId: id } = await captureBinding(session);
+  if (!id) return { entries: [], incomplete: true };
+  const { summaries, incomplete } = await catalogSummaries(session);
+  // A sign-in change while the picker was loading must not label the rows with
+  // a stale account. Save independently rechecks the same principal.
+  if (!(await geminiPrincipalIds()).includes(id)) return { entries: [], incomplete: true };
+  return {
+    entries: [
+      {
+        principalId: id,
+        title: id.startsWith('gemini-account-')
+          ? 'Current Gemini account'
+          : 'Current Gemini session',
+        projects: [],
+        conversations: summaries.map(({ id, title }) => ({ id, title })),
+      },
+    ],
+    incomplete,
+  };
 }
 
 async function listChats(session, sinceMs, previous, guard, save) {
@@ -218,7 +334,8 @@ async function readChat(session, summary, guard) {
       cursors.add(key);
       cursor = nextCursor;
     }
-  } catch {
+  } catch (error) {
+    if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable') throw error;
     // The old completion watermark keeps unavailable history eligible.
   }
   // Gemini supplies newest-first pages without reliable per-turn timestamps.
@@ -271,6 +388,7 @@ async function readChat(session, summary, guard) {
 
 export async function syncGemini({
   state = {},
+  selectedScope,
   captureTypes,
   push,
   register = async () => {},
@@ -281,7 +399,13 @@ export async function syncGemini({
 }) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
-  if (!Object.values(policy).some(Boolean)) {
+  const explicit = selectedScope !== undefined;
+  const entries = Array.isArray(selectedScope?.entries) ? selectedScope.entries : [];
+  if (
+    explicit
+      ? !entries.some((e) => Array.isArray(e?.conversationIds) && e.conversationIds.length)
+      : !Object.values(policy).some(Boolean)
+  ) {
     await report({
       phase: 'complete',
       detected: 0,
@@ -292,19 +416,48 @@ export async function syncGemini({
     return { state, conversations: 0, selection, selectionWarning: null, hasMore: false };
   }
   let selectionWarning =
-    policy.projects || policy.pinned || policy.agents
+    !explicit && (policy.projects || policy.pinned || policy.agents)
       ? 'Gemini category metadata is unavailable in the verified private RPC schema; organized chats cannot be identified. Ordinary Recents must be explicitly enabled to capture listed chats.'
       : null;
-  if (!eligibleCapture('gemini', policy)) {
+  if (!explicit && !eligibleCapture('gemini', policy)) {
     await report({ phase: 'complete', processed: 0, detected: 0, selection, selectionWarning });
     return { state, conversations: 0, selection, selectionWarning, hasMore: false };
   }
   await report({ phase: 'discovering', selection, selectionWarning });
   const session = await getSession();
+  const { fingerprint, accountId: boundId } = await captureBinding(session, explicit);
+  const accountId = boundId || 'gemini-session-' + crypto.randomUUID();
+  const wanted = explicit
+    ? new Set(
+        entries
+          .filter((e) => fingerprint && e?.principalId === accountId)
+          .flatMap((e) =>
+            Array.isArray(e.conversationIds)
+              ? e.conversationIds.filter((id) => typeof id === 'string')
+              : [],
+          ),
+      )
+    : null;
+  if (explicit && !wanted.size) {
+    const selectionWarning =
+      'The saved list belongs to another or expired Gemini session. Refresh and review your choices.';
+    await report({ phase: 'attention', processed: 0, detected: 0, selection, selectionWarning });
+    return { state, conversations: 0, hasMore: false, selection, selectionWarning };
+  }
+  const scopeKey = explicit ? JSON.stringify([...wanted].sort()) : undefined;
+  const scopeState = explicit ? { selectedIdsKey: scopeKey } : {};
+  const matchingSession =
+    fingerprint !== null &&
+    state?.sessionFingerprint === fingerprint &&
+    state.selectedIdsKey === scopeKey;
+  const verifySession = async () => {
+    await guard();
+    if (explicit && !(await geminiPrincipalIds()).includes(accountId))
+      throw Object.assign(new Error('The Gemini session changed. Refresh your saved list.'), {
+        code: 'selection_changed',
+      });
+  };
   await register('gemini-web', 'gemini');
-  const fingerprint = await sessionFingerprint(session);
-  const accountId = 'gemini-session-' + (fingerprint ?? crypto.randomUUID());
-  const matchingSession = fingerprint !== null && state?.sessionFingerprint === fingerprint;
   const lastSyncMs = matchingSession ? (state?.lastSyncMs ?? null) : null;
   const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
   const pending = matchingSession ? state?.pending : null;
@@ -317,19 +470,21 @@ export async function syncGemini({
       .join(' ');
   const previousDiscovery = matchingSession ? state.discovery : null;
   const runStartedMs = pending?.runStartedMs ?? previousDiscovery?.runStartedMs ?? Date.now();
-  let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint };
+  let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint, ...scopeState };
   const discovery = Array.isArray(pending?.summaries)
     ? { summaries: pending.summaries, incomplete: Boolean(pending?.discoveryIncomplete) }
-    : await listChats(session, since, previousDiscovery, guard, async (progress) => {
-        if (!fingerprint) return;
-        discoveryState = {
-          lastSyncMs,
-          sessionFingerprint: fingerprint,
-          discovery: { ...progress, runStartedMs },
-        };
-        await guard();
-        await checkpoint(discoveryState);
-      });
+    : explicit
+      ? await catalogSummaries(session, guard)
+      : await listChats(session, since, previousDiscovery, guard, async (progress) => {
+          if (!fingerprint) return;
+          discoveryState = {
+            lastSyncMs,
+            sessionFingerprint: fingerprint,
+            discovery: { ...progress, runStartedMs },
+          };
+          await guard();
+          await checkpoint(discoveryState);
+        });
   if (discovery.queued) {
     if (!fingerprint)
       selectionWarning =
@@ -343,7 +498,16 @@ export async function syncGemini({
       selectionWarning,
     };
   }
-  const summaries = discovery.summaries;
+  const known = new Set(discovery.summaries.map((s) => s.id));
+  const missing = explicit && !pending && [...wanted].some((id) => !known.has(id));
+  const summaries = explicit
+    ? discovery.summaries.filter(
+        (s) => wanted.has(s.id) && (pending || !since || !s.updatedAt || s.updatedAt > since),
+      )
+    : discovery.summaries;
+  if (missing)
+    selectionWarning =
+      'Some saved Gemini chats are unavailable. Refresh the list to review your choices.';
   if (discovery.incomplete)
     selectionWarning = [
       selectionWarning,
@@ -354,7 +518,12 @@ export async function syncGemini({
   // The tuple schema has no verified project, pin or Gem membership fields.
   // Do not interpret opaque booleans/indices or a suggestive title as consent.
   for (const _summary of summaries)
-    recordSelection(selection, selectConversation(null, policy, { recents: true }));
+    recordSelection(
+      selection,
+      explicit
+        ? { selected: true, categories: [], unknown: false }
+        : selectConversation(null, policy, { recents: true }),
+    );
   const startIndex = Number.isInteger(pending?.nextIndex) ? pending.nextIndex : 0;
   const endIndex = Math.min(startIndex + SYNC_CHUNK_SIZE, summaries.length);
   await report({
@@ -366,13 +535,13 @@ export async function syncGemini({
   });
   let total = 0;
   const retrySummaries = [...(pending?.retrySummaries ?? [])];
-  let failures = discovery.incomplete ? 1 : 0;
+  let failures = discovery.incomplete || missing ? 1 : 0;
   let processed = startIndex;
   const batch = [];
   for (const summary of summaries.slice(startIndex, endIndex)) {
     await guard();
     try {
-      const detail = await readChat(session, summary, guard);
+      const detail = await readChat(session, summary, explicit ? verifySession : guard);
       if (detail.incomplete) {
         failures++;
         retrySummaries.push(summary);
@@ -382,6 +551,7 @@ export async function syncGemini({
         batch.push(detail.conversation);
       }
     } catch (error) {
+      if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable') throw error;
       failures++;
       retrySummaries.push(summary);
       log(`gemini: skipping conversation ${summary.id}: ${error.message}`);
@@ -389,6 +559,7 @@ export async function syncGemini({
     processed++;
     await report({ processed });
   }
+  if (explicit) await verifySession();
   if (batch.length) {
     const accepted = await push('gemini-web', 'gemini', batch);
     total += accepted;
@@ -419,6 +590,7 @@ export async function syncGemini({
     ? {
         lastSyncMs,
         sessionFingerprint: fingerprint,
+        ...scopeState,
         pending: {
           runStartedMs,
           summaries,
@@ -431,6 +603,7 @@ export async function syncGemini({
     : {
         lastSyncMs: hadFailures || !fingerprint ? lastSyncMs : runStartedMs,
         sessionFingerprint: fingerprint,
+        ...scopeState,
       };
   if (!hasMore && fingerprint && retrySummaries.length && !discovery.incomplete)
     finalState.pending = {

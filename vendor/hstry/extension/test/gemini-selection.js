@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { DEFAULT_CAPTURE_TYPES, providerState } from '../ui.js';
-import { elements } from './options-init.js';
 
 const captureTypes = { ...DEFAULT_CAPTURE_TYPES };
 const context = { apiConnected: true, providerId: 'gemini', captureTypes };
@@ -23,26 +22,4 @@ assert.equal(
 );
 assert.equal(captureTypes.recents, false, 'presentation cannot enable Recents');
 
-let stored = {};
-chrome.storage.local.get = async (key) =>
-  key === 'status' ? { status: {} } : { settings: stored };
-chrome.storage.local.set = async (value) => {
-  if (value.settings) stored = structuredClone(value.settings);
-};
-chrome.runtime.sendMessage = async () => ({ ok: true });
-elements.get('provider-gemini').checked = true;
-await elements.get('provider-gemini').listeners.get('change')();
-await elements.get('test-connection').listeners.get('click')();
-assert.equal(elements.get('gemini-selection-warning').hidden, false);
-assert.equal(elements.get('capture-recents').checked, false);
-assert.equal(stored.captureTypes.recents, false);
-elements.get('capture-recents').checked = true;
-await elements.get('capture-recents').listeners.get('change')();
-assert.equal(elements.get('gemini-selection-warning').hidden, true);
-elements.get('capture-recents').checked = false;
-await elements.get('capture-recents').listeners.get('change')();
-assert.equal(elements.get('gemini-selection-warning').hidden, false);
-assert.equal(stored.captureTypes.recents, false);
-console.log(
-  'PASS Gemini selection warning is visible before capture and never broadens the checklist',
-);
+console.log('PASS Gemini provider state remains conservative.');

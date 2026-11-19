@@ -1,5 +1,6 @@
 // AI Memory boundary: supported providers and a verified, local native archive.
 import assert from 'node:assert/strict';
+import { runtimeId, popup, providerSyncScopes } from './fixtures/worker-popup.js';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_PROVIDER_SETTINGS, PROVIDERS } from '../providers/index.js';
 
@@ -8,7 +9,6 @@ assert.deepEqual(DEFAULT_PROVIDER_SETTINGS, { chatgpt: false, claude: false, gem
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 assert.deepEqual(manifest.host_permissions, [
   'https://chatgpt.com/*',
-  'https://chat.openai.com/*',
   'https://claude.ai/*',
   'https://gemini.google.com/*',
 ]);
@@ -16,6 +16,7 @@ assert.deepEqual(manifest.host_permissions, [
 const archiveId = 'a'.repeat(32),
   nativeHost = 'org.ai_memory.archive_' + archiveId;
 let settings = { port: 41770, token: '', providers: { chatgpt: true } };
+let scopes = providerSyncScopes;
 let status = {};
 let messageListener;
 const writes = [];
@@ -23,7 +24,12 @@ const warnings = [];
 globalThis.chrome = {
   storage: {
     local: {
-      get: async (key) => (key === 'settings' ? { settings } : { status }),
+      get: async (key) =>
+        key === 'providerSyncScopes'
+          ? { providerSyncScopes: scopes }
+          : key === 'settings'
+            ? { settings }
+            : { status },
       set: async (value) => {
         if (value.status) {
           status = structuredClone(value.status);
@@ -33,6 +39,7 @@ globalThis.chrome = {
     },
   },
   runtime: {
+    id: runtimeId,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: {
@@ -56,7 +63,7 @@ globalThis.fetch = async (url) => {
 const realWarn = console.warn;
 console.warn = (...args) => warnings.push(args.map(String).join(' '));
 await import('../background.js');
-messageListener({ type: 'syncNow' }, {}, () => {});
+messageListener({ type: 'syncNow' }, popup, () => {});
 for (let turn = 0; turn < 100; turn++) {
   await new Promise((resolve) => setTimeout(resolve, 1));
   if (writes.some((state) => state.chatgpt?.lastError)) break;
@@ -68,7 +75,7 @@ assert.equal(status.chatgpt.running, false);
 function send(message) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Worker did not respond')), 2000);
-    messageListener(message, {}, (response) => {
+    messageListener(message, popup, (response) => {
       clearTimeout(timeout);
       resolve(response);
     });
@@ -277,12 +284,13 @@ assert.notEqual(status.chatgpt.progress.phase, 'complete');
 assert.notEqual(status.chatgpt.state?.cursor, 'revoked');
 
 settings = { ...settings, providers: { chatgpt: true } };
+scopes = {};
 const noTypes = await send({ type: 'syncNow' });
 assert.equal(noTypes.ok, false);
-assert.equal(noTypes.code, 'no_capture_types');
+assert.equal(noTypes.code, 'no_saved_selection');
 assert.equal(
   (await send({ type: 'fullSyncProvider', provider: 'chatgpt' })).code,
-  'no_capture_types',
+  'no_saved_selection',
 );
 PROVIDERS.chatgpt.sync = originalSync;
 console.warn = realWarn;

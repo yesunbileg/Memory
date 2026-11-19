@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import {
   describeEffectivePlan,
   formatDuration,
@@ -95,6 +94,12 @@ globalThis.chrome = {
         const out = {};
         for (const k of list) {
           if (k === 'settings') out.settings = structuredClone(settings);
+          if (k === 'providerSyncScopes')
+            out.providerSyncScopes = {
+              chatgpt: {
+                entries: [{ principalId: 'fixture', projectIds: [], conversationIds: ['chat'] }],
+              },
+            };
           if (k === 'status') out.status = structuredClone(status);
           if (k === 'activityLog') out.activityLog = structuredClone(activityLog);
         }
@@ -108,6 +113,7 @@ globalThis.chrome = {
     },
   },
   runtime: {
+    id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: {
@@ -151,7 +157,11 @@ chrome.runtime.sendNativeMessage = async (host, packet) => {
 await import(`../background.js?ux-test=${Date.now()}`);
 const send = (msg) =>
   new Promise((resolve) => {
-    listener(msg, {}, resolve);
+    listener(
+      msg,
+      { id: chrome.runtime.id, url: 'chrome-extension://' + chrome.runtime.id + '/popup.html' },
+      resolve,
+    );
   });
 
 const singleResp = await send({ type: 'syncProvider', provider: 'chatgpt' });
@@ -173,101 +183,4 @@ assert.equal(activityLog.length, 0);
 PROVIDERS.chatgpt.sync = originalChatgptSync;
 PROVIDERS.claude.sync = originalClaudeSync;
 
-// 5. Popup interactive toggles & quick filters
-const popupHtml = await readFile(new URL('../popup.html', import.meta.url), 'utf8');
-const popupElements = new Map();
-class PopupElement {
-  constructor(id = '') {
-    this.id = id;
-    this.value = '';
-    this.checked = false;
-    this.disabled = false;
-    this.hidden = false;
-    this.className = '';
-    this.textContent = '';
-    this.children = [];
-    this.listeners = new Map();
-    this.classList = {
-      add: (c) => {
-        this.className = `${this.className} ${c}`.trim();
-      },
-    };
-    if (id) popupElements.set(id, this);
-  }
-  set innerHTML(_html) {}
-  querySelector(selector) {
-    if (!this._q) this._q = new Map();
-    if (!this._q.has(selector)) this._q.set(selector, new PopupElement());
-    return this._q.get(selector);
-  }
-  replaceChildren() {
-    this.children = [];
-  }
-  appendChild(child) {
-    this.children.push(child);
-  }
-  addEventListener(type, fn) {
-    this.listeners.set(type, fn);
-  }
-  setAttribute(k, v) {
-    this[k] = v;
-  }
-}
-for (const match of popupHtml.matchAll(/id="([^"]+)"/g)) new PopupElement(match[1]);
-globalThis.document = {
-  getElementById: (id) => popupElements.get(id) ?? null,
-  createElement: () => new PopupElement(),
-};
-const popupSent = [];
-globalThis.chrome.storage.onChanged = { addListener() {} };
-globalThis.chrome.runtime.sendMessage = async (msg) => {
-  popupSent.push(msg.type);
-  return { ok: true };
-};
-globalThis.chrome.runtime.openOptionsPage = async () => {};
-
-await import(`../popup.js?ux-test=${Date.now()}`);
-assert.equal(popupElements.get('api-title').textContent, 'Connected to your computer');
-assert.equal(popupElements.get('providers').children.length, 3);
-assert.equal(popupElements.get('quick-filters').children.length, 4);
-
-// A Settings tab can persist a change before this popup sees its storage event.
-settings = { ...settings, captureTypes: { ...settings.captureTypes, agents: false } };
-// Toggle Recents chip in popup
-const recentsChip = popupElements.get('quick-filters').children[3];
-await recentsChip.listeners.get('click')();
-assert.equal(settings.captureTypes.recents, true);
-assert.equal(
-  settings.captureTypes.agents,
-  false,
-  'the popup patch must preserve newer stored choices',
-);
-assert.ok(popupSent.includes('settingsChanged'));
-
-const filters = popupElements.get('quick-filters').children;
-await Promise.all([filters[0].listeners.get('click')(), filters[1].listeners.get('click')()]);
-assert.equal(settings.captureTypes.projects, false, 'two rapid clicks must save both categories');
-assert.equal(settings.captureTypes.pinned, false);
-
-const sameFilter = popupElements.get('quick-filters').children[0];
-await Promise.all([sameFilter.listeners.get('click')(), sameFilter.listeners.get('click')()]);
-assert.equal(
-  settings.captureTypes.projects,
-  false,
-  'two rapid toggles of the same chip must cancel',
-);
-
-const set = chrome.storage.local.set;
-chrome.storage.local.set = async () => {
-  throw new Error('Synthetic storage failure');
-};
-await popupElements.get('quick-filters').children[0].listeners.get('click')();
-assert.equal(settings.captureTypes.projects, false);
-assert.match(popupElements.get('notice').textContent, /could not be saved/);
-chrome.storage.local.set = set;
-await popupElements.get('quick-filters').children[0].listeners.get('click')();
-assert.equal(settings.captureTypes.projects, true, 'a failed save must not block later changes');
-
-console.log(
-  'PASS web sync UX: offline recovery, capability plans, single-provider sync, safe log, popup controls',
-);
+console.log('PASS provider sync, capture results, and activity privacy');

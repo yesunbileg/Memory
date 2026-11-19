@@ -14,7 +14,7 @@ SHA-256 and whether it was modified. Newly written boundary tests are local code
 | `adapters/codex/adapter.ts` | Codex rollout JSONL and Zstandard files; optional colocated SQLite thread titles |
 | `adapters/opencode/adapter.ts` | OpenCode legacy/new JSON storage and SQLite v1/v2 |
 | `adapters/types/{index,first-message}.ts` | Original hstry request protocol, canonical parts, and title helpers |
-| `extension/` | Original Manifest V3 worker, settings, popup, provider code and selected synthetic tests; supported providers are ChatGPT, Claude, Gemini |
+| `extension/` | Original Manifest V3 worker, popup and provider code, with selected synthetic tests; supported providers are ChatGPT, Claude, Gemini |
 
 No hstry Rust daemon, search index, FTS retrieval, TUI, hstry MCP server, or other
 provider adapter is included. Running the full project would add unrelated search
@@ -100,21 +100,11 @@ It validates Host, Origin and bearer credentials, bounds the payload (16 MiB,
 100 conversations), and uses the same archive ingest boundary. The browser
 extension does not fall back to this endpoint.
 
-## Category-based browser capture (2026-11-11)
+## Popup catalogs and earlier category classification
 
-This section describes the category-based mode. ChatGPT also supports saving individual projects or unpinned Recents from its sidebar. After the first Add, the saved scopes govern its later captures rather than these category defaults. The saved-list path binds identifiers to the active account and user from the ChatGPT session and does not store the access token. A [public client](https://github.com/bigfei/chats2md) uses those same session identity fields. See the [current extension guide](extension-handoff.md).
+The current toolbar popup reads account-bound listing metadata on request, lets users search and select projects or chats, and saves only explicit scope identifiers. The user-supplied ChatVault reference showed a provider selector and grouped item picker. AI Memory adapts those interaction ideas to its existing provider readers and native archive transport. No ChatVault code is imported. There is no provider-page injection, whole-account export or new upload destination.
 
-The shared `extension/providers/selection.js` policy defaults to projects,
-pinned/favorites, and GPT/agent conversations enabled, with ordinary Recents
-disabled. Selection accepts only explicit provider identifiers, project/folder
-objects, literal pin/star/favorite booleans, or membership returned by a known
-collection endpoint. ChatGPT's `pinned_time` is an explicit pin record; ordinary
-creation/update dates, titles, workspace accounts, sidebar ordering, and Gemini's
-opaque tuple flags never establish category membership. A conversation matching
-any enabled organized category is eligible, including a project or pinned chat
-also shown in Recents. Recents is the ordinary/unclassified fallback: enabling it
-does not override an explicitly deselected project, pin or agent category. No
-existing archived conversation is removed when the selection changes.
+The earlier category classifier described below is still relevant to restricted legacy selections and the synthetic reader fixtures. It is **not** permission for an extension capture. An account with no saved IDs collects nothing. ChatGPT binds selections to the active user and account from the session; a [public client](https://github.com/bigfei/chats2md) uses those same identity fields. See the [current extension guide](extension-handoff.md).
 
 The following public sources were inspected over HTTPS for protocol evidence.
 They are unofficial clients; no code was copied from them and no logged-in user
@@ -129,51 +119,13 @@ implemented, not that a live account was tested:
 | Claude project conversations | [withLinda exporter `6a204107a23ce224c75c60cb61b71a67bfa59d97`](https://github.com/withLinda/claude-project-conversations-exporter/blob/6a204107a23ce224c75c60cb61b71a67bfa59d97/claude_project_export_script.js#L207): `GET /api/organizations/{org}/projects/{project}/conversations_v2?limit=…&offset=…`, response `{data:[…]}` (or an array). AI Memory requests 50-item pages until a short page and deduplicates against the ordinary list. |
 | Claude native metadata | [Claude-voyager `db192e6b4943073df90c1014dfc32dd8eef9a1fb` captured-response type](https://github.com/TanChuping/Claude-voyager/blob/db192e6b4943073df90c1014dfc32dd8eef9a1fb/src/features/conversationApi/types.ts#L102) identifies `is_starred` and `project_uuid`. Pin membership is used when explicitly present in list metadata. No trustworthy separate pinned-list route was found; absent pin/agent metadata produces a visible warning and an excluded conversation. Third-party extensions' own local stars/folders are not native provider membership. |
 
-Organized modes scan list metadata independently of message timestamps, since
-pinning or moving an old chat may not update its message date. They fetch the
-transcript only after a selected category matches. Ordinary Recents, when
-explicitly enabled alone, retains the donor's incremental behavior. Known source
-IDs, raw text, account IDs and organization IDs are preserved. Failed discovery,
-unknown response shapes, repeated offset pages, cursor loops and the 200-page safety ceiling produce
-an incomplete-selection warning; they never fall back to importing Recents.
-Failed discovery retains the retry watermark. The worker resets prior provider
-watermarks and Gemini continuations when the capture policy changes.
-
-Every provider returns and reports `selection` counters: `classified`, `unknown`,
-`skipped`, `selected`, and `byType`. `selected` describes eligible conversations,
-while the existing accepted count describes captures; overlapping `byType`
-counts must not be summed as distinct conversations. `selectionWarning` is a
-string or null and identifies unavailable discovery/category metadata. Unknown
-metadata is allowed only through the user's explicit Recents choice or an
-independently verified selected category.
-
-Gemini's retained private RPC parser exposes no verified project, pin or Gem
-membership field. Its tuple booleans and positions are deliberately not guessed.
-Organized-only selection captures nothing and returns a metadata warning.
-Explicit Recents capture and the original bounded continuation behavior remain
-available. This limitation is shown to the user instead of claiming selective
-Gemini support. Local Codex collection is outside this browser-only policy.
+Earlier category-mode fixtures exercise classification, project enumeration, deduplication and unknown membership. Current popup project capture uses account-scoped saved project IDs and verified collection membership. Saved individual chat IDs do not require selecting a whole category. Gemini exposes conversations but no reliable project/folder membership, so its picker offers chats only. Unavailable or malformed listings never select all chats.
 
 ChatGPT and Claude distinguish recognized empty detail collections from absent or
 malformed collections/message shapes. Unsupported details warn and retain the
-retry watermark. ChatGPT account-discovery fallback can capture the default
-account but reports incomplete discovery and retains unavailable workspace state.
+retry watermark. A saved selection cannot authorize a different or unidentified workspace.
 
-Gemini distinguishes explicit empty pages from unsupported response shapes,
-cursor loops, and pagination limits. Its checkpoint/continuation is bound to a
-SHA-256 fingerprint of the already-used `SNlM0e`/`FdrFJe` session credentials plus
-the redirected account slot. This is active-session continuity evidence, **not**
-a stable Google principal ID. No raw provider credentials are persisted or logged,
-and the slot alone is never trusted. A legacy checkpoint, changed credential,
-session or slot forces rediscovery from the start. Credential rotation may thus
-replay already archived history, with normal native-ID deduplication. A matching
-session retains bounded ten-conversation continuation across worker restarts.
-If session evidence is unavailable, each attempt starts fresh and stores no
-completion watermark. It reads at most ten conversations, warns if history remains,
-and does not schedule an unsafe endless continuation. Complete capture of a larger
-history then requires usable session evidence. Separate user-selected namespaces
-remain necessary to distinguish Google accounts in the archive. No undocumented
-email/principal field or organized-category field is inferred.
+Gemini’s popup catalog talks to the listing RPC and projects only chat identifiers and titles into the picker. Selected capture requests message detail separately. It binds the visible scope to a hash of a corroborated active Google account ID when available. An unrecognized bootstrap falls back to a hash of the active session, not an email address, name or slot number. Rotating that session can require reselecting the chats. Raw credentials, names and emails are not persisted as scope identifiers. Gemini does not infer project membership from undocumented tuple flags.
 
 Incomplete runs keep only a matching session's previous completion watermark.
 Native turn IDs deduplicate overlapping pages. Completed conversations

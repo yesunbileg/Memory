@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { runtimeId, popup, providerSyncScopes } from './fixtures/worker-popup.js';
 import { PROVIDERS } from '../providers/index.js';
 const archiveId = 'a'.repeat(32),
   nativeHost = 'org.ai_memory.archive_' + archiveId;
@@ -6,6 +7,7 @@ let listener,
   failWrite = false,
   nativeReads = 0;
 const mem = {
+  providerSyncScopes,
   settings: {
     nativeHost,
     archiveId,
@@ -30,6 +32,7 @@ globalThis.chrome = {
     },
   },
   runtime: {
+    id: runtimeId,
     sendNativeMessage: async () => {
       nativeReads++;
       return { schema: 2, service: 'ai-memory', status: 'ok', archive_instance_id: archiveId };
@@ -70,7 +73,7 @@ for (const p of ['chatgpt', 'claude'])
     providerReads++;
     return { state: {}, conversations: 0 };
   };
-const send = (msg) => new Promise((resolve) => listener(msg, {}, resolve));
+const send = (msg) => new Promise((resolve) => listener(msg, popup, resolve));
 failWrite = true;
 await send({ type: 'syncNow' });
 await new Promise((r) => setTimeout(r, 20));

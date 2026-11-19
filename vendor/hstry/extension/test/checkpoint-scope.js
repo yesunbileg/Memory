@@ -1,5 +1,6 @@
 // Nonvisual worker integration: destination and namespace changes replay history.
 import assert from 'node:assert/strict';
+import { runtimeId, popup, providerSyncScopes } from './fixtures/worker-popup.js';
 import { PROVIDERS } from '../providers/index.js';
 const archiveId = 'a'.repeat(32),
   nativeHost = 'org.ai_memory.archive_' + archiveId;
@@ -20,17 +21,20 @@ globalThis.chrome = {
   storage: {
     local: {
       get: async (key) =>
-        key === 'settings'
-          ? { settings: structuredClone(settings) }
-          : key === 'status'
-            ? { status: structuredClone(status) }
-            : {},
+        key === 'providerSyncScopes'
+          ? { providerSyncScopes }
+          : key === 'settings'
+            ? { settings: structuredClone(settings) }
+            : key === 'status'
+              ? { status: structuredClone(status) }
+              : {},
       set: async (data) => {
         if (data.status) status = structuredClone(data.status);
       },
     },
   },
   runtime: {
+    id: runtimeId,
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: {
@@ -59,7 +63,7 @@ PROVIDERS.chatgpt.sync = async ({ state }) => {
 await import('../background.js?checkpoint-scope');
 async function run() {
   await new Promise((resolve) =>
-    listener({ type: 'syncProvider', provider: 'chatgpt' }, {}, resolve),
+    listener({ type: 'syncProvider', provider: 'chatgpt' }, popup, resolve),
   );
   for (let i = 0; i < 100 && status.chatgpt?.running; i++)
     await new Promise((r) => setTimeout(r, 2));
@@ -90,7 +94,7 @@ assert.deepEqual(
   'credentials and port are not logical archive identity',
 );
 archive = null;
-const legacyProbe = await new Promise((resolve) => listener({ type: 'checkApi' }, {}, resolve));
+const legacyProbe = await new Promise((resolve) => listener({ type: 'checkApi' }, popup, resolve));
 assert.equal(legacyProbe.ok, false, 'UI connection checks must reflect capture eligibility');
 assert.equal(legacyProbe.code, 'archive_changed');
 await run();

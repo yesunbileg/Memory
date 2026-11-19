@@ -48,10 +48,14 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         for name in (
             "manifest.json",
             "background.js",
-            "options.html",
-            "options.js",
+            "popup.html",
+            "popup.css",
             "popup.js",
+            "popup-picker.js",
+            "popup-scope.js",
             "providers/chatgpt.js",
+            "providers/claude.js",
+            "providers/gemini.js",
             "providers/selection.js",
             "lib/common.js",
             "icons/icon-128.png",
@@ -60,19 +64,25 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         assert archive.read("LICENSE") == (source.parent / "LICENSE").read_bytes()
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["background"]["service_worker"] in names
-        assert manifest["options_page"] in names
+        assert "options_page" not in manifest and "options_ui" not in manifest
+        assert not manifest.get("content_scripts")
+        assert not ({"scripting", "tabs", "activeTab", "downloads"} & set(manifest["permissions"]))
+        assert {name for name in names if name.endswith(".html")} == {"popup.html"}
+        assert not {"options.html", "options.js", "sidebar-picker.js", "sidebar-picker.css"} & names
+        runtime = b"\n".join(
+            archive.read(name) for name in names if name.endswith((".html", ".js"))
+        )
+        for old_surface in (b"openOptionsPage(", b"chrome.tabs.create(", b"chrome.windows.create("):
+            assert old_surface not in runtime
         assert manifest["action"]["default_popup"] in names
         assert all(icon in names for icon in manifest["icons"].values())
-        for entry in manifest.get("content_scripts", []):
-            for name in [*entry.get("js", []), *entry.get("css", [])]:
-                assert archive.read(name) == (source / name).read_bytes()
         assert not any(name.startswith(("test/", "data/")) for name in names)
         assert "extension-connection.json" not in names
         assert "storage_state.json" not in names
         assert sentinel.encode() not in b"".join(archive.read(name) for name in names)
 
 
-@pytest.mark.parametrize("missing", ["icons/icon-128.png", "options.js", "providers/chatgpt.js"])
+@pytest.mark.parametrize("missing", ["icons/icon-128.png", "popup.js", "providers/chatgpt.js"])
 def test_extension_package_rejects_missing_runtime_dependencies(tmp_path, missing):
     source = package_source(tmp_path)
     (source / missing).unlink()

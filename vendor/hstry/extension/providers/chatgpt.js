@@ -1,3 +1,4 @@
+import { listPopupCatalog, syncPopupScope, unavailable } from './popup-catalog.js';
 import { readSyncList, hasItems, sessionPrincipal } from '../chatgpt-sync-list.js';
 import { drainSelected, preparePrincipalRun } from './queue.js';
 // ChatGPT provider: syncs conversations (personal + Teams workspaces) via the
@@ -121,7 +122,12 @@ async function listProjectGizmos(token, accountId, readPage) {
       const project = entry?.gizmo?.gizmo;
       if (typeof project?.id !== 'string' || !project.id)
         throw new Error('ChatGPT project identifier is unavailable');
-      projects.push(project);
+      projects.push({
+        ...project,
+        ...(unavailable(entry) || unavailable(entry?.gizmo) ? { is_hidden: true } : {}),
+        display: project.display ?? entry.gizmo?.display ?? entry.display,
+        title: project.title ?? entry.title ?? entry.name,
+      });
     }
     const next = data.cursor ?? null;
     if (next === null && (data.has_more === true || data.next_cursor != null))
@@ -393,10 +399,53 @@ function explicitProjects(item) {
     .filter((id) => typeof id === 'string' && id);
 }
 
+async function popupPrincipals() {
+  const session = await getChatGPTSession();
+  const { userId, accountId } = sessionPrincipal(session);
+  const discovery = await listAccounts(session.accessToken);
+  const account = discovery.accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error('Current ChatGPT account is not verified.');
+  return [
+    {
+      principalId: JSON.stringify([userId, accountId]),
+      id: accountId,
+      title: account.name,
+      token: session.accessToken,
+      sourceId: account.isWorkspace ? `chatgpt-web-${shortId(accountId)}` : 'chatgpt-web',
+    },
+  ];
+}
+
+const popup = {
+  name: 'ChatGPT',
+  field: 'accounts',
+  adapter: 'chatgpt-web',
+  principals: popupPrincipals,
+  owns: async (p) => {
+    const { userId, accountId } = sessionPrincipal(await getChatGPTSession());
+    return JSON.stringify([userId, accountId]) === p.principalId;
+  },
+  id: (item) =>
+    item?.id != null && item?.conversation_id != null && item.id !== item.conversation_id
+      ? null
+      : (item?.id ?? item?.conversation_id),
+  projects: (p, read) => listProjectGizmos(p.token, p.id, read),
+  chats: (p, read) => listUpdatedConversations(p.token, p.id, null, read),
+  members: (p, id, read) => listProjectConversations(p.token, p.id, id, read),
+  detail: (p, id) =>
+    fetchJson(`${BASE}/backend-api/conversation/${encodeURIComponent(id)}`, {
+      headers: authHeaders(p.token, p.id),
+    }),
+  parse: (detail, id, p) => toParsedConversation(detail, id, p.id),
+};
+export const listChatGPTCatalog = () => listPopupCatalog(popup);
+export const chatGPTPrincipalIds = async () => (await popupPrincipals()).map((p) => p.principalId);
+
 export async function syncChatGPT({
   state = {},
   captureTypes,
   chatgptSyncList,
+  selectedScope,
   push,
   register = async () => {},
   log = () => {},
@@ -404,6 +453,16 @@ export async function syncChatGPT({
   guard = async () => {},
   report = async () => {},
 }) {
+  if (selectedScope !== undefined)
+    return syncPopupScope(popup, {
+      selectedScope,
+      state,
+      push,
+      register,
+      guard,
+      report,
+      checkpoint,
+    });
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
   const saved = readSyncList(chatgptSyncList);

@@ -63,3 +63,9 @@ Patch history:
     session. The normalized text, IDs, order and edit clocks are unchanged.
 15. Local OpenCode completion hooks bind a native session ID in the initial
     SQLite query for both schemas. Other sessions are not read or normalized.
+16. Extension 0.8 uses one toolbar popup for connection, preferences and
+    metadata-only selection. It removes page-injected controls and the standalone
+    options page. Saving identifiers does not load message bodies. Manual and
+    scheduled browser capture both require a saved, account-scoped selection.
+    The supplied ChatVault example informed the provider catalog and grouped
+    selection workflow. Its exporter, content scripts and code are not bundled.

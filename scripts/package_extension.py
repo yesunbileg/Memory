@@ -31,12 +31,14 @@ def runtime_assets(source: Path, manifest: dict) -> dict[str, Path]:
     icons = action.get("default_icon", {})
     stack = [
         "manifest.json",
-        manifest["options_page"],
         manifest["background"]["service_worker"],
         action["default_popup"],
         *manifest.get("icons", {}).values(),
         *(icons.values() if isinstance(icons, dict) else [icons]),
     ]
+    # Older releases have a separate options page. Never include an unreferenced one.
+    if "options_page" in manifest:
+        stack.append(manifest["options_page"])
     content_scripts = manifest.get("content_scripts", [])
     if not isinstance(content_scripts, list):
         raise ValueError("content_scripts must be a list")
