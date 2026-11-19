@@ -1,0 +1,59 @@
+[data-memory-sync-row] {
+  anchor-name: var(--memory-sync-anchor);
+  padding-inline-start: 2.2rem !important;
+}
+
+input[data-memory-sync-id] {
+  position: absolute;
+  position-anchor: var(--memory-sync-anchor);
+  position-visibility: anchors-visible;
+  top: anchor(center);
+  left: anchor(left);
+  transform: translate(0.5rem, -50%);
+  z-index: 1;
+  appearance: auto;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  cursor: pointer;
+  accent-color: #2371c8;
+}
+
+input[data-memory-sync-id]:dir(rtl) {
+  left: auto;
+  right: anchor(right);
+  transform: translate(-0.5rem, -50%);
+}
+
+[data-memory-sync-ui='toolbar'] {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: inherit;
+}
+
+button[data-memory-sync-add] {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid currentColor;
+  border-radius: 0.55rem;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+button[data-memory-sync-add]:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+[data-memory-sync-ui]:focus-visible,
+button[data-memory-sync-add]:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}

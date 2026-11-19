@@ -11,7 +11,7 @@
 - Backend recovery now isolates OpenCode JSON sessions and tries smaller/later merge candidates before reporting real exhaustion. Worker preflight errors are visible and rate-limited.
 - Fresh checks: **172 Python tests**, **14 Node scripts**, real browser UI/local-auth harness, ZIP integration checks, Ruff, whitespace, frozen dependency and wheel build passed. Signed-in provider/Google behavior still needs the user's local test.
 
-Follow [the local Mongolian guide](../local-testing.mn.md) for update, extension loading, a four-chat inclusion/exclusion test, Google demo, MCP and optional receiver/worker services.
+Follow [the local Mongolian guide](../local-testing.mn.md) for update, extension loading, a sidebar selection and capture test, Google demo, and MCP.
 
 ## Previous 0.5.1 recovery
 

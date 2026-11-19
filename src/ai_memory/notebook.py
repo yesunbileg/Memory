@@ -80,7 +80,7 @@ class NotebookLMAuthError(NotebookLMError):
             "NotebookLM browser authentication is missing or expired. Sign in to NotebookLM "
             "in your usual browser, then run `notebooklm login --browser-cookies brave` "
             "as the same user (use chrome/firefox for those browsers; requires notebooklm-py[cookies]). "
-            "Use the worker's existing NOTEBOOKLM_HOME or --storage path. "
+            "Use the same NOTEBOOKLM_HOME or --storage path as ai-memory sync. "
             "Google service-account credentials do not authenticate this browser client.",
             "auth_required",
         )

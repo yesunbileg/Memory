@@ -1,3 +1,4 @@
+import { readSyncList } from './chatgpt-sync-list.js';
 import { eligibleCapture } from './providers/selection.js';
 import {
   CAPTURE_TYPES,
@@ -29,6 +30,7 @@ const typeCopy = {
   recents: ['Ordinary Recents', 'Everyday chats outside your organized spaces.'],
 };
 let currentSettings = normalizeSettings();
+let savedList;
 let apiConnected = false;
 let checking = false;
 let connectionCheck = 0;
@@ -109,12 +111,83 @@ async function persist() {
   updateSelection();
 }
 
+let listRender = 0;
+async function renderSavedList() {
+  const ticket = ++listRender;
+  const box = el('chatgpt-list-items');
+  const description = el('chatgpt-list-description');
+  box.replaceChildren();
+  if (!savedList) {
+    description.textContent =
+      'Add projects or individual Recents from the ChatGPT sidebar to replace category capture for ChatGPT.';
+    return;
+  }
+  if (!el('chatgpt-list-panel').open) return;
+  description.textContent = 'Checking the active ChatGPT workspace…';
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({ type: 'GET_CHATGPT_SYNC_SELECTION' });
+  } catch {
+    /* Leave other users and workspaces private when identity cannot be verified. */
+  }
+  if (ticket !== listRender) return;
+  if (!response?.ok) {
+    description.textContent =
+      'Could not verify the active workspace. Sign in to ChatGPT, then reopen this list.';
+    return;
+  }
+  const entry = response.entry;
+  if (entry) {
+    for (const key of ['projectIds', 'conversationIds'])
+      for (const id of entry[key]) {
+        const row = document.createElement('div');
+        row.className = 'resync-row';
+        const label = document.createElement('a');
+        const project = key === 'projectIds';
+        label.href = 'https://chatgpt.com/' + (project ? 'g/' + id + '/project' : 'c/' + id);
+        label.target = '_blank';
+        label.rel = 'noopener noreferrer';
+        label.textContent = (project ? 'Project ' : 'Chat ') + id;
+        label.title = 'Workspace ' + entry.accountId;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'button-secondary';
+        remove.textContent = 'Remove';
+        remove.setAttribute('aria-label', 'Remove ' + label.textContent);
+        remove.addEventListener('click', async () => {
+          try {
+            const result = await chrome.runtime.sendMessage({
+              type: 'REMOVE_CHATGPT_SYNC_SELECTION',
+              userId: entry.userId,
+              accountId: entry.accountId,
+              projectIds: [],
+              conversationIds: [],
+              [key]: [id],
+            });
+            if (!result?.ok) throw new Error();
+            feedback('chatgpt-list-feedback', 'Removed from future captures.');
+          } catch {
+            feedback('chatgpt-list-feedback', 'Could not remove this item. Try again.', true);
+          }
+        });
+        row.appendChild(label);
+        row.appendChild(remove);
+        box.appendChild(row);
+      }
+  }
+  description.textContent = entry
+    ? 'Only these items from the active ChatGPT workspace can be captured. Remove an item to stop future capture.'
+    : 'This workspace has no saved items. No ChatGPT chats from it will be captured until you add items in its sidebar.';
+}
+
 function updateSelection() {
   const types = currentSettings.captureTypes;
-  el('selection-summary').textContent = types.recents
-    ? 'Ordinary Recents are included. Only the chat types you checked will be captured.'
-    : 'Ordinary Recents stay out. A project or pinned chat is still included even when it also appears in Recents.';
-  const plan = describeEffectivePlan(currentSettings.providers, types);
+  el('selection-summary').textContent = savedList
+    ? 'ChatGPT uses its saved sync list. These category checkboxes apply to the other enabled websites.'
+    : types.recents
+      ? 'Ordinary Recents are included. Only the chat types you checked will be captured.'
+      : 'Ordinary Recents stay out. A project or pinned chat is still included even when it also appears in Recents.';
+  const plan = describeEffectivePlan(currentSettings.providers, types, savedList);
   if (el('effective-plan')) {
     el('effective-plan').textContent = plan.summary;
   }
@@ -285,6 +358,7 @@ async function renderStatus() {
       apiConnected,
       captureTypes: currentSettings.captureTypes,
       providerId: id,
+      chatgptSyncList: savedList,
     });
     const breakdown = formatSyncBreakdown(entry);
     const caps = PROVIDER_CAPABILITIES[id];
@@ -328,7 +402,7 @@ async function renderStatus() {
         openLink.innerHTML = `Open ${provider.site} ${UI_ICONS.external}`;
         actionBar.appendChild(openLink);
       }
-      if (eligibleCapture(id, currentSettings.captureTypes)) {
+      if (eligibleCapture(id, currentSettings.captureTypes, savedList)) {
         const syncOne = document.createElement('button');
         syncOne.type = 'button';
         syncOne.id = `capture-one-${id}`;
@@ -350,7 +424,7 @@ async function renderStatus() {
     button.id = `rescan-${id}`;
     button.disabled =
       !apiConnected ||
-      !eligibleCapture(id, currentSettings.captureTypes) ||
+      !eligibleCapture(id, currentSettings.captureTypes, savedList) ||
       !enabled ||
       Boolean(entry?.running);
     button.setAttribute('aria-label', `${provider.name}: rescan selected chats`);
@@ -403,7 +477,7 @@ async function startCapture(type = 'syncNow', provider = null) {
   if (
     starting ||
     !apiConnected ||
-    !describeEffectivePlan(enabled, currentSettings.captureTypes).readyCount
+    !describeEffectivePlan(enabled, currentSettings.captureTypes, savedList).readyCount
   )
     return;
   starting = true;
@@ -447,6 +521,10 @@ for (const id of [
     }
   });
 }
+el('chatgpt-list-panel').addEventListener('toggle', renderSavedList);
+globalThis.addEventListener?.('focus', () => {
+  if (el('chatgpt-list-panel').open) renderSavedList();
+});
 el('test-connection').addEventListener('click', checkConnection);
 el('sync-now').addEventListener('click', () => startCapture());
 el('browser-family').addEventListener('change', updateCommand);
@@ -508,6 +586,12 @@ el('resync-list').addEventListener('click', async (event) => {
   await startCapture('fullSyncProvider', button.dataset.provider);
 });
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes.chatgptSyncList) {
+    savedList = readSyncList(changes.chatgptSyncList.newValue);
+    renderSavedList();
+    updateSelection();
+    renderStatus();
+  }
   if (changes.settings?.newValue) {
     const values = changes.settings.newValue;
     const next = normalizeSettings(values);
@@ -534,6 +618,8 @@ function showSettings(settings) {
     el(`capture-${id}`).checked = settings.captureTypes[id];
 }
 
+savedList = readSyncList((await chrome.storage.local.get('chatgptSyncList')).chatgptSyncList);
+renderSavedList();
 showSettings(normalizeSettings((await chrome.storage.local.get('settings')).settings));
 const version = chrome.runtime.getManifest?.().version;
 el('app-version').textContent = version ? `v${version}` : 'Extension';

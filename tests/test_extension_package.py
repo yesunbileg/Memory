@@ -63,6 +63,9 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         assert manifest["options_page"] in names
         assert manifest["action"]["default_popup"] in names
         assert all(icon in names for icon in manifest["icons"].values())
+        for entry in manifest.get("content_scripts", []):
+            for name in [*entry.get("js", []), *entry.get("css", [])]:
+                assert archive.read(name) == (source / name).read_bytes()
         assert not any(name.startswith(("test/", "data/")) for name in names)
         assert "extension-connection.json" not in names
         assert "storage_state.json" not in names
@@ -77,6 +80,36 @@ def test_extension_package_rejects_missing_runtime_dependencies(tmp_path, missin
     result = package(source, output)
     assert result.returncode != 0
     assert not output.exists()
+
+
+@pytest.mark.parametrize("missing", [None, "sidebar-fixture.js", "sidebar-fixture.css"])
+def test_extension_package_validates_all_manifest_content_scripts(tmp_path, missing):
+    source = package_source(tmp_path)
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["content_scripts"] = [
+        {
+            "matches": ["https://chatgpt.com/*"],
+            "js": ["sidebar-fixture.js"],
+            "css": ["sidebar-fixture.css"],
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assets = {"sidebar-fixture.js": "void 0;\n", "sidebar-fixture.css": ":root {}\n"}
+    for name, content in assets.items():
+        if name != missing:
+            (source / name).write_text(content, encoding="utf-8")
+    output = tmp_path / "extension.zip"
+    result = package(source, output)
+    if missing is not None:
+        assert result.returncode != 0
+        assert missing in result.stderr
+        assert not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        with zipfile.ZipFile(output) as archive:
+            for name, content in assets.items():
+                assert archive.read(name) == content.encode()
 
 
 def test_extension_package_rejects_asset_symlinks_outside_its_source(tmp_path):

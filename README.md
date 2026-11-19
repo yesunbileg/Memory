@@ -27,7 +27,7 @@ cloud executor setup is separate and documented in [config/cloud-start.md](confi
 
 The demo imports **synthetic** Codex and OpenCode histories through the actual donor adapters. It creates `data/demo/conversations.sqlite` and `data/demo/segments/SEG-001.md`, prints conversation IDs and process resource measurements, and can be repeated without duplicate messages. A changed fixture, a symlink or non-demo archive contents are not overwritten; choose a new empty directory instead. No data is sent to Google. MCP smoke testing starts a real stdio server and calls `memory_status`; it does not invent a NotebookLM answer.
 
-## Collect your conversations
+## Import existing histories once
 
 ```bash
 .venv/bin/ai-memory init
@@ -51,7 +51,7 @@ Incremental scans checkpoint the selected path's file inventory. Codex and OpenC
 
 Sign in to NotebookLM in **the Brave, Chrome or Firefox profile you already use**, then import that session with notebooklm-py's supported cookie reader. This does not launch another browser or require a separate Chromium/Playwright installation. A service-account credential does not authenticate NotebookLM. Keep the saved session private and outside version control.
 
-Keep your existing auth location when reauthenticating. Login, the worker and MCP
+Keep your existing auth location when reauthenticating. Login, sync and MCP
 must use the same saved session. Custom locations use `NOTEBOOKLM_HOME` or an
 explicit `--storage` file.
 
@@ -59,7 +59,7 @@ explicit `--storage` file.
 # Install the optional cookie reader; no browser download is needed.
 uv sync --frozen --extra login
 
-# Use the same auth directory or --storage path as your worker/MCP server.
+# Use the same auth directory or --storage path as sync and your MCP server.
 .venv/bin/notebooklm login --browser-cookies brave
 .venv/bin/notebooklm create 'AI Memory'
 # Copy the notebook ID printed by the command:
@@ -74,7 +74,7 @@ succeeds. Local-only `ai-memory status` does not require authentication and neve
 
 Replace `brave` with `chrome` or `firefox` for those browsers. For a specific Brave profile, use `--browser-cookies 'brave::Profile 1'`; for multiple signed-in Google accounts, add `--account YOUR_EMAIL`. Run this on the same computer and as the same operating-system user as the signed-in browser; a cloud host cannot read your laptop's browser profile. If cookie extraction fails, check the selected profile and desktop keyring access before retrying.
 
-Use the same `NOTEBOOKLM_HOME` for login, the worker, MCP and the demo. If your archive already uses an explicit storage file, pass that file to login with `--storage /private/path/storage_state.json`; configure the archive with `init --storage` only when changing its auth location. Reauthentication does not require a new notebook. To test against Google using **only synthetic data** in a dedicated demo notebook:
+Use the same `NOTEBOOKLM_HOME` for login, sync, MCP and the demo. If your archive already uses an explicit storage file, pass that file to login with `--storage /private/path/storage_state.json`; configure the archive with `init --storage` only when changing its auth location. Reauthentication does not require a new notebook. To test against Google using **only synthetic data** in a dedicated demo notebook:
 
 ```bash
 .venv/bin/python scripts/live_demo.py --notebook-id YOUR_EMPTY_DEMO_NOTEBOOK_ID --output data/new-live-demo
@@ -84,23 +84,13 @@ Create a new empty notebook specifically for the test and copy its ID. The live 
 
 ## MCP with Codex and OpenCode
 
-Use the examples in [config/](config/) and the short [agent instructions](docs/agent-instructions.md). Replace checkout/database paths as appropriate; do not overwrite your existing client configuration.
-
-```bash
-codex mcp add ai_memory -- "$PWD/.venv/bin/ai-memory" \
-  --db "$PWD/data/conversations.sqlite" mcp
-```
-
-Use the [OpenCode 2 example](config/opencode-v2.json.example) for `mcp.servers`,
-or the [legacy example](config/opencode.json.example) for clients using a flat
-`mcp` map. The [Codex example](config/codex.toml.example) also grants access to
-the two tools for unattended sessions; apply it only to this trusted local server.
+Codex uses **one local plugin** for its Stop hook and the memory MCP server. Nothing is published to a plugin directory. Follow the [local installation instructions](docs/local-hooks.md) on the computer where Codex runs. OpenCode uses its own session-idle integration and [MCP configuration](docs/agent-instructions.md). Both capture only the session that fired the event, into the initialized archive. They do not upload or approve anything. Use the explicit import commands above for older sessions.
 
 Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns verified conversation/message IDs in structured `sources` only when exact citation headings can be verified. IDs in free-form answer text remain unverified. A known source with no verifiable message ID keeps a source-level reference. If a citation is outside the request’s approved source set, the response does not disclose the answer or passage. Historical instructions remain historical context; current user instructions take priority.
 
-## Web capture and background collection
+## Web capture
 
-Load `vendor/hstry/extension` as an unpacked Chromium/Brave/Chrome extension on Linux. Copy its 32-letter ID from the extensions page. From the project folder, register the selected archive for that ID (replace the placeholders):
+Load `vendor/hstry/extension` as an unpacked extension on Linux, using Chrome, Brave or Chromium with Chromium engine version 125 or later. Copy its 32-letter ID from the extensions page. From the project folder, register the selected archive for that ID (replace the placeholders):
 
 ```bash
 .venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
@@ -110,18 +100,13 @@ For a standalone extension, run `.venv/bin/python scripts/package_extension.py`.
 
 Open extension Settings → **Choose connection file** and select the `connection_file` path printed by the command. The browser now launches its registered native host as needed; no receiver terminal stays open. A v1 bearer file cannot authenticate the receiver. To migrate, pair again using the v2 file. See [native pairing](docs/native-pairing.md) for custom browser data directories and supported platforms.
 
-Enable the desired ChatGPT, Claude or Gemini providers. All are off initially. The category checklist defaults to **Projects & folders**, **Pinned & favorites**, and **GPTs & agents** on, with **Ordinary Recents** off. Organized chats can appear in Recents and still match their selected category; Recents-only does not override unchecked organized categories. Unknown membership stays out unless Recents is explicitly enabled. Existing archived history is retained. Codex/OpenCode local collection is independent of these browser filters.
+Providers start off. If you want only specific ChatGPT items, save your list before enabling ChatGPT in Settings. For a specific **ChatGPT project or unpinned chat**, open the signed-in ChatGPT sidebar. Tick the project row or a standalone chat under **Recents**, then press **Add to sync list**. A checkbox is a draft choice. Save before leaving the page or collapsing the section. Add saves identifiers for later capture, not the conversation text. It neither captures a chat nor sends anything to NotebookLM. A saved project includes its conversations without selecting each one. Pinned standalone chats and nested project chats are not individual Recents choices.
 
-ChatGPT/Claude project discovery and native pin/agent metadata are supported where their private APIs expose them. Unsupported detail response shapes or failed discovery produce an incomplete-capture warning instead of advancing a success checkpoint. Gemini has no dependable organized-membership fields, so it skips with a warning unless ordinary Recents are enabled. Gemini resumes only within an identifiable matching session. A changed session replays history without deleting accepted data, and an unidentifiable incomplete session pauses automatic continuation. Keep distinct configured namespaces for different Gemini accounts. Changing capture selection, provider enablement or connection settings invalidates active runs before subsequent batches are sent; already accepted batches remain in the archive. No-category runs are rejected. These guarantees are tested with synthetic service fixtures, not live signed-in accounts.
+After the first Add, ChatGPT capture uses the saved scopes for that account/workspace, including on subsequent scheduled browser captures when enabled. Enable ChatGPT in Settings and start a local capture separately with **Capture selected chats**. Manage saved scopes in extension Settings. Removing one does not erase archived text or revoke an existing upload approval. An empty saved list does not revert to broad category capture.
 
-Use a distinct capture namespace for each browser profile. The extension does not send transcripts to the legacy HTTP listener. Saving a web chat locally does not grant NotebookLM upload consent. See the [Mongolian setup guide](docs/extension-setup.mn.md) and [current handoff status](docs/extension-handoff.md).
+Before using a ChatGPT sync list, category capture defaults to projects/folders, pinned/favorites and GPTs/agents, with ordinary Recents off. Claude and Gemini retain their own provider/category behavior. Gemini lacks reliable organized-membership metadata and skips organized-only capture with a warning. Changing capture settings invalidates ongoing work before subsequent batches. Earlier accepted batches remain in the archive. Private website interfaces can change. The automated checks use synthetic accounts and data.
 
-```bash
-.venv/bin/ai-memory watch --codex-path ~/.codex/sessions \
-  --opencode-path ~/.local/share/opencode
-```
-
-The optional worker scans every 30 seconds and batches new cloud sync every 12 hours. A remote poll runs on its own SQLite connection so it cannot suspend local scans. The `watch` block in `status` records per-platform scan time, next scan, safe errors, remote activity and the next remote deadline. Times are Unix seconds. Pending jobs are revisited during scans with their persisted retry backoff; high CPU load postpones sync. Status reports job errors, sync preflight errors, and import failures separately. A local sync status of `up_to_date` does not certify that every watched source or remote service is reachable. The worker does not implicitly approve new histories. There is no continuously running browser. Adapt [the user systemd example](config/ai-memory.service.example) for your Arch Linux paths; automatic service installation is not performed.
+Use a distinct capture namespace for each browser profile. The extension stores originals locally. To send anything to NotebookLM, review it, grant archive upload consent and run `ai-memory sync`. See the [Mongolian setup guide](docs/extension-setup.mn.md) and [native pairing](docs/native-pairing.md).
 
 ## Reliability and scope
 

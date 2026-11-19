@@ -67,7 +67,7 @@
 
 Declare the existing SDK cookie extra as optional `login` support so a frozen install can retain it without a second unmanaged pip step. Keep core dependencies unchanged. User services remain examples for local installation; do not install or start them in the cloud.
 
-- [x] Document update/install, existing-browser authentication, extension loading, synthetic demo, MCP and optional worker setup using a consistent archive/auth path.
+- [x] Document update/install, existing-browser authentication, extension loading, synthetic demo, and MCP setup using a consistent archive/auth path.
 - [x] Ensure returned preflight capacity/snapshot blockers produce safe rate-limited worker notices, including when no queue job exists.
 - [x] Run full Python/Node, Ruff, whitespace, frozen dependencies, wheel/resource/demo/MCP and the two original audit repros.
 - [x] Obtain one fresh whole-branch review and address important findings with focused regressions.

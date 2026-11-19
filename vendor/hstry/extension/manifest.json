@@ -1,14 +1,23 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "125",
   "name": "AI Memory",
-  "version": "0.6.2",
-  "description": "Keep selected project, pinned and agent chats in your local archive. Ordinary Recents are off by default.",
+  "version": "0.7.0",
+  "description": "Choose ChatGPT projects and individual chats in the sidebar and sync selected conversations to your local archive.",
   "permissions": ["alarms", "storage", "nativeMessaging"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["sidebar-picker.js"],
+      "css": ["sidebar-picker.css"],
+      "run_at": "document_idle"
+    }
   ],
   "background": {
     "service_worker": "background.js",

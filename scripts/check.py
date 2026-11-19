@@ -8,9 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
+    python_paths = ["src", "tests", "scripts", "config", "plugins"]
     commands = [
-        [sys.executable, "-m", "ruff", "check", "src", "tests", "scripts"],
-        [sys.executable, "-m", "ruff", "format", "--check", "--quiet", "src", "tests", "scripts"],
+        [sys.executable, "-m", "ruff", "check", *python_paths],
+        [sys.executable, "-m", "ruff", "format", "--check", "--quiet", *python_paths],
         [sys.executable, "-m", "pytest", "-q"],
         ["node", "--test", *map(str, sorted((ROOT / "vendor/hstry/extension/test").glob("*.js")))],
     ]

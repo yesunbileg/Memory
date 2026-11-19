@@ -61,3 +61,5 @@ Patch history:
     and v1 SQLite use one ordered part projection. Incremental JSON checkpoints
     cover the native session, messages and parts before skipping an unchanged
     session. The normalized text, IDs, order and edit clocks are unchanged.
+15. Local OpenCode completion hooks bind a native session ID in the initial
+    SQLite query for both schemas. Other sessions are not read or normalized.

@@ -35,7 +35,7 @@ their original order without inserted separators, image markers, or code fences.
 Code fences already present in a source remain exact. Invalid UTF-8, unpaired
 surrogates, malformed JSON records, and corrupt source parts fail the import
 instead of replacing characters or silently reporting an incomplete transcript.
-A file being written can be retried by the watcher after the next poll.
+If a file is being written, retry the explicit import after the writer has finished.
 
 Codex messages retain native IDs or original JSONL record evidence. Mirrored
 `event_msg`/`response_item` messages reconcile one-to-one, passing matched identity
@@ -100,7 +100,9 @@ It validates Host, Origin and bearer credentials, bounds the payload (16 MiB,
 100 conversations), and uses the same archive ingest boundary. The browser
 extension does not fall back to this endpoint.
 
-## Selective browser capture (2026-11-11)
+## Category-based browser capture (2026-11-11)
+
+This section describes the category-based mode. ChatGPT also supports saving individual projects or unpinned Recents from its sidebar. After the first Add, the saved scopes govern its later captures rather than these category defaults. The saved-list path binds identifiers to the active account and user from the ChatGPT session and does not store the access token. A [public client](https://github.com/bigfei/chats2md) uses those same session identity fields. See the [current extension guide](extension-handoff.md).
 
 The shared `extension/providers/selection.js` policy defaults to projects,
 pinned/favorites, and GPT/agent conversations enabled, with ordinary Recents

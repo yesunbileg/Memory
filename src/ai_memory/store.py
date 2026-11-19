@@ -630,7 +630,6 @@ class Store:
             "sync_errors": sync_errors,
             "sync_preflight_errors": sync_preflight_errors,
             "import_failures": import_failures,
-            "watch": self.get_setting("watch_health", {}),
             "sync_status": "pending" if pending or unassigned or cleanup else "up_to_date",
             "notebook_configured": bool(self.get_setting("notebook_id")),
         }

@@ -1,3 +1,5 @@
+import { hasItems } from '../chatgpt-sync-list.js';
+
 // Shared capture policy. Only explicit provider metadata or verified collection
 // membership may identify organized conversations. Never inspect transcript text.
 
@@ -158,7 +160,8 @@ export const supportedCaptureTypes = Object.freeze({
   claude: Object.freeze(['projects', 'pinned', 'recents']),
   gemini: Object.freeze(['recents']),
 });
-export function eligibleCapture(providerId, captureTypes) {
+export function eligibleCapture(providerId, captureTypes, chatgptSyncList) {
+  if (providerId === 'chatgpt' && chatgptSyncList !== undefined) return hasItems(chatgptSyncList);
   const selected = normalizeCaptureTypes(captureTypes);
   return (supportedCaptureTypes[providerId] ?? []).some((key) => selected[key]);
 }

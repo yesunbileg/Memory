@@ -127,6 +127,7 @@ export interface ParseOptions {
   since?: number;         // Only parse after this timestamp (ms)
   limit?: number;         // Max conversations to parse
   includeTools?: boolean;
+  sessionId?: string;     // Only parse this native session in the selected OpenCode SQLite file.
   skipThreadIndex?: boolean; // Caller already resolved metadata inside the selected scope.
   includeAttachments?: boolean;
   cursor?: unknown;       // Adapter-defined incremental cursor

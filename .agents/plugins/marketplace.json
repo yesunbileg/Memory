@@ -1,0 +1,12 @@
+{
+  "name": "yesko-memory-local",
+  "interface": { "displayName": "AI Memory (local)" },
+  "plugins": [
+    {
+      "name": "ai-memory",
+      "source": { "source": "local", "path": "./plugins/ai-memory" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

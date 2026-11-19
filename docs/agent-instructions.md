@@ -7,27 +7,22 @@ you want NotebookLM to receive. Install optional login support with
 session already signed in to NotebookLM in Brave; use `chrome` or `firefox`
 for those browsers. No separate Chromium installation is required. Run login
 as the browser's operating-system user, and use the same `NOTEBOOKLM_HOME` or
-explicit `--storage` path as the worker/MCP server. A cloud host cannot read a
+explicit `--storage` path as sync and the MCP server. A cloud host cannot read a
 browser profile on another computer. A Google service account does not replace
 this browser session. Keep authentication files outside version control; do
 not copy cookie values into MCP configuration. See the
 [login instructions](../README.md#connect-notebooklm).
 
-Replace the absolute paths in [the Codex example](../config/codex.toml.example)
-and merge it into `~/.codex/config.toml`, or merge the
-[OpenCode V2 example](../config/opencode-v2.json.example) into your OpenCode config.
-OpenCode V2 uses `mcp.servers`; the [legacy OpenCode example](../config/opencode.json.example)
-uses `mcp` directly. Prefer the installed client's CLI to select its schema:
-`opencode mcp add --global ai_memory -- /ABSOLUTE/PATH/Memory/.venv/bin/ai-memory --db /ABSOLUTE/PATH/archive.sqlite mcp`.
-Verify the connection with `opencode mcp list`.
+For Codex, install the [local AI Memory plugin](local-hooks.md). Its MCP server uses the same executable and archive as its Stop hook. Check the server in Codex's MCP view and use `memory_status` to test it. The plugin does not replace the client's tool-permission policy.
 
-The executable is the project's installed `ai-memory` entry point. The database
-option comes before the `mcp` subcommand. Each agent uses the same archive path
-and notebook. Restart its MCP connection after changing notebook settings.
-For current Codex versions, the example grants access to the two retrieval
-tools so unattended sessions with an approval policy of `never` can use them.
-Apply these grants only to your trusted local AI Memory server. Without a tool
-grant, Codex may connect successfully while refusing the actual memory calls.
+For OpenCode, merge the [OpenCode V2 example](../config/opencode-v2.json.example) into your existing configuration. OpenCode V2 uses `mcp.servers`. The [legacy OpenCode example](../config/opencode.json.example) uses `mcp` directly. You can also use the installed client's CLI to select its schema:
+
+```bash
+opencode mcp add --global ai_memory -- /ABSOLUTE/PATH/Memory/.venv/bin/ai-memory --db /ABSOLUTE/PATH/archive.sqlite mcp
+opencode mcp list
+```
+
+Use the same database for MCP and capture. Restart the MCP connection after changing notebook settings.
 
 Add these instructions to the agent's project instructions:
 
@@ -88,7 +83,7 @@ this server once per client. A second plugin registration is unnecessary.
 
 A sync job stores the exact outbound UTF-8 bytes, policy version and SHA-256.
 If an upload response is lost, matching a filename is not proof. To reconcile,
-the worker requires exactly one matching source newly visible since submission
+the sync process requires exactly one matching source newly visible since submission
 and the identical indexed document, including the revision's opaque receipt.
 If Google normalizes the indexed text or the attempt predates ownership
 records, the job stays uncertain. Neither that candidate nor unproven legacy

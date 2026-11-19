@@ -911,6 +911,19 @@ button svg,
   align-items: flex-start;
 }
 
+#chatgpt-list-panel {
+  display: block;
+}
+#chatgpt-list-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+#chatgpt-list-panel[open] summary {
+  margin-bottom: 8px;
+}
+#chatgpt-list-items .resync-row a {
+  overflow-wrap: anywhere;
+}
 .selection-note svg {
   color: var(--accent);
   margin-top: 2px;

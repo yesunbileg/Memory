@@ -110,7 +110,7 @@ function isOffline(error, code) {
 export function providerState(
   entry,
   enabled = true,
-  { apiConnected = false, captureTypes = null, providerId = null } = {},
+  { apiConnected = false, captureTypes = null, providerId = null, chatgptSyncList } = {},
 ) {
   if (!enabled)
     return { tone: 'muted', label: 'Off', detail: 'Turn on to capture selected chat types.' };
@@ -119,16 +119,18 @@ export function providerState(
     apiConnected &&
     providerId &&
     types &&
-    !eligibleCapture(providerId, types) &&
-    Object.values(types).some(Boolean)
+    !eligibleCapture(providerId, types, chatgptSyncList) &&
+    (Object.values(types).some(Boolean) || (providerId === 'chatgpt' && chatgptSyncList))
   ) {
     return {
       tone: 'warning',
       label: 'Selection unavailable',
       detail:
-        providerId !== 'gemini'
-          ? 'Choose a supported chat type or enable another website.'
-          : 'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.',
+        providerId === 'chatgpt' && chatgptSyncList
+          ? 'Your ChatGPT sync list is empty. Add items in the ChatGPT sidebar.'
+          : providerId !== 'gemini'
+            ? 'Choose a supported chat type or enable another website.'
+            : 'Gemini cannot identify projects, pinned chats or agents yet. With Ordinary Recents off, Gemini chats stay out.',
     };
   }
   if (
@@ -252,7 +254,7 @@ export function friendlyError(error, code = null) {
   return 'This provider could not finish. Open the site, check your sign-in, and try again.';
 }
 
-export function describeEffectivePlan(providers = {}, captureTypes = {}) {
+export function describeEffectivePlan(providers = {}, captureTypes = {}, chatgptSyncList) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selectedKeys = Object.entries(policy)
     .filter(([, enabled]) => enabled)
@@ -271,7 +273,7 @@ export function describeEffectivePlan(providers = {}, captureTypes = {}) {
       items: [],
     };
   }
-  if (selectedKeys.length === 0) {
+  if (selectedKeys.length === 0 && !(chatgptSyncList && enabledProviders.includes('chatgpt'))) {
     return {
       readyCount: 0,
       summary: 'Select at least one chat type above before starting capture.',
@@ -283,6 +285,19 @@ export function describeEffectivePlan(providers = {}, captureTypes = {}) {
     const matched = selectedKeys.filter((key) => caps.includes(key));
     const unsupported = selectedKeys.filter((key) => !caps.includes(key));
     const name = PROVIDERS[id].name;
+    if (id === 'chatgpt' && chatgptSyncList) {
+      const willCapture = eligibleCapture(id, policy, chatgptSyncList);
+      return {
+        id,
+        name,
+        willCapture,
+        note: willCapture
+          ? 'ChatGPT uses only saved sidebar items for the current user and workspace.'
+          : 'ChatGPT sync list is empty; no ChatGPT chats will be captured.',
+      };
+    }
+    if (!selectedKeys.length)
+      return { id, name, willCapture: false, note: name + ': no chat types selected.' };
     if (!eligibleCapture(id, policy)) {
       return {
         id,

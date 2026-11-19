@@ -1,0 +1,12 @@
+{
+  "name": "ai-memory",
+  "version": "0.1.0",
+  "description": "Archive completed local Codex turns and query approved NotebookLM memory.",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "AI Memory",
+    "shortDescription": "Local conversation memory",
+    "category": "Productivity"
+  },
+  "mcpServers": "./.mcp.json"
+}

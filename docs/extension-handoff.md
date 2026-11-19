@@ -1,14 +1,8 @@
 # Extension handoff
 
-AI Memory has guided private connection-file import, a logo and icons, responsive
-settings/popup pages, and provider/category checklists. Ordinary Recents is off
-by default. The installed version appears in Settings and matches the packaged Manifest V3 version.
+On signed-in ChatGPT, tick project rows or standalone, unpinned conversations in Recents. Click **Add to sync list** to save those scope IDs. Ticking is a draft. Add does not fetch transcripts, capture chats or grant upload consent. The next manual capture (or an enabled scheduled browser capture) uses that saved list. A saved project covers its conversations. Manage or remove saved scopes under **ChatGPT sync list** in Settings. Removing every item leaves an empty list, not permission to capture everything.
 
-Projects, pin/favorite and GPT/agent membership must come from native metadata or
-verified project discovery. ChatGPT/Claude support the available metadata;
-Gemini organized membership is unsupported and is explained before capture.
-Changing settings invalidates an active capture before subsequent batches. A
-partial provider failure preserves retry state and reports incomplete capture.
+Until the first Add, ChatGPT retains category-based capture. Claude and Gemini continue to use the category checklist. Projects, pin/favorite and GPT/agent membership in category mode must come from native metadata or verified project discovery. Gemini's organized membership is unsupported and the UI explains that before capture. A partial provider failure reports incomplete capture. The installed version appears in Settings.
 
 Register the native host for the installed extension ID and selected archive, then import the printed v2 file in Settings. No receiver terminal stays open. See [native pairing](native-pairing.md). Reload at `brave://extensions` after pulling code.
 See [Монгол setup](extension-setup.mn.md) and the full [local test guide](local-testing.mn.md).

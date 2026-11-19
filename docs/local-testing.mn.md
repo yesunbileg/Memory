@@ -1,6 +1,6 @@
 # Локалд шинэчлэх, extension холбох, тест хийх
 
-Командуудыг repository-ийн хавтсанд ажиллуулна. Доорх жишээ `data/conversations.sqlite` архивыг ашиглана. Өөр архивтай бол бүх `ai-memory` командын өмнө `--db /бүтэн/зам/archive.sqlite` нэмнэ; extension, worker, MCP гурав ижил архив ашиглах ёстой.
+Командуудыг repository-ийн хавтсанд ажиллуулна. Доорх жишээ `data/conversations.sqlite` архивыг ашиглана. Өөр архивтай бол бүх `ai-memory` командын өмнө `--db /бүтэн/зам/archive.sqlite` нэмнэ; өргөтгөл, Codex/OpenCode-ийн нэмэлт, MCP бүгд ижил архив ашиглах ёстой.
 
 ## 1. Кодоо шинэчлэх
 
@@ -24,7 +24,7 @@ Google ашиглахгүй үндсэн шалгалт:
 
 ## 2. Extension суулгах эсвэл шинэчлэх
 
-1. Brave дээр `brave://extensions/` нээнэ (`chrome://extensions/` мөн болно).
+1. Chromium хөдөлгүүрийн 125 буюу түүнээс шинэ хувилбартай Brave дээр `brave://extensions/` нээнэ (`chrome://extensions/` мөн болно).
 2. **Developer mode** асаана.
 3. **Load unpacked** → repository доторх `vendor/hstry/extension` хавтсыг сонгоно.
 4. Өмнө суулгасан бол **Reload** дарна. Settings дээрх хувилбар `vendor/hstry/extension/manifest.json` дахь `version`-тай таарах ёстой.
@@ -45,49 +45,20 @@ ZIP хэрэгтэй бол:
 
 Linux дээр ажиллана. `YOUR_EXTENSION_ID`-ийн оронд Extensions хуудаст харуулсан 32 үсэгтэй ID-г оруулна. Хөтөчдөө тааруулж `brave`, `chrome` эсвэл `chromium` сонгоно. Settings → **Choose connection file** дээр командын хэвлэсэн `connection_file` замыг сонго. Хөтөч локал програмыг өөрөө асаана. Terminal-ийг нээлттэй байлгах шаардлагагүй. Хуучин bearer файлтай бол шинэ файл үүсгэж дахин холбоно. [Дэлгэрэнгүй](native-pairing.md).
 
-ChatGPT эсвэл Claude-оо асааж, дараах checklist-ийг сонгоно:
+[Сонголтоо хадгалах заавар](extension-setup.mn.md)-ын дагуу хажуугийн жагсаалтаас төсөл, дан яриагаа чагтална. **Add to sync list** дарж байж сонголт хадгалагдана. Дараа нь Settings дээр ChatGPT-ийг идэвхжүүлнэ. **Capture selected chats** бол тусдаа үйлдэл бөгөөд яриаг зөвхөн локал архивт цуглуулна.
 
-- Projects & folders — асаалттай.
-- Pinned & favorites — асаалттай.
-- GPTs & agents — хүссэн үед асаалттай.
-- **Ordinary Recents — унтраалттай.**
+## 4. Сонголт хадгалах, яриа цуглуулахыг тусад нь шалгах
 
-Project/pinned яриа Recents жагсаалтад давхар харагдсан ч өөрийн category-аар орно. **Capture selected chats** дарна. Activity-д үр дүн, алгассан чат болон алдааны мэдээлэл гарна.
+Хувийн яриа ашиглахгүйгээр шалгах бол туршилтын бүртгэлд шинэ төсөл, дотор нь нэг яриа, хоёр бэхлээгүй дан яриа үүсгэнэ. Цэвэр туршилтын архив ашиглаж, хуваарьт цуглуулгыг унтраана. Төслөө болон дан ярианыхаа зөвхөн нэгийг чагтална.
 
-Gemini project/pinned/agent төрлөө найдвартай мэдээлдэггүй тул одоогийн энэ сонголтоор Gemini чат хадгалагдахгүйг Settings болон Popup урьдчилан тайлбарлана. Checklist-ийг app өөрөө өргөжүүлэхгүй. Codex нь тусдаа local collector; browser-ийн checkbox нь локал Codex session-ийг шүүхгүй.
+| Шалгах үйлдэл | Хүлээгдэх үр дүн |
+| --- | --- |
+| Чагтлаад табаа шинэчлэх | Хадгалаагүй сонголт арилна. Архив өөрчлөгдөхгүй. |
+| Дахин чагтлаад **Add to sync list** дарах | Төсөл, сонгосон дан яриа Settings-д хадгалагдана. Архивын ярианы тоо өөрчлөгдөхгүй. |
+| **Capture selected chats** дарах | Төслийн яриа, сонгосон дан яриа архивт орно. Сонгоогүй дан яриа орохгүй. |
+| Хадгалсан сонголтоо бүгдийг хасах | Дараагийн цуглуулга бүх чатыг авдаг болохгүй. Өмнө хадгалсан бичвэр архивт үлдэнэ. |
 
-## 4. Projects/Pinned орж, энгийн Recents орохгүйг бодитоор шалгах
-
-ChatGPT-д дараах нэртэй **шинэ** дөрвөн чат үүсгэнэ:
-
-| Нэр | Байрлал | Хүлээгдэх үр дүн |
-|---|---|---|
-| `AI-MEMORY-CHECK-PROJECT` | Project дотор | Орно |
-| `AI-MEMORY-CHECK-PINNED` | Pin хийсэн | Орно |
-| `AI-MEMORY-CHECK-AGENT` | Custom GPT/agent-ийн яриа | Орно |
-| `AI-MEMORY-CHECK-RECENT` | Зөвхөн энгийн Recents | Орохгүй |
-
-Дээрх гурван төрөл асаалттай, Ordinary Recents унтраалттай үед capture хийнэ. Эхний удаа **Rescan selected chats** мөн ашиглаж болно. Default архивыг өөрчлөхгүй уншиж шалгах команд:
-
-```bash
-.venv/bin/python - <<'PY'
-import sqlite3
-prefix = "AI-MEMORY-CHECK-"
-with sqlite3.connect("file:data/conversations.sqlite?mode=ro", uri=True) as db:
-    rows = db.execute(
-        "SELECT id,title FROM conversations WHERE platform=? AND title LIKE ?",
-        ("chatgpt", prefix + "%"),
-    ).fetchall()
-for conversation_id, title in rows:
-    print(conversation_id, title)
-titles = {title for _, title in rows}
-assert {prefix + kind for kind in ("PROJECT", "PINNED", "AGENT")} <= titles
-assert prefix + "RECENT" not in titles
-print("PASS: selected chats saved; ordinary Recents excluded")
-PY
-```
-
-Өөр DB ашиглаж байгаа бол snippet доторх `file:data/conversations.sqlite` замыг мөн солино. API category metadata өөрчлөгдсөн эсвэл дутуу бол Activity-ийн тайлбарыг шалгана. Өмнө архивласан чатыг checklist өөрчилснөөр устгахгүй тул шинэ нэртэй жишээ ашиглана.
+Архивын өөрчлөлтийг `ai-memory --db PATH status`, хүлээгдэж буй яриаг `ai-memory --db PATH pending` командаар шалгана. Аль ч алхамд NotebookLM-д илгээх шаардлагагүй.
 
 ## 5. NotebookLM-д өөрийн Brave-аар нэвтрэх
 
@@ -100,7 +71,7 @@ Brave-ийн ашиглах profile дээрээ NotebookLM-д нэвтэрсэ�
 
 Chrome/Firefox бол `brave`-ийг `chrome`/`firefox` гэж солино. Profile сонгох бол `--browser-cookies 'brave::Profile 1'`; олон Google account-тай бол `--account YOUR_EMAIL` нэмнэ. Desktop keyring түгжээтэй байвал эхлээд өөрийн desktop session-д unlock хийнэ.
 
-Өмнө `NOTEBOOKLM_HOME` эсвэл тусгай storage файл тохируулсан бол тэрийгээ хэрэглэнэ. Тусгай файлтай login жишээ: `notebooklm login --browser-cookies brave --storage /private/path/storage_state.json`. MCP/worker мөн ижил auth location ашиглана. Дахин нэвтрэхдээ шинэ notebook үүсгэх шаардлагагүй. Анхны notebook тохиргоо бол [README](../README.md#connect-notebooklm)-ийн `init --notebook-id` алхмыг ашиглана.
+Өмнө `NOTEBOOKLM_HOME` эсвэл тусгай storage файл тохируулсан бол тэрийгээ хэрэглэнэ. Тусгай файлтай login жишээ: `notebooklm login --browser-cookies brave --storage /private/path/storage_state.json`. MCP болон sync хийхэд ижил нэвтрэлтийн тохиргоо ашиглана. Дахин нэвтрэхдээ шинэ notebook үүсгэх шаардлагагүй. Анхны notebook тохиргоо бол [README](../README.md#connect-notebooklm)-ийн `init --notebook-id` алхмыг ашиглана.
 
 Хиймэл өгөгдлөөр туршихдаа хоосон notebook зориуд үүсгэж ID-г нь ав. Локал гаралтын хавтас мөн хоосон байна. Нэр нь таарсан notebook эсвэл хуучин архив ашиглахгүй.
 
@@ -118,7 +89,11 @@ Upload хийх хувилбарт танигдсан API key, password/token, c
 
 Google дээр өмнө хадгалсан source алга болбол автоматаар дахин илгээхгүй, retrieval-д ашиглахгүй. Дахин илгээхээр шийдвэл `ai-memory republish SEGMENT_ID` командаар тухайн segment-ийг зааж дараа нь `ai-memory sync` ажиллуулна.
 
-## 6. Codex/OpenCode болон background worker
+## 6. Codex ба OpenCode-ийн локал нэмэлт
+
+[Суулгах заавар, командууд](local-hooks.md)-ыг Codex эсвэл OpenCode ажилладаг компьютер дээрээ гүйцэтгэнэ. Codex-ийн **нэг локал нэмэлт** нь яриа хадгалах `Stop` үйлдэл болон memory MCP серверийг хамтад нь суулгана. Codex дотор `/hooks` нээж тухайн үйлдлийг шалгаад зөвшөөрнө. OpenCode-д өөрийн SQLite санг зааж тусдаа нэмэлт суулгана. Энэ нь `session.idle` үйл явдлаар зөвхөн тухайн яриаг уншина.
+
+Туршилтын нэг богино яриаг дуусгаад ижил архив дээр `ai-memory pending` ажиллуулж шалгана. Хуучин яриаг нэг удаа оруулах бол:
 
 ```bash
 .venv/bin/ai-memory collect codex ~/.codex/sessions
@@ -126,25 +101,11 @@ Google дээр өмнө хадгалсан source алга болбол авт�
 .venv/bin/ai-memory status
 ```
 
-`~/.codex/archived_sessions` байгаа бол түүнийг мөн тусад нь `collect codex` командад өгнө. `collect` нь эхлээд локал архивт хадгална. Эвдэрсэн Codex/OpenCode JSON session-ийг бусдаас тусгаарлаж, дараагийн scan-д дахин оролдоно.
-
-```bash
-.venv/bin/ai-memory watch --codex-path ~/.codex/sessions --opencode-path ~/.local/share/opencode
-```
-
-Terminal-ийг нээлттэй байлгавал 30 секунд тутам scan хийж, зөвшөөрсөн өгөгдлийг default 12 цагийн давтамжтай sync хийнэ. Удаан remote шалгалт локал scan-ийг зогсоохгүй. `status`-ын `watch` хэсгээс амжилттай уншсан сүүлийн хугацаа, дараагийн scan, remote ажил болон алдааг шалгана. Хүлээгдэж буй retry нь queue дахь хугацаагаа дагана. Google login/quota/import алдааг terminal дээр нууц утга гаргалгүй мэдээлнэ.
-
-Локал цуглуулагчийг арын горимоор асаах бол `config/ai-memory.service.example`-д executable, repository болон архивын абсолют замаа тохируулна. Үүнийг `~/.config/systemd/user/ai-memory.service` болгон хадгалаад ажиллуулна. Browser өргөтгөлийн шинэ холболтод тусдаа HTTP receiver үйлчилгээ хэрэггүй.
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now ai-memory.service
-journalctl --user -u ai-memory.service -f
-```
+`~/.codex/archived_sessions` дотор хэрэгтэй яриа байвал түүнийг тусад нь `collect codex` командад өгнө. Аль ч локал нэмэлт Google-д илгээх зөвшөөрөл шинээр олгохгүй.
 
 ## 7. MCP болон хөгжүүлэлтийн тест
 
-Байгаа MCP тохиргоондоо [Codex](../config/codex.toml.example), [OpenCode 2](../config/opencode-v2.json.example), эсвэл [хуучин OpenCode](../config/opencode.json.example) жишээний зөвхөн memory server entry-г нэгтгэнэ. OpenCode 2 нь `mcp.servers`, хуучин client нь `mcp` map ашиглана. Executable/DB замыг солиод MCP холболтоо restart хийнэ. Agent-д `memory_status` болон өмнөх ярианы талаар `memory_ask` дуудаж шалгуулна. [Agent ашиглах заавар](agent-instructions.md)-ыг нэмнэ.
+Codex-д нэмэлтийн хамт ирсэн MCP серверийг ашиглана. OpenCode-ийн байгаа тохиргоонд [OpenCode 2](../config/opencode-v2.json.example), эсвэл [хуучин OpenCode](../config/opencode.json.example) жишээний зөвхөн memory server entry-г нэгтгэнэ. OpenCode 2 нь `mcp.servers`, хуучин client нь `mcp` map ашиглана. Executable/DB замыг солиод MCP холболтоо restart хийнэ. Agent-д `memory_status` болон өмнөх ярианы талаар `memory_ask` дуудаж шалгуулна. [Agent ашиглах заавар](agent-instructions.md)-ыг нэмнэ.
 
 ```bash
 .venv/bin/python scripts/check.py

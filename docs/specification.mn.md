@@ -47,7 +47,7 @@ Codex, OpenCode, Claude Code, ChatGPT болон бусад AI агентын я
 
 WRITE — яриа хадгалах:
 
-AI яриа → hstry → Filter → SQLite → MD Segment → NotebookLM.
+AI яриа → hstry → Filter → SQLite. Хэрэглэгч илгээхийг зөвшөөрч, `ai-memory sync` ажиллуулахад Markdown Segment → NotebookLM.
 
 READ — санах ой сэргээх:
 
@@ -109,9 +109,9 @@ V1-ийн хамгийн түрүүнд баталгаажуулах агент�
 
 ### Цуглуулах ажиллагаа
 
-1. Анхны тохиргоонд төхөөрөмж дээр байгаа хуучин яриануудыг импортлоно.
-2. Шинэ session болон мессежийг incremental scan эсвэл file watch ашиглан танина.
-3. Web яриаг browser extension local ingest API руу дамжуулна.
+1. Хуучин яриа хэрэгтэй бол хэрэглэгч сонгосон эхээсээ `collect` командаар нэг удаа импортлоно.
+2. Codex-ийн локал нэмэлтийн `Stop`, OpenCode-ийн `session.idle` үйл явдалд зөвхөн тухайн яриаг уншина.
+3. ChatGPT-ийн хажуугийн жагсаалтаас төсөл эсвэл бэхлээгүй дан яриаг тэмдэглэж **Add to sync list** дарна. Ингэхэд зөвхөн сонголт хадгалагдана. Хөтчөөр цуглуулахад яриа локал архивт орно.
 4. Бүх платформын өгөгдлийг нэгдсэн стандартад оруулна.
 5. Зөвхөн шаардлагатай мэдээллийг SQLite-д бичнэ.
 
@@ -354,7 +354,7 @@ SQLite-д revision-ийг зөв бүртгэж, өөрчлөгдсөн яриа
 
 ## 11. Sync Engine
 
-Sync хийхдээ AI ашиглахгүй. Script эсвэл хөнгөн worker ажиллуулна.
+Зөвшөөрсөн яриаг NotebookLM рүү илгээхдээ `ai-memory sync` ажиллуулна. AI ашиглахгүй.
 
 ### Source шинэчлэх дараалал
 
@@ -365,7 +365,7 @@ Sync хийхдээ AI ашиглахгүй. Script эсвэл хөнгөн work
 
 - Мессеж бүрд NotebookLM рүү upload хийхгүй.
 - Өөрчлөгдсөн өгөгдлийг багцлан sync хийнэ.
-- Эхний туршилтаар session дуусахад эсвэл өдөрт 1–2 удаа sync хийх хувилбарыг ашиглаж болно.
+- Яриа дуусахад локалд хадгална. Энэ нь NotebookLM рүү илгээх зөвшөөрөл биш.
 - Өөрчлөлтгүй Segment-ийг дахин upload хийхгүй.
 - NotebookLM API-ийн quota болон алдааг хүндэтгэнэ.
 - Internet тасарвал ажил SQLite queue-д үлдэнэ.
@@ -527,11 +527,11 @@ Google руу зөвхөн хэрэглэгчийн зөвшөөрсөн яри�
 
 | Component                | Ажиллах хэлбэр                |
 | ------------------------ | ----------------------------- |
-| Collector                | File watch / incremental scan |
+| Collector                | Тухайн ярианы үйл явдлаар      |
 | Database                 | SQLite                        |
 | Web collector            | Browser extension             |
 | Segment Builder          | Өгөгдөл өөрчлөгдөхөд ажиллана |
-| Sync Engine              | Нэг хөнгөн worker             |
+| Sync Engine              | Хэрэглэгч sync ажиллуулахад    |
 | MCP                      | Агент хүсэлт өгөхөд ажиллана  |
 | Local LLM                | Байхгүй                       |
 | Vector database          | Байхгүй                       |
@@ -687,7 +687,7 @@ Markdown Segment Builder
 
 notebooklm-py
 
-Автомат upload · verify · replace
+Зөвшөөрсөн өгөгдлийг `sync` ажиллуулахад upload · verify · replace
 
 [NotebookLM - AI toolr  tools, reviews, blogs](https://images.openai.com/static-rsc-4/Exi42vueYIoXjU7jVoSu8Zdx8iBDH3thgmx7a9Kq9JLUGvgc7V3r0mYDFiTiybcbMqtu3LoI6pYXAuh_7CFrnd-6w_Xfm4tzQEYz7gvYWfPgL1iazbmf1YwuIqPOXPXwOXBS3hJs7k8625N6x4R1_puEsPHNw_hv8ykFvnUKW30?purpose=inline)
 
@@ -699,6 +699,6 @@ MCP Gateway
 
 Agent memory хэрэгтэй үед асууна
 
-Гол зарчим: Local SQLite-д эх яриагаа бүрэн хадгална. NotebookLM-д олон яриаг багцалсан Markdown Segment-үүд автоматаар дамжуулна. Агент шаардлагатай үед ганц NotebookLM-ээс санах ойгоо сэргээнэ. Local smart memory, тусдаа Main Memory, Medium Memory, INDEX, олон notebook-ийн routing байхгүй.
+Гол зарчим: Local SQLite-д эх яриагаа бүрэн хадгална. Хэрэглэгч `ai-memory sync` ажиллуулахад зөвшөөрсөн яриаг багцалсан Markdown Segment-үүд NotebookLM-д очно. Агент шаардлагатай үед ганц NotebookLM-ээс санах ойгоо сэргээнэ. Local smart memory, тусдаа Main Memory, Medium Memory, INDEX, олон notebook-ийн routing байхгүй.
 
-Энэ бол нэгтгэсэн V1 архитектур. Одоогоор код бичээгүй, repository өөрчлөөгүй, бодит тест ажиллуулаагүй. SQLite-ийн нарийн schema, Segment-ийн хэмжээ, sync давтамж зэрэг хэрэгжүүлэлтийн параметрийг туршилтаар эцэслэнэ.
+Энэ бол V1-ийн архитектурын төлөвлөгөө. Хэрэгжсэн боломж, суулгах дарааллыг [локал заавар](local-testing.mn.md)-аас, шалгалт тус бүрийн хамрах хүрээг [баталгаажуулалт](validation.md)-аас үзнэ.

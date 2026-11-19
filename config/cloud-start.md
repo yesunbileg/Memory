@@ -6,10 +6,26 @@ and run the offline tests, synthetic demo and real stdio MCP smoke check. The sc
 locates its own checkout. If the cloud image supplies a writable dependency cache,
 set `UV_CACHE_DIR` to its path. A browser session or Google login is not needed.
 
-Configure Codex or OpenCode with the examples in this directory and the archive’s
-absolute path. The client launches `ai-memory --db PATH mcp` over stdio. Do not
-start a separate background stdio process. Optional local history collection runs
-only for explicitly selected paths, e.g. `ai-memory watch --codex-path PATH`.
+Initialize the archive and configure the local plugin from the checkout:
+
+```sh
+.venv/bin/ai-memory --db "$PWD/data/conversations.sqlite" init
+python3 config/install_hooks.py --db "$PWD/data/conversations.sqlite"
+codex plugin marketplace add "$PWD"
+codex plugin add ai-memory@yesko-memory-local
+```
+
+In a new Codex session, review and trust the AI Memory Stop handler in `/hooks`.
+The same plugin provides the local stdio MCP server. Do not add a second copy via
+`config.toml`. Existing manual MCP entries can be removed after checking the new
+plugin. To remove the plugin, run `codex plugin remove ai-memory@yesko-memory-local`.
+
+To capture OpenCode sessions too, rerun the setup script with
+`--opencode-db /absolute/path/to/opencode.db` (see `opencode debug paths` on v2).
+It installs one local plugin for OpenCode 2.x or 1.18.29+, leaving existing
+configuration intact. Reload OpenCode. For OpenCode MCP retrieval, merge the
+matching v1 or v2 example in this directory; use the same absolute archive path.
+To remove the OpenCode bridge, delete only its printed `plugins/ai-memory.js`.
 Neither local collection nor browser capture grants upload consent.
 
 If a live NotebookLM test is explicitly intended, use a writable `NOTEBOOKLM_HOME`

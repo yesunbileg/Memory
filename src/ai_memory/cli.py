@@ -4,23 +4,15 @@ import argparse
 import asyncio
 import errno
 import json
-import logging
 import os
 import sys
-import threading
-from concurrent.futures import Future, wait
 from pathlib import Path
-from time import monotonic as _monotonic
-from time import sleep as _sleep
-from time import time as _wall_time
 
 from .archive_files import backup_archive, export_segments, restore_archive
 from .diagnostics import SAFE_FAILURES, PublicInputError, failure_code, provider_failure
 from .importer import collect_into
 from .segments import SegmentBuilder
 from .store import Store
-
-logger = logging.getLogger(__name__)
 
 
 class _PrivateArgumentParser(argparse.ArgumentParser):
@@ -101,14 +93,15 @@ def parser():
     )
     connect.add_argument("--port", type=int, default=41770)
     sub.add_parser("mcp", help="Serve memory_ask and memory_status over stdio")
-    watch = sub.add_parser(
-        "watch", help="Incrementally scan selected sources; sync only approved text"
-    )
-    watch.add_argument("--codex-path", type=Path)
-    watch.add_argument("--opencode-path", type=Path)
-    watch.add_argument("--account", default="local")
-    watch.add_argument("--interval", type=float, default=30)
-    watch.add_argument("--sync-interval", type=float, default=43200)
+    hook = sub.add_parser("hook", help="Import one completed session from a native hook on stdin")
+    clients = hook.add_subparsers(dest="platform", required=True)
+    for platform in ("codex", "opencode"):
+        client = clients.add_parser(platform)
+        client.add_argument("--account", default="local")
+        if platform == "opencode":
+            client.add_argument(
+                "--source", type=Path, required=True, help="Absolute OpenCode SQLite path"
+            )
     demo = sub.add_parser(
         "demo", help="Run repeatable synthetic Codex/OpenCode → SQLite → Markdown demo"
     )
@@ -163,88 +156,6 @@ def _preflight_errors(result):
     return [{"reason": reason} for reason in sorted(reasons)]
 
 
-def _watch(args):
-    if args.interval < 5 or args.sync_interval < 300:
-        raise PublicInputError(
-            "watch requires interval >= 5 seconds and sync-interval >= 300 seconds"
-        )
-    sources = [
-        (p, path)
-        for p, path in (("codex", args.codex_path), ("opencode", args.opencode_path))
-        if path
-    ]
-    if not sources:
-        raise PublicInputError("watch requires at least one explicit source path")
-    next_sync = 0
-    active_sync = None
-    reported = {}
-
-    def report(key, code):
-        now = _monotonic()
-        if now >= reported.get(key, -float("inf")):
-            logger.warning("Worker %s; retry in %.0f seconds", code, args.interval)
-            reported[key] = now + 300
-
-    def run_remote(future):
-        # SQLite connections belong to their creating thread. Never share the
-        # local import connection or hold a local transaction across remote I/O.
-        try:
-            with Store(args.db, existing=True) as remote_store:
-                result = asyncio.run(sync_archive(remote_store))
-            future.set_result(result)
-        except Exception as error:
-            future.set_exception(error)
-
-    while True:
-        with Store(args.db) as store:
-            health = store.get_setting("watch_health", {"sources": {}})
-            for platform, path in sources:
-                scan = health["sources"].setdefault(platform, {})
-                try:
-                    imported = collect_into(store, platform, path, account=args.account)
-                    if imported.get("failed_files"):
-                        raise ValueError("import_failed")
-                    reported.pop(("import", platform), None)
-                    scan.update(last_successful_scan=_wall_time(), error=None)
-                except Exception:
-                    scan["error"] = "import_failed"
-                    report(("import", platform), "import_failed")
-                scan["next_scan"] = _wall_time() + args.interval
-            if (
-                active_sync is None
-                and _monotonic() >= next_sync
-                and store.get_setting("notebook_id")
-                and (not hasattr(os, "getloadavg") or os.getloadavg()[0] <= (os.cpu_count() or 1))
-            ):
-                active_sync = Future()
-                threading.Thread(target=run_remote, args=(active_sync,), daemon=True).start()
-
-            # Observe completion separately from result retrieval: a task that
-            # finishes just after the wait deadline is not a provider timeout.
-            if active_sync is not None and wait([active_sync], timeout=0.075).done:
-                try:
-                    result = active_sync.result()
-                except Exception as error:
-                    code = "timeout" if isinstance(error, TimeoutError) else failure_code(error)
-                    result = {"blocked": [{"reason": code}], "status": {"sync_status": "pending"}}
-                active_sync = None
-                errors = _preflight_errors(result)
-                for blocker in errors:
-                    report(("sync", blocker["reason"]), blocker["reason"])
-                delay = (
-                    args.interval
-                    if result["status"]["sync_status"] == "pending"
-                    else args.sync_interval
-                )
-                next_sync = _monotonic() + delay
-                health.update(next_sync=_wall_time() + delay, remote_errors=errors)
-            health["remote_in_progress"] = active_sync is not None
-            if active_sync is not None:
-                health["next_sync"] = None
-            store.set_setting("watch_health", health)
-        _sleep(args.interval)
-
-
 def execute(args):
     if args.command == "restore":
         return restore_archive(args.db, args.backup)
@@ -257,8 +168,14 @@ def execute(args):
 
         asyncio.run(stdio_main(args.db))
         return None
-    if args.command == "watch":
-        return _watch(args)
+    if args.command == "hook":
+        from .hooks import capture_event
+
+        with Store(args.db, existing=True) as store:
+            capture_event(
+                store, args.platform, args.account, getattr(args, "source", None), sys.stdin.buffer
+            )
+        return None
     if args.command == "connect" and args.extension_id:
         from .native import register
 
@@ -393,6 +310,10 @@ def main(argv=None):
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
+        if args.command == "hook":
+            # Hooks share a host protocol on stdout. Never echo event content or paths.
+            print("AI Memory capture failed. Check the archive, event and source.", file=sys.stderr)
+            return 1
         from .notebook import NotebookLMError
 
         if args.command == "connect":

@@ -329,7 +329,7 @@ def test_scope_separates_an_exported_rollout_from_unselected_sibling_index(tmp_p
         assert store.get_conversation(cid)["title"] == "other index"
 
 
-def test_demo_watch_and_collect_entrypoints_agree_on_ids_order_and_text(tmp_path, monkeypatch):
+def test_demo_and_collect_entrypoints_agree_on_ids_order_and_text(tmp_path):
     from ai_memory import cli
     from ai_memory.demo import prepare_inputs
 
@@ -337,7 +337,6 @@ def test_demo_watch_and_collect_entrypoints_agree_on_ids_order_and_text(tmp_path
     assert cli.main(["demo", "--output", str(output)]) == 0
     inputs = prepare_inputs(tmp_path / "same")
     imported = tmp_path / "collect.db"
-    watched = tmp_path / "watch.db"
     for platform, path in zip(("codex", "opencode"), inputs, strict=True):
         assert (
             cli.main(
@@ -354,33 +353,12 @@ def test_demo_watch_and_collect_entrypoints_agree_on_ids_order_and_text(tmp_path
             == 0
         )
 
-    def one_scan(_):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "_sleep", one_scan)
-    with pytest.raises(KeyboardInterrupt):
-        cli.execute(
-            cli.parser().parse_args(
-                [
-                    "--db",
-                    str(watched),
-                    "watch",
-                    "--codex-path",
-                    str(inputs[0]),
-                    "--opencode-path",
-                    str(inputs[1]),
-                    "--account",
-                    "synthetic-demo",
-                ]
-            )
-        )
-
     def visible(db):
         with sqlite3.connect(db) as conn:
             return conn.execute("""SELECT conversation_id,id,native_id,sequence,role,kind,text FROM messages
                                 ORDER BY conversation_id,sequence""").fetchall()
 
-    assert visible(watched) == visible(imported) == visible(output / "conversations.sqlite")
+    assert visible(imported) == visible(output / "conversations.sqlite")
 
 
 def test_explicit_opencode_session_skips_an_unchanged_native_dependency_set(tmp_path, monkeypatch):

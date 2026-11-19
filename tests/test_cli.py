@@ -225,46 +225,27 @@ def test_upload_approval_is_honored_on_unchanged_import(tmp_path):
         assert store.get_conversation(key)["consent"] is True
 
 
-def test_cli_rejects_fast_watch_and_empty_server_token(tmp_path):
-    db = tmp_path / "db"
-    for args in [("watch", "--codex-path", tmp_path, "--interval", "0"), ("serve",)]:
-        result = run_cli("--db", db, *args)
-        assert result.returncode != 0
-        assert json.loads(result.stdout)["error"]["code"] == "invalid_configuration"
-        assert "Traceback" not in result.stderr
+def test_cli_rejects_empty_server_token(tmp_path):
+    result = run_cli("--db", tmp_path / "db", "serve")
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error"]["code"] == "invalid_configuration"
+    assert "Traceback" not in result.stderr
 
 
-@pytest.mark.parametrize("pending,expected_calls", [(True, 3), (False, 1)])
-def test_background_worker_revisits_pending_jobs_without_waiting_twelve_hours(
-    tmp_path, monkeypatch, pending, expected_calls
-):
+def test_collect_partial_failure_returns_unsuccessful_cli_status(tmp_path, monkeypatch, capsys):
     from ai_memory import cli
-    from ai_memory.demo import prepare_inputs
-    from ai_memory.store import Store
 
-    source, _ = prepare_inputs(tmp_path / "inputs")
-    db = tmp_path / "db"
-    with Store(db) as store:
-        store.set_setting("notebook_id", "synthetic")
-    calls, clock = [], [0]
-
-    async def simulated_sync(store):
-        calls.append(clock[0])
-        return {"status": {"sync_status": "pending" if pending else "up_to_date"}}
-
-    def advance(seconds):
-        clock[0] += seconds
-        if clock[0] >= 90:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "sync_archive", simulated_sync)
-    monkeypatch.setattr(cli, "_monotonic", lambda: clock[0])
-    monkeypatch.setattr(cli, "_sleep", advance)
-    monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
-    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(source)])
-    with pytest.raises(KeyboardInterrupt):
-        cli._watch(args)
-    assert len(calls) == expected_calls
+    monkeypatch.setattr(
+        cli,
+        "collect_into",
+        lambda *a, **kw: {
+            "imported_conversations": 1,
+            "failed_files": 1,
+            "file_failures": [{"file_id": "opaque-id", "category": "parse"}],
+        },
+    )
+    assert cli.main(["--db", str(tmp_path / "db"), "collect", "codex", str(tmp_path)]) == 1
+    assert '"failed_files": 1' in capsys.readouterr().out
 
 
 def available_port():

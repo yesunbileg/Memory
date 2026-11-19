@@ -1,8 +1,8 @@
 # Local review, consent and recovery / Зөвшөөрөл ба сэргээх
 
-`ai-memory --db PATH collect ...` and browser capture store originals locally. Neither sends a transcript to Google. `pending` lists conversations without upload permission. `show ID` displays the exact original locally (it can contain credentials). `preview ID` displays the upload documents that would contain that conversation if approved now. A shared document can include other approved conversations. Preview never changes consent or contacts Google. Treat the output as private.
+Event hooks, explicit imports and browser capture store originals locally. None sends a transcript to Google. Adding an item to the ChatGPT sync list saves its identifier, not its text, and grants no upload consent. `pending` lists conversations without upload permission. `show ID` displays the exact original locally (it can contain credentials). `preview ID` displays the upload documents that would contain that conversation if approved now. A shared document can include other approved conversations. Preview never changes consent or contacts Google. Treat the output as private.
 
-`approve ID1 ID2 ...` grants permission for the complete conversations **and their future continuations**, atomically. Repeated IDs are harmless. An unknown ID changes nothing. `sync` (or a configured watch worker) publishes the approved documents. The explicit import shortcut `collect --approve-upload` also grants continuing permission, but does not itself publish anything. New imports without that flag do not grant permission.
+`approve ID1 ID2 ...` grants permission for the complete conversations **and their future continuations**, atomically. Repeated IDs are harmless. An unknown ID changes nothing. `ai-memory sync` publishes the approved documents. The explicit import shortcut `collect --approve-upload` also grants continuing permission, but does not itself publish anything. New imports without that flag do not grant permission.
 
 Cloud fields are the archive conversation ID, platform, title, models and conversation dates, followed by message sequence, role, visible kind, timestamp and text. Native conversation IDs, account labels, project paths and source URLs stay local as metadata. A user may still have written one of these values in a visible message. Credentials recognized by policy 2 are masked. Neither masking nor preview proves that all secrets have been identified. A residual finding blocks upload and the preview omits that document's body. Each outgoing revision records its exact UTF-8 bytes, SHA-256 and policy. Its per-revision archive receipt does not contain an archive secret. A subsequent import or permission change can change the preview. Local Markdown exports contain the unmasked originals.
 
@@ -24,7 +24,7 @@ Default exports are immutable, complete directories below `ARCHIVE.sqlite.files/
 
 ## Монгол
 
-`pending` зөвшөөрөл хүлээж буй яриаг жагсаана. `show ID` нууц утга агуулж болох локал эхийг харуулна. `preview ID` зөвшөөрвөл Google-д илгээх маскласан баримтыг **зөвшөөрөл өгөхгүйгээр** харуулна. Нэг баримтад өмнө нь зөвшөөрсөн өөр яриа багтаж болно. `approve` нь сонгосон яриа болон **цаашдын үргэлжлэлд** үйлчилнэ. Нэг ID буруу бол шинээр зөвшөөрөл олгохгүй. Илгээхийн тулд `sync` эсвэл тохируулсан worker ажиллах ёстой.
+`pending` зөвшөөрөл хүлээж буй яриаг жагсаана. `show ID` нууц утга агуулж болох локал эхийг харуулна. `preview ID` зөвшөөрвөл Google-д илгээх маскласан баримтыг **зөвшөөрөл өгөхгүйгээр** харуулна. Нэг баримтад өмнө нь зөвшөөрсөн өөр яриа багтаж болно. `approve` нь сонгосон яриа болон **цаашдын үргэлжлэлд** үйлчилнэ. Нэг ID буруу бол шинээр зөвшөөрөл олгохгүй. Илгээхийн тулд `ai-memory sync` командыг тусад нь ажиллуулна.
 
 `revoke` нь дараагийн илгээлтийг зогсооно. Өмнөх Google хуулбар болон локал эхийг устгахгүй. Google хуулбарыг арилгах бол NotebookLM дээр тухайн эх сурвалжийг тусад нь шалгаж устгана. Синк идэвхтэй үед дууссаны дараа дахин оролдоно.
 

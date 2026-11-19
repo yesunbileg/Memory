@@ -251,7 +251,12 @@ def _snapshot_rank(conversation: dict) -> tuple[str, int, str]:
 
 
 def collect(
-    platform: str, path: Path, account: str = "local", *, _index: dict | None = None
+    platform: str,
+    path: Path,
+    account: str = "local",
+    *,
+    _index: dict | None = None,
+    _session_id: str | None = None,
 ) -> list[dict]:
     """Parse an explicitly selected Codex file/tree or OpenCode storage tree."""
     platform = platform.lower()
@@ -273,7 +278,11 @@ def collect(
                 "method": "parse",
                 "params": {
                     "path": str(path),
-                    "opts": {"includeTools": False, "skipThreadIndex": _index is not None},
+                    "opts": {
+                        "includeTools": False,
+                        "skipThreadIndex": _index is not None,
+                        **({"sessionId": _session_id} if _session_id is not None else {}),
+                    },
                 },
             }
         ),

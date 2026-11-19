@@ -31,7 +31,7 @@ collectors, extension or Python checks does not require npm packages.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/ai_memory/cli.py` | Commands, worker scheduling and user-facing results |
+| `src/ai_memory/cli.py` | Commands, event dispatch and user-facing results |
 | `src/ai_memory/collectors.py` | Node adapter execution, rollout discovery and Codex snapshot reconciliation |
 | `src/ai_memory/normalization.py` | Visible text, stable native identities and metadata normalization |
 | `src/ai_memory/importer.py` | Archive imports, per-file checkpoints and failure isolation |
@@ -43,7 +43,7 @@ collectors, extension or Python checks does not require npm packages.
 | `src/ai_memory/connection.py`, `ingest.py` | Legacy authenticated HTTP receiver and shared validation for browser packets |
 | `src/ai_memory/native.py` | Linux native messaging host registration, pairing verification and browser packets |
 | `vendor/hstry/adapters/` | Audited upstream TypeScript parsers |
-| `vendor/hstry/extension/` | Browser UI, provider readers and category selection |
+| `vendor/hstry/extension/` | Browser UI, ChatGPT sidebar and sync list, provider readers and category selection |
 | `tests/`, `vendor/hstry/extension/test/` | Synthetic behavior and recovery regressions |
 | `scripts/` | Checks, smoke tests, UI verification and extension packaging |
 | `config/` | Client/service examples and explicitly named cloud executor helpers |

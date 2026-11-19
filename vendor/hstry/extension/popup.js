@@ -1,3 +1,4 @@
+import { readSyncList } from './chatgpt-sync-list.js';
 import {
   PROVIDERS,
   PROVIDER_CAPABILITIES,
@@ -27,6 +28,7 @@ const filterLabels = {
 };
 
 let apiConnected = false;
+let savedList;
 let current = normalizeSettings();
 let busy = false;
 let connectionCheck = 0;
@@ -87,13 +89,15 @@ function renderFilters() {
 
 async function render() {
   const ticket = ++generation;
-  const { settings = {}, status: rawStatus } = await chrome.storage.local.get([
-    'settings',
-    'status',
-  ]);
+  const {
+    settings = {},
+    status: rawStatus,
+    chatgptSyncList,
+  } = await chrome.storage.local.get(['settings', 'status', 'chatgptSyncList']);
   if (ticket !== generation) return;
   const focused = document.activeElement?.id;
   current = normalizeSettings(settings);
+  savedList = readSyncList(chatgptSyncList);
 
   const status = statusForPairing(rawStatus, current);
   const key = JSON.stringify([current.archiveId, current.account]);
@@ -107,9 +111,11 @@ async function render() {
       .filter(([, value]) => value)
       .map(([key]) => filterLabels[key])
       .join(' · ') || 'No chat types selected';
-  el('recents-note').textContent = current.captureTypes.recents
-    ? 'Ordinary Recents included'
-    : 'Ordinary Recents stay out';
+  el('recents-note').textContent = savedList
+    ? 'ChatGPT uses only its saved sync list'
+    : current.captureTypes.recents
+      ? 'Ordinary Recents included'
+      : 'Ordinary Recents stay out';
   el('schedule').textContent = current.autoPaused
     ? 'Automatic checks paused'
     : `Every ${current.intervalMinutes}m`;
@@ -127,6 +133,7 @@ async function render() {
       apiConnected,
       captureTypes: current.captureTypes,
       providerId: id,
+      chatgptSyncList: savedList,
     });
     if (entry?.running) anyRunning = true;
     const caps = PROVIDER_CAPABILITIES[id];
@@ -206,7 +213,7 @@ async function render() {
     providersBox.appendChild(card);
   }
 
-  const plan = describeEffectivePlan(current.providers, current.captureTypes);
+  const plan = describeEffectivePlan(current.providers, current.captureTypes, savedList);
   const syncBtn = el('sync');
   el('plan-hint').textContent = apiConnected && !plan.readyCount ? plan.summary : '';
   syncBtn.disabled = busy || anyRunning || (apiConnected && !plan.readyCount);
@@ -261,7 +268,7 @@ el('sync').addEventListener('click', async () => {
     return;
   }
   if (
-    !describeEffectivePlan(current.providers, current.captureTypes).readyCount ||
+    !describeEffectivePlan(current.providers, current.captureTypes, savedList).readyCount ||
     el('sync').disabled
   )
     return;
@@ -295,7 +302,7 @@ chrome.storage.onChanged.addListener(async (changes) => {
     connectionCheck++;
     apiConnected = false;
   }
-  if (changes.status || changes.settings) await render();
+  if (changes.status || changes.settings || changes.chatgptSyncList) await render();
   if (authChanged) await checkApi();
 });
 

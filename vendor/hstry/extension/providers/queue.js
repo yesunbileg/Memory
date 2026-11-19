@@ -108,11 +108,23 @@ const fields = new Set([
   'is_favorited',
   'pinned_time',
   'in_recents',
+  'is_archived',
+  'archived',
+  'is_locked',
+  'locked',
+  'is_hidden',
+  'hidden',
+  'is_deleted',
+  'deleted',
+  'is_trashed',
+  'trashed',
+  'is_visible',
+  'is_visible_in_sidebar',
   'updated_at',
   'update_time',
 ]);
 const scalar = (v) => v === null || ['boolean', 'number', 'string'].includes(typeof v);
-function summaryItem(item, withMetadata = true) {
+function summaryItem(item, withMetadata = true, withGizmo = true) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
   const result = {};
   for (const [k, v] of Object.entries(item)) {
@@ -125,9 +137,9 @@ function summaryItem(item, withMetadata = true) {
             )
           : null;
   }
-  if (typeof item?.gizmo?.gizmo?.id === 'string')
-    result.gizmo = { gizmo: { id: item.gizmo.gizmo.id } };
-  if (withMetadata && item.metadata) result.metadata = summaryItem(item.metadata, false);
+  if (withGizmo && typeof item?.gizmo?.gizmo?.id === 'string')
+    result.gizmo = { gizmo: summaryItem(item.gizmo.gizmo, true, false) };
+  if (withMetadata && item.metadata) result.metadata = summaryItem(item.metadata, false, false);
   return result;
 }
 function projectSummary(data) {
@@ -187,7 +199,7 @@ function discoveryPages({ state, signature, canResume, guard, checkpoint, report
 // Do not resume using only the shortened source labels displayed by the UI.
 export function preparePrincipalRun(principals, state, hooks) {
   const ids = principals.map((p) => p.id);
-  const signature = JSON.stringify(ids.sort());
+  const signature = JSON.stringify(hooks.scope ? [ids.sort(), hooks.scope] : ids.sort());
   const canResume = ids.every((id) => typeof id === 'string' && id.length);
   const pager = discoveryPages({ state, signature, canResume, ...hooks });
   const prior = canResume && state.pending?.signature === signature ? state.pending : null;

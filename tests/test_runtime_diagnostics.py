@@ -3,7 +3,6 @@
 import asyncio
 import fcntl
 import json
-import logging
 import os
 
 import pytest
@@ -19,7 +18,7 @@ from ai_memory.sync import SyncEngine
 
 
 @pytest.mark.parametrize("reason", ["auth_required", "network_error", "timeout"])
-def test_real_worker_persists_jobless_failure_and_recovery(tmp_path, monkeypatch, caplog, reason):
+def test_sync_persists_jobless_failure_and_recovery(tmp_path, monkeypatch, reason):
     class OfflineNotebook(Remote):
         failure = None
 
@@ -33,8 +32,6 @@ def test_real_worker_persists_jobless_failure_and_recovery(tmp_path, monkeypatch
 
     remote = OfflineNotebook()
     db = tmp_path / "archive.sqlite"
-    source = tmp_path / "sessions"
-    source.mkdir()
     with Store(db) as store:
         store.set_setting("notebook_id", "synthetic")
         store.ingest(conversation(), consent=True)
@@ -42,23 +39,10 @@ def test_real_worker_persists_jobless_failure_and_recovery(tmp_path, monkeypatch
         assert store.status()["sync_status"] == "up_to_date"
     remote.failure = reason
     monkeypatch.setattr("ai_memory.notebook.NotebookLMAdapter", lambda *_: remote)
-    clock = [0]
-
-    def advance(seconds):
-        clock[0] += seconds
-        if clock[0] >= 90:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "_monotonic", lambda: clock[0])
-    monkeypatch.setattr(cli, "_sleep", advance)
-    monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
-    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(source)])
-    with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
-        cli._watch(args)
-    assert len(caplog.records) == 1
-    assert reason in caplog.text
-    assert "PRIVATE" not in caplog.text
     with Store(db) as store:
+        failed = asyncio.run(cli.sync_archive(store))
+        assert reason in json.dumps(failed["blocked"])
+        assert "PRIVATE" not in json.dumps(failed)
         status = store.status()
         assert status["sync_preflight_errors"] == [{"reason": reason}]
         assert status["sync_status"] == "up_to_date"  # local bookkeeping, not remote health
@@ -69,17 +53,13 @@ def test_real_worker_persists_jobless_failure_and_recovery(tmp_path, monkeypatch
         assert store.status()["sync_preflight_errors"] == []
 
 
-def test_missing_watched_source_health_is_safe_source_specific_and_recovers(
-    tmp_path, monkeypatch, caplog
-):
+def test_missing_source_health_is_safe_source_specific_and_recovers(tmp_path):
     db = tmp_path / "archive.sqlite"
     first = tmp_path / "PRIVATE-FIRST-SOURCE"
     second = tmp_path / "PRIVATE-SECOND-SOURCE"
-    monkeypatch.setattr(cli, "_sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
-    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(first)])
-    with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt):
-        cli._watch(args)
     with Store(db) as store:
+        with pytest.raises(FileNotFoundError):
+            collect_into(store, "codex", first)
         failures = store.status()["import_failures"]
         assert len(failures) == 1
         assert failures[0]["categories"] == ["source_missing"]
@@ -90,7 +70,7 @@ def test_missing_watched_source_health_is_safe_source_specific_and_recovers(
         failures = store.status()["import_failures"]
         assert len(failures) == 2
         assert len({failure["source_id"] for failure in failures}) == 2
-        assert "PRIVATE" not in json.dumps(failures) + caplog.text
+        assert "PRIVATE" not in json.dumps(failures)
         first.mkdir()
         collect_into(store, "codex", first)
         remaining = store.status()["import_failures"]
@@ -190,21 +170,16 @@ def test_build_preserves_existing_symlink_and_publishes_complete_fresh_export(tm
     assert not list(tmp_path.glob(".partial-*"))
 
 
-def test_busy_worker_does_not_overwrite_active_workers_diagnostic(tmp_path, monkeypatch):
+def test_busy_sync_does_not_overwrite_other_sync_diagnostic(tmp_path):
     db = tmp_path / "archive.sqlite"
-    source = tmp_path / "sessions"
-    source.mkdir()
     with Store(db) as store:
         store.set_setting("notebook_id", "synthetic")
         store.set_setting("sync_preflight_errors", [{"reason": "auth_required"}])
-    monkeypatch.setattr(cli, "_sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
-    monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
-    args = cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", str(source)])
     descriptor = os.open(str(db) + ".sync.lock", os.O_CREAT | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with pytest.raises(KeyboardInterrupt):
-            cli._watch(args)
+        with Store(db) as store, pytest.raises(RuntimeError, match="active"):
+            asyncio.run(cli.sync_archive(store))
     with Store(db) as store:
         assert store.get_setting("sync_preflight_errors") == [{"reason": "auth_required"}]
 

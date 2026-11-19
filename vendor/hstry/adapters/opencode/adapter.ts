@@ -200,8 +200,10 @@ const adapter: Adapter = {
   },
 
   async parse(path: string, opts?: ParseOptions): Promise<Conversation[]> {
-    if (basename(path) === 'opencode.db' && (await stat(checkedSource(path))).isFile())
-      return parseSqliteLayout(dirname(path), opts);
+    if (opts?.sessionId !== undefined || basename(path) === 'opencode.db') {
+      if (!(await stat(checkedSource(path))).isFile()) throw new Error('Expected a SQLite file');
+      return parseSqliteLayout(path, opts);
+    }
     if (basename(path).startsWith('ses_') && path.endsWith('.json')) {
       const directory = dirname(path);
       const sessionDir = dirname(directory);
@@ -224,7 +226,7 @@ const adapter: Adapter = {
       return conversation ? [conversation] : [];
     }
     checkedSource(path);
-    if (existsSync(join(path, 'opencode.db'))) return parseSqliteLayout(path, opts);
+    if (existsSync(join(path, 'opencode.db'))) return parseSqliteLayout(join(path, 'opencode.db'), opts);
     const conversations: Conversation[] = [];
     for (const ref of await enumerateSessionRefs(path)) {
       const conv = await parseSingleSession(path, ref, opts);
@@ -395,8 +397,8 @@ function tableExists(db: SqliteDb, name: string): boolean {
 /**
  * Parse all conversations from the SQLite layout.
  */
-async function parseSqliteLayout(basePath: string, opts?: ParseOptions): Promise<Conversation[]> {
-  return withSnapshot(basePath, db => {
+async function parseSqliteLayout(database: string, opts?: ParseOptions): Promise<Conversation[]> {
+  return withSnapshot(database, db => {
     const conversations: Conversation[] = [];
     let cursor: unknown;
     do {
@@ -409,8 +411,8 @@ async function parseSqliteLayout(basePath: string, opts?: ParseOptions): Promise
   });
 }
 
-function withSnapshot<T>(basePath: string, read: (db: SqliteDb) => T): T {
-  const db = openDb(join(basePath, 'opencode.db'));
+function withSnapshot<T>(database: string, read: (db: SqliteDb) => T): T {
+  const db = openDb(database);
   try {
     db.exec('BEGIN');
     return read(db);
@@ -418,7 +420,7 @@ function withSnapshot<T>(basePath: string, read: (db: SqliteDb) => T): T {
 }
 
 async function parseSqliteStream(basePath: string, opts?: ParseOptions): Promise<ParseStreamResult> {
-  return withSnapshot(basePath, db => sqlitePage(db, opts));
+  return withSnapshot(join(basePath, 'opencode.db'), db => sqlitePage(db, opts));
 }
 
 function sqlitePage(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
@@ -440,7 +442,10 @@ function sqlitePage(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
     `;
     const params: unknown[] = [];
 
-    if (opts?.since) {
+    if (opts?.sessionId !== undefined) {
+      sessionQuery += ' WHERE s.id = ?';
+      params.push(opts.sessionId);
+    } else if (opts?.since) {
       sessionQuery += ` WHERE s.time_created >= ? OR s.time_updated >= ?`;
       params.push(opts.since, opts.since);
     }
@@ -454,6 +459,7 @@ function sqlitePage(db: SqliteDb, opts?: ParseOptions): ParseStreamResult {
     const rows = hasMore ? sessionRows.slice(0, batchSize) : sessionRows;
 
     if (rows.length === 0) {
+      if (opts?.sessionId !== undefined) throw new Error('Selected session was not found');
       return { conversations: [], done: true };
     }
 
@@ -654,7 +660,10 @@ function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResu
     FROM session_v2 s
   `;
   const params: unknown[] = [];
-  if (opts?.since) {
+  if (opts?.sessionId !== undefined) {
+    sessionQuery += ' WHERE s.id = ?';
+    params.push(opts.sessionId);
+  } else if (opts?.since) {
     sessionQuery += ` WHERE s.time_created >= ? OR s.time_updated >= ?`;
     params.push(opts.since, opts.since);
   }
@@ -664,7 +673,10 @@ function parseSqliteV2Stream(db: SqliteDb, opts?: ParseOptions): ParseStreamResu
   const sessionRows = db.prepare(sessionQuery).all(...params) as SqliteV2SessionRow[];
   const hasMore = sessionRows.length > batchSize;
   const rows = hasMore ? sessionRows.slice(0, batchSize) : sessionRows;
-  if (rows.length === 0) return { conversations: [], done: true };
+  if (rows.length === 0) {
+    if (opts?.sessionId !== undefined) throw new Error('Selected session was not found');
+    return { conversations: [], done: true };
+  }
 
   const projectIds = [...new Set(rows.map(r => r.project_id).filter(Boolean))];
   const projectMap = new Map<string, string>();

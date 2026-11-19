@@ -1,5 +1,13 @@
 // Poll selected AI conversations and save them to the local AI Memory receiver.
 
+import {
+  editSyncList,
+  hasItems,
+  itemIds,
+  readSyncList,
+  sessionPrincipal,
+} from './chatgpt-sync-list.js';
+import { getChatGPTSession } from './providers/chatgpt.js';
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { PROVIDERS } from './providers/index.js';
 import { eligibleCapture } from './providers/selection.js';
@@ -46,17 +54,26 @@ function observeSettings(settings) {
   return captureEpoch;
 }
 
-async function assertCurrentCapture(epoch) {
-  observeSettings(await getSettings());
-  if (epoch !== captureEpoch) throw localError('selection_changed');
+async function assertCurrentCapture(epoch, provider, listKey) {
+  const latest = await getSettings();
+  observeSettings(latest);
+  if (
+    epoch !== captureEpoch ||
+    (provider === 'chatgpt' && JSON.stringify(latest.chatgptSyncList) !== listKey)
+  )
+    throw localError('selection_changed');
 }
 
 async function getSettings() {
-  const { settings } = await chrome.storage.local.get('settings');
+  const [{ settings }, { chatgptSyncList }] = await Promise.all([
+    chrome.storage.local.get('settings'),
+    chrome.storage.local.get('chatgptSyncList'),
+  ]);
   // Keep raw pairing fields: an array or other malformed value must never
   // become a valid host name through display-oriented string normalization.
   return {
     ...normalizeSettings(settings),
+    chatgptSyncList: readSyncList(chatgptSyncList),
     nativeHost: settings?.nativeHost,
     archiveId: settings?.archiveId,
   };
@@ -247,7 +264,7 @@ async function ensureAlarm() {
   for (const [name, entry] of Object.entries(status)) {
     if (
       !settings.providers[name] ||
-      !eligibleCapture(name, settings.captureTypes) ||
+      !eligibleCapture(name, settings.captureTypes, settings.chatgptSyncList) ||
       (!entry?.continuationPending && !entry?.nextRetryMs) ||
       (settings.autoPaused && !entry.manualContinuation)
     )
@@ -270,7 +287,11 @@ async function runSync(
   await startupReady;
   const settings = await getSettings();
   const epoch = observeSettings(settings);
-  if (!Object.values(settings.captureTypes).some(Boolean))
+  const listKey = JSON.stringify(settings.chatgptSyncList);
+  if (
+    !Object.values(settings.captureTypes).some(Boolean) &&
+    !(settings.providers.chatgpt && hasItems(settings.chatgptSyncList))
+  )
     return {
       ok: false,
       code: 'no_capture_types',
@@ -292,7 +313,7 @@ async function runSync(
   const eligible = Object.entries(PROVIDERS).filter(
     ([name]) =>
       settings.providers[name] &&
-      eligibleCapture(name, settings.captureTypes) &&
+      eligibleCapture(name, settings.captureTypes, settings.chatgptSyncList) &&
       (!onlyProvider || name === onlyProvider),
   );
   const selected = eligible.filter(([name]) => !activeProviders.has(name));
@@ -348,13 +369,25 @@ async function runSync(
     const settled = await Promise.allSettled(
       selected.map(async ([name, provider]) => {
         const startedAt = Date.now();
+        const guard = () => assertCurrentCapture(epoch, name, listKey);
+        // A changed list invalidates both discovery pages and queued detail IDs.
+        // Do not duplicate the saved IDs into the public status summary.
+        const listHash =
+          name === 'chatgpt' && listKey
+            ? Array.from(
+                new Uint8Array(
+                  await crypto.subtle.digest('SHA-256', new TextEncoder().encode(listKey)),
+                ),
+                (b) => b.toString(16).padStart(2, '0'),
+              ).join('')
+            : null;
         const captureScope = connection.archiveId
           ? JSON.stringify([
               connection.archiveId,
               name,
               profile,
               settings.account,
-              settings.captureTypes,
+              listHash ? { savedList: listHash } : settings.captureTypes,
             ])
           : null;
         const scopeChanged = !captureScope || status[name]?.captureScope !== captureScope;
@@ -428,19 +461,20 @@ async function runSync(
               unchanged: (entry.progress.unchanged ?? 0) + result.unchanged,
             });
           },
-          () => assertCurrentCapture(epoch),
+          guard,
           connection.archiveId,
         );
         try {
-          await assertCurrentCapture(epoch);
+          await guard();
           const result = await provider.sync({
             state: entry.state ?? {},
             captureTypes: { ...settings.captureTypes },
+            ...(name === 'chatgpt' ? { chatgptSyncList: settings.chatgptSyncList } : {}),
             push,
             report,
-            guard: () => assertCurrentCapture(epoch),
+            guard,
             checkpoint: async (state) => {
-              await assertCurrentCapture(epoch);
+              await guard();
               entry.state = state;
               entry.continuationPending = Boolean(state?.pending || state?.discovery);
               await setStatusEntry(name, entry);
@@ -448,7 +482,7 @@ async function runSync(
             // Provider diagnostics can contain account or conversation text.
             log: () => {},
           });
-          await assertCurrentCapture(epoch);
+          await guard();
           entry.state = result.state;
           entry.selection = Object.hasOwn(result, 'selection')
             ? result.selection
@@ -549,7 +583,100 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.action.onClicked.addListener(() => runSync('manual'));
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// Serialize list edits across tabs. Page code cannot invoke this API; the only
+// content-script message accepted is an ID-only Add from our top-level ChatGPT script.
+let listWrites = Promise.resolve();
+function settingsSender(sender) {
+  return (
+    sender.id === chrome.runtime.id &&
+    sender.url?.split(/[?#]/, 1)[0] === chrome.runtime.getURL('options.html')
+  );
+}
+async function inspectList(sender) {
+  if (!settingsSender(sender)) throw new Error('Open extension Settings.');
+  const principal = sessionPrincipal(await getChatGPTSession());
+  const { chatgptSyncList } = await chrome.storage.local.get('chatgptSyncList');
+  const entry = readSyncList(chatgptSyncList)?.entries.find(
+    (e) => e.accountId === principal.accountId && e.userId === principal.userId,
+  );
+  return { ok: true, entry: entry ?? null };
+}
+function changeList(message, sender, remove) {
+  if (sender.id !== chrome.runtime.id) throw new Error('Untrusted extension sender.');
+  if (remove) {
+    if (!settingsSender(sender)) throw new Error('Open extension Settings to remove items.');
+  } else if (
+    !Number.isInteger(sender.tab?.id) ||
+    sender.frameId !== 0 ||
+    new URL(sender.url).origin !== 'https://chatgpt.com' ||
+    (sender.origin && sender.origin !== 'https://chatgpt.com')
+  ) {
+    throw new Error('Open ChatGPT and select rows from its sidebar.');
+  }
+  const fields = [
+    'type',
+    'projectIds',
+    'conversationIds',
+    ...(remove ? ['accountId', 'userId'] : []),
+  ];
+  if (Object.keys(message).some((k) => !fields.includes(k)))
+    throw new Error('Unexpected selection fields.');
+  const ids = itemIds(message);
+  if (!ids.projectIds.length && !ids.conversationIds.length)
+    throw new Error('Select at least one item.');
+  // Resolve the active session at the user's gesture, not later when a queued write runs.
+  const identity = getChatGPTSession().then(sessionPrincipal);
+  // Attach a rejection handler immediately even while an earlier edit holds the write queue.
+  const resolved = identity.then(
+    (principal) => ({ principal }),
+    (error) => ({ error }),
+  );
+  const next = listWrites
+    .catch(() => {})
+    .then(async () => {
+      const { principal, error } = await resolved;
+      if (error) throw error;
+      if (
+        remove &&
+        (principal.userId !== message.userId || principal.accountId !== message.accountId)
+      )
+        throw new Error('Active workspace changed.');
+      const { chatgptSyncList } = await chrome.storage.local.get('chatgptSyncList');
+      const saved = editSyncList(chatgptSyncList, principal, ids, remove);
+      if (JSON.stringify(saved) !== JSON.stringify(chatgptSyncList))
+        await chrome.storage.local.set({ chatgptSyncList: saved });
+      return { ok: true };
+    });
+  listWrites = next;
+  return next;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'GET_CHATGPT_SYNC_SELECTION') {
+    inspectList(sender).then(sendResponse, () =>
+      sendResponse({ ok: false, error: 'Could not verify your ChatGPT workspace.' }),
+    );
+    return true;
+  }
+  const add = message?.type === 'ADD_CHATGPT_SYNC_SELECTION';
+  if (add || message?.type === 'REMOVE_CHATGPT_SYNC_SELECTION') {
+    Promise.resolve()
+      .then(() => changeList(message, sender, !add))
+      .then(sendResponse, () =>
+        sendResponse({
+          ok: false,
+          error: add
+            ? 'Could not save. Check your ChatGPT sign-in and active workspace, then select the rows again.'
+            : 'Could not remove the selected item.',
+        }),
+      );
+    return true;
+  }
+  // Website content scripts have no authority to initiate capture or pairing.
+  if (sender.url && !sender.url.startsWith('chrome-extension://' + chrome.runtime.id + '/')) {
+    sendResponse({ ok: false, error: 'Use the extension to perform this action.' });
+    return false;
+  }
   // Hold the channel only through the bounded local authentication check.
   // Once a run starts, report progress through storage instead of waiting for
   // provider requests that can outlive the channel or this worker.

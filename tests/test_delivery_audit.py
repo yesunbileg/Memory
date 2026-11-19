@@ -3,7 +3,6 @@
 import asyncio
 import importlib.util
 import json
-import threading
 from pathlib import Path
 
 import pytest
@@ -29,44 +28,6 @@ def test_status_typo_has_no_filesystem_side_effect(tmp_path, capsys):
     assert cli.main(["--db", str(directory / "archive.sqlite"), "status"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "archive_not_found"
     assert not directory.exists()
-
-
-def test_slow_poll_does_not_block_next_local_scan_and_persists_health(tmp_path, monkeypatch):
-    db = tmp_path / "archive.sqlite"
-    with Store(db) as store:
-        store.set_setting("notebook_id", "demo")
-    entered, released = threading.Event(), threading.Event()
-    finished = threading.Event()
-    observed = []
-
-    async def slow_sync(store):
-        entered.set()
-        await asyncio.to_thread(released.wait, 1)
-        finished.set()
-        return {"status": {"sync_status": "up_to_date"}}
-
-    def scan(*args, **kwargs):
-        observed.append(entered.is_set() and not finished.is_set())
-        return {"failed_files": 0}
-
-    def tick(_seconds):
-        assert entered.wait(1)
-        if len(observed) == 2:
-            released.set()
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "sync_archive", slow_sync)
-    monkeypatch.setattr(cli, "collect_into", scan)
-    monkeypatch.setattr(cli, "_sleep", tick)
-    monkeypatch.setattr(cli.os, "getloadavg", lambda: (0, 0, 0))
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            cli._watch(cli.parser().parse_args(["--db", str(db), "watch", "--codex-path", "x"]))
-    finally:
-        released.set()
-    with Store(db) as store:
-        assert observed == [False, True]
-        assert store.status()["watch"]["sources"]["codex"]["last_successful_scan"]
 
 
 def test_live_demo_refuses_existing_mixed_approved_archive_before_provider(tmp_path, monkeypatch):

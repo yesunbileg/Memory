@@ -1,3 +1,4 @@
+import { readSyncList, hasItems, sessionPrincipal } from '../chatgpt-sync-list.js';
 import { drainSelected, preparePrincipalRun } from './queue.js';
 // ChatGPT provider: syncs conversations (personal + Teams workspaces) via the
 // chatgpt.com backend API, authenticated with the browser session cookies.
@@ -27,10 +28,10 @@ const OVERLAP_MS = 5 * 60 * 1000;
 // Pace detail requests to stay under ChatGPT's rate limit. Backoff in
 // fetchJson handles bursts, but pacing avoids tripping 429 in the first place.
 
-async function getAccessToken() {
-  const data = await fetchJson(`${BASE}/api/auth/session`);
+export async function getChatGPTSession() {
+  const data = await fetchJson(`${BASE}/api/auth/session`, { cache: 'no-store' });
   if (!data?.accessToken) throw new NotLoggedInError('chatgpt.com');
-  return data.accessToken;
+  return data;
 }
 
 function authHeaders(token, accountId) {
@@ -353,9 +354,49 @@ function toParsedConversation(detail, conversationId, accountId) {
   };
 }
 
+// Metadata that explicitly marks an item as private or unavailable overrides its sidebar link.
+function excluded(item) {
+  return [item, item?.metadata].some(
+    (value) =>
+      value &&
+      ([
+        'is_archived',
+        'archived',
+        'is_locked',
+        'locked',
+        'is_hidden',
+        'hidden',
+        'is_deleted',
+        'deleted',
+        'is_trashed',
+        'trashed',
+      ].some((key) => value[key] === true) ||
+        value.is_visible === false ||
+        value.is_visible_in_sidebar === false),
+  );
+}
+
+function explicitProjects(item) {
+  return [item, item?.metadata]
+    .filter(Boolean)
+    .flatMap((s) => [
+      s.project_id,
+      s.project_uuid,
+      s.folder_id,
+      s.folder_uuid,
+      s.project?.id,
+      s.project?.uuid,
+      s.folder?.id,
+      s.folder?.uuid,
+      typeof s.gizmo_id === 'string' && s.gizmo_id.startsWith('g-p-') ? s.gizmo_id : null,
+    ])
+    .filter((id) => typeof id === 'string' && id);
+}
+
 export async function syncChatGPT({
   state = {},
   captureTypes,
+  chatgptSyncList,
   push,
   register = async () => {},
   log = () => {},
@@ -365,7 +406,8 @@ export async function syncChatGPT({
 }) {
   const policy = normalizeCaptureTypes(captureTypes);
   const selection = createSelectionSummary();
-  if (!Object.values(policy).some(Boolean)) {
+  const saved = readSyncList(chatgptSyncList);
+  if (saved ? !hasItems(saved) : !Object.values(policy).some(Boolean)) {
     await report({
       phase: 'complete',
       detected: 0,
@@ -376,9 +418,25 @@ export async function syncChatGPT({
     return { state, conversations: 0, selection, selectionWarning: null };
   }
   await report({ phase: 'discovering', selection });
-  const token = await getAccessToken();
+  const session = await getChatGPTSession();
+  const token = session.accessToken;
+  const principal = saved ? sessionPrincipal(session) : null;
+  const explicit = saved?.entries.find(
+    (entry) => entry.accountId === principal.accountId && entry.userId === principal.userId,
+  );
+  const noMatch = async () => {
+    const selectionWarning = 'No saved selection is available for the signed-in ChatGPT workspace.';
+    await report({ phase: 'attention', detected: 0, processed: 0, selection, selectionWarning });
+    return { state: {}, conversations: 0, selection, selectionWarning };
+  };
+  if (saved && !explicit) return noMatch();
   const discovery = await listAccounts(token);
-  const accounts = discovery.accounts;
+  const accounts = explicit
+    ? discovery.accounts.filter((a) => a.id === explicit.accountId)
+    : discovery.accounts;
+  if (!accounts.length) return noMatch();
+  const directIds = new Set(explicit?.conversationIds);
+  const projectIds = new Set(explicit?.projectIds);
   const newState = { ...state, accounts: discovery.incomplete ? { ...state.accounts } : {} };
   const warnings = new Set();
   if (discovery.incomplete)
@@ -393,6 +451,7 @@ export async function syncChatGPT({
     checkpoint,
     report,
     selection,
+    scope: explicit,
   });
   if (!resumed)
     for (const account of accounts) {
@@ -408,6 +467,7 @@ export async function syncChatGPT({
       const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
       const ids = [];
       const candidates = new Map();
+      const blocked = new Set();
       const projectGizmoIds = new Set();
       let catalogAvailable = false;
       let projectMembershipAvailable = false;
@@ -415,6 +475,11 @@ export async function syncChatGPT({
       const add = (item, context = {}) => {
         if (typeof item?.id !== 'string' || !item.id)
           throw new Error('ChatGPT conversation identifier is unavailable');
+        if (
+          explicit &&
+          (excluded(item) || explicitProjects(item).some((id) => !projectIds.has(id)))
+        )
+          blocked.add(item.id);
         const previous = candidates.get(item.id);
         candidates.set(item.id, {
           item: { ...previous?.item, ...item },
@@ -425,13 +490,14 @@ export async function syncChatGPT({
         // Organized membership can change without changing message timestamps.
         // Scan list metadata completely in selective mode, before fetching text.
         const selective = policy.projects || policy.pinned || policy.agents;
-        for await (const item of listUpdatedConversations(
-          token,
-          account.id,
-          selective ? null : since,
-          pager.read,
-        ))
-          add(item, { recents: true });
+        if (!explicit || directIds.size)
+          for await (const item of listUpdatedConversations(
+            token,
+            account.id,
+            explicit || selective ? null : since,
+            pager.read,
+          ))
+            if (!explicit || directIds.has(item.id)) add(item, { recents: true });
       } catch (error) {
         if (error === pager.pause) return pager.continuation();
         if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable')
@@ -442,10 +508,14 @@ export async function syncChatGPT({
         );
         log(`chatgpt: conversation discovery unavailable: ${error.message}`);
       }
-      if (policy.projects || policy.agents) {
+      if (explicit ? projectIds.size : policy.projects || policy.agents) {
         let projects = [];
         try {
           projects = await listProjectGizmos(token, account.id, pager.read);
+          if (explicit) {
+            const unavailable = new Set(projects.filter(excluded).map((project) => project.id));
+            projects = projects.filter((project) => !unavailable.has(project.id));
+          }
           for (const project of projects) projectGizmoIds.add(project.id);
           catalogAvailable = true;
         } catch (error) {
@@ -458,9 +528,18 @@ export async function syncChatGPT({
           );
           log(`chatgpt: project sidebar unavailable: ${error.message}`);
         }
-        if (policy.projects && catalogAvailable) {
+        if (
+          explicit &&
+          catalogAvailable &&
+          [...projectIds].some((id) => !projectGizmoIds.has(id))
+        ) {
+          failures++;
+          warnings.add('Some saved ChatGPT projects are no longer available in this workspace.');
+        }
+        if ((explicit || policy.projects) && catalogAvailable) {
           let complete = true;
           for (const project of projects) {
+            if (explicit && !projectIds.has(project.id)) continue;
             try {
               for await (const item of listProjectConversations(
                 token,
@@ -492,10 +571,18 @@ export async function syncChatGPT({
           ...context,
           projectGizmoIds,
           projectMembershipAvailable,
-          gizmoClassificationAvailable: catalogAvailable || !policy.agents,
+          gizmoClassificationAvailable: Boolean(explicit) || catalogAvailable || !policy.agents,
         });
+        if (explicit)
+          decision.selected =
+            !blocked.has(item.id) &&
+            (projectIds.has(context.projectId) ||
+              (directIds.has(item.id) &&
+                decision.categories.length === 1 &&
+                decision.categories[0] === 'recents'));
         recordSelection(selection, decision);
         if (
+          !explicit &&
           !policy.recents &&
           !decision.selected &&
           decision.unavailable.some((category) => policy[category])
@@ -537,6 +624,19 @@ export async function syncChatGPT({
       headers: authHeaders(token, principalId),
     });
     if (detail?.id != null && detail.id !== id) throw new Error('Wrong conversation');
+    if (explicit) {
+      const memberships = explicitProjects(detail);
+      if (excluded(detail) || memberships.some((pid) => !projectIds.has(pid))) return null;
+      // Recents can move after discovery or while a detail queue is paused.
+      // An explicit chat ID is not permission to capture a different project.
+      if (directIds.has(id)) {
+        if (
+          !memberships.length &&
+          selectConversation(detail, policy).categories.some((k) => k !== 'recents')
+        )
+          return null;
+      }
+    }
     return toParsedConversation(detail, id, principalId ?? unverifiedPrincipal);
   };
   return drainSelected({

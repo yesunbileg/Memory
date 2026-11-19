@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${PLUGIN_ROOT}/scripts/run.py\" codex",
+            "timeout": 120,
+            "statusMessage": "Saving this Codex conversation locally"
+          }
+        ]
+      }
+    ]
+  }
+}

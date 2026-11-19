@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from extension_sidebar_check import verify_sidebar
 from extension_ui_check import EXTENSION, LAYOUT, assert_layout, browser_path
 from playwright.async_api import async_playwright
 
@@ -96,10 +97,12 @@ async def verify(executable):
                   return {blocked:d.getElementById('sync').disabled, reason:d.getElementById('plan-hint').textContent};
                 }""")
                 assert result["blocked"] and "Ordinary Recents" in result["reason"], result
+                await verify_sidebar(context, worker, page, folder / "fixture.sqlite")
                 print(
                     json.dumps(
                         {
                             "installed_mv3_toolbar": "passed",
+                            "installed_sidebar_and_scoped_native_capture": "passed",
                             "native_archive_pairing": "passed",
                             "toolbar_width": layout["width"],
                         }

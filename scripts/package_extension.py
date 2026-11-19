@@ -37,6 +37,17 @@ def runtime_assets(source: Path, manifest: dict) -> dict[str, Path]:
         *manifest.get("icons", {}).values(),
         *(icons.values() if isinstance(icons, dict) else [icons]),
     ]
+    content_scripts = manifest.get("content_scripts", [])
+    if not isinstance(content_scripts, list):
+        raise ValueError("content_scripts must be a list")
+    for entry in content_scripts:
+        if not isinstance(entry, dict):
+            raise ValueError("content_scripts entries must be objects")
+        for key in ("js", "css"):
+            assets = entry.get(key, [])
+            if not isinstance(assets, list) or any(not isinstance(name, str) for name in assets):
+                raise ValueError(f"content_scripts {key} must be a list of runtime paths")
+            stack.extend(assets)
     allowed = {
         p.relative_to(source).as_posix() for pattern in PATTERNS for p in source.glob(pattern)
     }
