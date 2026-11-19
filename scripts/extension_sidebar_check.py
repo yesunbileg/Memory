@@ -20,6 +20,19 @@ MEMBER = "88888888-8888-4888-8888-888888888888"
 PROVIDER = """({project, recent, member}) => {
   self.fixtureReads = [];
   self.fixtureSignedIn = false;
+  self.fixtureNative = [];
+  const sendNative = chrome.runtime.sendNativeMessage.bind(chrome.runtime);
+  chrome.runtime.sendNativeMessage = async (host, packet) => {
+    const kind = packet.op ?? 'ingest';
+    try {
+      const result = await sendNative(host, packet);
+      self.fixtureNative.push([kind, result?.error ?? 'accepted']);
+      return result;
+    } catch (error) {
+      self.fixtureNative.push([kind, error.message]);
+      throw error;
+    }
+  };
   self.fetch = async (resource) => {
     const url = new URL(resource.url ?? resource);
     self.fixtureReads.push(url.pathname);
@@ -151,8 +164,19 @@ async def verify_sidebar(context, worker, options, db):
     }""",
         polling=50,
     )
-    assert archived(db) == sorted([MEMBER, RECENT])
     reads = await worker.evaluate("fixtureReads")
+    records = archived(db)
+    state = await options.evaluate(
+        "async()=> (await chrome.storage.local.get('status')).status.chatgpt"
+    )
+    assert records == sorted([MEMBER, RECENT]), {
+        "records": records,
+        "reads": reads,
+        "native": await worker.evaluate("fixtureNative"),
+        "failure": state.get("lastErrorCode"),
+        "warning": state.get("selectionWarning"),
+        "progress": state.get("progress"),
+    }
     assert [
         p for p in reads if p.startswith("/backend-api/gizmos/") and p.endswith("/conversations")
     ] == [f"/backend-api/gizmos/{PROJECT}/conversations"]
