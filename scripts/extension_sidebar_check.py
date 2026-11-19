@@ -3,6 +3,7 @@
 Called by extension_toolbar_check.py after it pairs the real extension with an empty native host.
 """
 
+import asyncio
 import re
 import sqlite3
 from contextlib import closing
@@ -67,6 +68,14 @@ PROVIDER = """({project, recent, member}) => {
 def archived(db):
     with closing(sqlite3.connect(db)) as connection:
         return sorted(row[0] for row in connection.execute("SELECT external_id FROM conversations"))
+
+
+async def wait_for_storage(page, predicate):
+    # Playwright's wait_for_function tests the Promise itself for truthiness.
+    # Evaluate and await each storage check before deciding whether to retry.
+    async with asyncio.timeout(15):
+        while not await page.evaluate(predicate):
+            await asyncio.sleep(0.05)
 
 
 async def verify_sidebar(context, worker, options, db):
@@ -137,12 +146,12 @@ async def verify_sidebar(context, worker, options, db):
     assert not archived(db)
     await worker.evaluate("self.fixtureSignedIn=true")
     await add.click()
-    await options.wait_for_function(
+    await wait_for_storage(
+        options,
         """async () => {
       const {chatgptSyncList}=await chrome.storage.local.get('chatgptSyncList');
       return !!chatgptSyncList?.entries?.length;
     }""",
-        polling=50,
     )
     stored = await options.evaluate("async()=>(await chrome.storage.local.get()).chatgptSyncList")
     entry = stored["entries"][0]
@@ -157,19 +166,19 @@ async def verify_sidebar(context, worker, options, db):
         "()=>chrome.runtime.sendMessage({type:'syncProvider',provider:'chatgpt'})"
     )
     assert result["ok"], result
-    await options.wait_for_function(
+    await wait_for_storage(
+        options,
         """async () => {
       const {status}=await chrome.storage.local.get('status');
       return status?.chatgpt?.running === false;
     }""",
-        polling=50,
     )
     reads = await worker.evaluate("fixtureReads")
     records = archived(db)
     state = await options.evaluate(
         "async()=> (await chrome.storage.local.get('status')).status.chatgpt"
     )
-    assert records == sorted([MEMBER, RECENT]), {
+    assert state["progress"]["phase"] == "complete" and records == sorted([MEMBER, RECENT]), {
         "records": records,
         "reads": reads,
         "native": await worker.evaluate("fixtureNative"),
