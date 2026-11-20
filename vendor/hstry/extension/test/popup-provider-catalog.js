@@ -116,7 +116,7 @@ for (const [provider, mod, catalog, sync] of [
           title: 'Workspace',
           projects: [{ id: 'project', title: 'Group' }],
           conversations: [
-            { id: f.plain, title: 'Ordinary' },
+            { id: f.plain, title: 'Ordinary', ...(provider === 'chatgpt' && { isRecent: true }) },
             { id: f.child, title: 'Child', projectId: 'project' },
           ],
         },

@@ -433,6 +433,7 @@ async function popupPrincipals(context) {
 
 const popup = (context) => ({
   name: 'ChatGPT',
+  recents: true,
   field: 'accounts',
   adapter: 'chatgpt-web',
   principals: () => popupPrincipals(context),

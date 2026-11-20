@@ -105,6 +105,7 @@ Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the 
 | What you do | What happens |
 | --- | --- |
 | Check a project in the sidebar | Saves the project ID immediately. At sync, its eligible chats are included, even when the project was collapsed or a chat was not visible. Gemini offers chats only. |
+| Check the **Recents** heading on ChatGPT | Includes all ordinary Recent chats in that account on each sync, including newly added ones. Pinned, project, GPT, locked and archived chats are excluded from this group. Turning it off keeps individual selections. |
 | Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |
 | Uncheck an item or turn off List mode | Unchecking removes that explicit selection. Turning the mode off hides the controls without changing the list. Neither action deletes archived content. |
 | Enable the provider and click **Sync now** | Fetches the saved items into the paired **local SQLite archive**. Enabled automatic checks use the same saved list. Choosing an item does not start a sync or approve a Google upload. |

@@ -13,8 +13,10 @@ const fail = (code) => {
 };
 const empty = () => ({ entries: [] });
 const ordered = (ids) => [...new Set(ids)].sort();
+export const hasScopeItems = (entry) =>
+  entry.includeRecents === true || entry.projectIds.length > 0 || entry.conversationIds.length > 0;
 
-function normalize(raw, stored = false) {
+function normalize(raw, provider) {
   if (!record(raw) || !Array.isArray(raw.entries) || raw.entries.length > MAX_OWNERS)
     fail('selection_invalid');
   let count = 0;
@@ -25,17 +27,20 @@ function normalize(raw, stored = false) {
     owners.add(e.principalId);
     if (
       Object.keys(e).some(
-        (k) => !['principalId', ...keys, ...(stored ? ['legacyConversationIds'] : [])].includes(k),
+        (k) =>
+          !['principalId', ...keys, 'legacyConversationIds'].includes(k) &&
+          !(provider === 'chatgpt' && k === 'includeRecents' && typeof e[k] === 'boolean'),
       )
     )
       fail('selection_invalid');
     const next = { principalId: e.principalId };
+    if (e.includeRecents === true) next.includeRecents = true;
     for (const k of keys) {
       if (!Array.isArray(e[k]) || (count += e[k].length) > MAX_IDS || !e[k].every(validId))
         fail('selection_invalid');
       next[k] = ordered(e[k]);
     }
-    if (stored && own(e, 'legacyConversationIds')) {
+    if (own(e, 'legacyConversationIds')) {
       const ids = new Set(next.conversationIds);
       if (
         !Array.isArray(e.legacyConversationIds) ||
@@ -58,7 +63,7 @@ export function scopeFor(provider, rawScopes, legacy) {
   if (rawScopes !== undefined && !record(rawScopes)) return { scope: empty() };
   if (rawScopes && own(rawScopes, provider)) {
     try {
-      return { scope: normalize(rawScopes[provider], true) };
+      return { scope: normalize(rawScopes[provider], provider) };
     } catch {
       return { scope: empty() };
     }
@@ -79,8 +84,7 @@ export function scopeFor(provider, rawScopes, legacy) {
   }
   return { scope: empty() };
 }
-export const nonempty = (scope) =>
-  scope?.entries.some((e) => e.projectIds.length || e.conversationIds.length) === true;
+export const nonempty = (scope) => scope?.entries.some(hasScopeItems) === true;
 
 async function currentSettings(provider) {
   const [{ providerSyncScopes }, { chatgptSyncList }] = await Promise.all([
@@ -90,7 +94,7 @@ async function currentSettings(provider) {
   // Refuse to replace an unreadable saved list with a partially reconstructed one.
   if (providerSyncScopes !== undefined && !record(providerSyncScopes)) fail('selection_invalid');
   if (providerSyncScopes && own(providerSyncScopes, provider))
-    return { providerSyncScopes, scope: normalize(providerSyncScopes[provider], true) };
+    return { providerSyncScopes, scope: normalize(providerSyncScopes[provider], provider) };
   return { providerSyncScopes, ...scopeFor(provider, providerSyncScopes, chatgptSyncList) };
 }
 
@@ -105,17 +109,24 @@ export function setPageItem(provider, principalId, kind, id, checked, sameId, ve
       const { scope, providerSyncScopes, legacy } = await currentSettings(provider);
       const entries = new Map(scope.entries.map((e) => [e.principalId, e]));
       const old = entries.get(principalId) ?? { principalId, projectIds: [], conversationIds: [] };
-      const key = kind === 'project' ? 'projectIds' : 'conversationIds';
-      const next = { ...old, [key]: old[key].filter((v) => !sameId(v, id)) };
-      if (checked) next[key].push(id);
+      const next = { ...old };
+      if (kind === 'recents') {
+        if (provider !== 'chatgpt' || id !== 'recents') fail('selection_invalid');
+        if (checked) next.includeRecents = true;
+        else delete next.includeRecents;
+      } else {
+        const key = kind === 'project' ? 'projectIds' : 'conversationIds';
+        next[key] = old[key].filter((v) => !sameId(v, id));
+        if (checked) next[key].push(id);
+      }
       if (kind === 'conversation' && old.legacyConversationIds) {
         const untouched = old.legacyConversationIds.filter((v) => !sameId(v, id));
         if (untouched.length) next.legacyConversationIds = untouched;
         else delete next.legacyConversationIds;
       }
-      if (next.projectIds.length || next.conversationIds.length) entries.set(principalId, next);
+      if (hasScopeItems(next)) entries.set(principalId, next);
       else entries.delete(principalId);
-      const saved = normalize({ entries: [...entries.values()] }, true);
+      const saved = normalize({ entries: [...entries.values()] }, provider);
       await verify();
       if (!legacy && JSON.stringify(saved) === JSON.stringify(scope)) return;
       try {

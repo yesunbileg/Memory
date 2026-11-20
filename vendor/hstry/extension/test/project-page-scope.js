@@ -137,6 +137,8 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
         row('overlap', 'Again in Recents', { project_id: 'chosen' }),
         row('standalone', 'Direct'),
         row('unselected', 'Not checked'),
+        row('pinned', 'Pinned', { is_pinned: true }),
+        row('moved', 'Was in Recents'),
       ];
       return Response.json(gpt ? { items: recent, total: recent.length } : { data: recent });
     }
@@ -153,12 +155,17 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
       ? { id, current_node: 'm', mapping: { m: { id: 'm', parent: null, message: visible } } }
       : { uuid: id, chat_messages: [{ uuid: 'm', sender: 'human', text: 'Visible' }] };
     if (id === 'locked-at-read') item.is_locked = true;
+    if (id === 'moved') item.is_pinned = true;
     return Response.json(item);
   });
-  const run = (projectIds, conversationIds, state = {}) =>
+  const run = (projectIds, conversationIds, state = {}, includeRecents = false) =>
     sync({
       state,
-      selectedScope: { entries: [{ principalId, projectIds, conversationIds }] },
+      selectedScope: {
+        entries: [
+          { principalId, projectIds, conversationIds, ...(includeRecents && { includeRecents }) },
+        ],
+      },
       push: async (_source, _adapter, batch) => {
         sent.push(...batch.map((c) => c.externalId));
         return batch.length;
@@ -166,6 +173,13 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
     });
   return { run, sent, reads, pages };
 }
+
+test('ChatGPT bulk Recents discovers current ordinary chats and excludes projects, pins, and chats that moved', async (t) => {
+  const f = fixture(t, 'ChatGPT', syncChatGPT);
+  await f.run([], [], {}, true);
+  assert.deepEqual(f.reads.toSorted(), ['moved', 'standalone', 'unselected']);
+  assert.deepEqual(f.sent.toSorted(), ['standalone', 'unselected']);
+});
 
 for (const [provider, sync] of [
   ['ChatGPT', syncChatGPT],

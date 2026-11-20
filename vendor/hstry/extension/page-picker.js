@@ -27,6 +27,7 @@
   const privateLabel =
     /^(?:(?:locked|archived)(?:\s+(?:chats?|conversations?|projects?))?|(?:түгжээтэй|түгжигдсэн|архивласан)\s+чатууд)(?:\s*\(\d+\))?$/i;
   const privateSuffix = /,\s*(?:locked|archived)(?: chat)?(?:,|$)/i;
+  const recentsHeading = /^(?:recents|recent chats|сүүлийн чатууд)$/iu;
   const nativeProjectRow = 'data-app-action-sidebar-project-row';
   const nativeProjectId = 'data-app-action-sidebar-project-id';
   const selectors = {
@@ -129,21 +130,25 @@
       ':is(' + selector + ',' + heads + '):not(:is(' + outside + '),:is(' + outside + ') *)';
     for (const el of document.querySelectorAll(query)) {
       if (!visible(el) || !geometrySidebar(el)) continue;
+      let item;
       if (!el.matches(selector)) {
         const root = el.closest(nav);
         if (!root) continue;
         const name = label(el);
         const locked = privateLabel.test(name);
         const closed = el.getAttribute('aria-expanded') === 'false';
-        const area = el.closest(group) || root;
-        areas.set(area, locked && !closed);
-        if (locked && !closed) {
-          const controlled = document.getElementById(el.getAttribute('aria-controls') || '');
-          if (controlled) areas.set(controlled, true);
+        if (s.provider === 'chatgpt' && recentsHeading.test(name)) {
+          item = { kind: 'recents', id: 'recents' };
+        } else {
+          const area = el.closest(group) || root;
+          areas.set(area, locked && !closed);
+          if (locked && !closed) {
+            const controlled = document.getElementById(el.getAttribute('aria-controls') || '');
+            if (controlled) areas.set(controlled, true);
+          }
+          continue;
         }
-        continue;
-      }
-      const item = itemOf(el, href);
+      } else item = itemOf(el, href);
       if (!item) continue;
       let blocked = !!el.closest(marked);
       const aria = el.getAttribute('aria-label') || '';
@@ -214,14 +219,19 @@
       c.box.indeterminate = !!state.inherited && !state.checked;
       c.box.setAttribute('aria-busy', String(s.pending.has(k)));
       const title = label(row) || (i.kind === 'project' ? 'Untitled project' : 'Untitled chat');
-      const ident = (i.kind === 'project' ? 'Project: ' : 'Chat: ') + title;
+      const ident =
+        i.kind === 'recents'
+          ? 'All Recent chats'
+          : (i.kind === 'project' ? 'Project: ' : 'Chat: ') + title;
       const help = s.pending.has(k)
         ? 'Saving…'
-        : i.kind === 'project'
-          ? 'Includes every eligible chat in this project.'
-          : state.inherited
-            ? 'Included through its project. The checkbox also lets you save this chat separately.'
-            : 'Select or remove this individual chat.';
+        : i.kind === 'recents'
+          ? 'Includes all ordinary Recent chats, including new ones.'
+          : i.kind === 'project'
+            ? 'Includes every eligible chat in this project.'
+            : state.inherited
+              ? 'Included through a selected group. The checkbox also lets you save this chat separately.'
+              : 'Select or remove this individual chat.';
       c.box.setAttribute('aria-label', ident + '. ' + help);
       c.box.title = ident + ' — ' + help;
     }

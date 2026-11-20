@@ -107,6 +107,34 @@ beforeEach(() => {
     };
   }
 });
+test('ChatGPT Recents is saved as a group and leaves individual picks intact when turned off', async () => {
+  const sender = from(1, 'document-one', 'https://chatgpt.com/');
+  const recents = row('recents', 'recents');
+  const existing = group();
+  existing.projects[0].id = 'g-p-' + project;
+  existing.conversations.find((chat) => chat.id === child).projectId = 'g-p-' + project;
+  existing.conversations.find((chat) => chat.id === ordinary).isRecent = true;
+  catalog = { entries: [existing] };
+  const first = await read([recents, c(ordinary), c(child)], undefined, sender);
+  assert.equal(first.ok, true);
+  assert.equal(first.items.find((item) => item.kind === 'recents')?.checked, false);
+  assert.equal((await set(c(ordinary), true, first.token, sender)).ok, true);
+  assert.equal((await set(recents, true, first.token, sender)).ok, true);
+  let result = await read([recents, c(ordinary), c(child)], first.token, sender);
+  assert.equal(result.items.find((item) => item.kind === 'recents').checked, true);
+  assert.equal(result.items.find((item) => item.id === ordinary).inherited, true);
+  assert.equal(result.items.find((item) => item.id === child).inherited, false);
+  assert.equal((await set(recents, false, first.token, sender)).ok, true);
+  result = await read([recents, c(ordinary)], first.token, sender);
+  assert.equal(result.items.find((item) => item.id === ordinary).checked, true);
+  assert.equal(result.items.find((item) => item.id === ordinary).inherited, false);
+  assert.equal(
+    (await read([recents])).ok,
+    false,
+    'other providers cannot enable the ChatGPT group',
+  );
+});
+
 test('only visible, verified IDs are returned with separate direct and inherited state', async () => {
   mem.providerSyncScopes = {
     gemini: scope(entry('gemini', [], ['untouched'])),

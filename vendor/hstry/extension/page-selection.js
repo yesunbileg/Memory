@@ -33,6 +33,7 @@ function normalizedId(provider, kind, id) {
   return uuid.test(raw) ? raw.toLowerCase().replaceAll('-', '') : null;
 }
 function key(provider, kind, id) {
+  if (kind === 'recents') return provider === 'chatgpt' && id === 'recents' ? 'recents' : null;
   if (kind !== 'project' && kind !== 'conversation') return null;
   const value = normalizedId(provider, kind, id);
   return value && (kind === 'project' ? 'p:' : 'c:') + value;
@@ -126,7 +127,13 @@ async function makeProof(ctx, adapter) {
         key(ctx.provider, 'conversation', chat?.id) &&
         (chat.projectId == null || known.has(chat.projectId))
       ) {
-        conversations.push(chat.projectId == null ? [chat.id] : [chat.id, chat.projectId]);
+        conversations.push(
+          ctx.provider === 'chatgpt' && chat.isRecent === true && chat.projectId == null
+            ? [chat.id, null, true]
+            : chat.projectId == null
+              ? [chat.id]
+              : [chat.id, chat.projectId],
+        );
       }
     }
     entries.push({ owner: e.principalId, projects, conversations });
@@ -177,16 +184,19 @@ async function verify(ctx, adapter, proof) {
 function match(ctx, proof, requested) {
   const wants = new Set(requested.map((i) => key(ctx.provider, i.kind, i.id)));
   const found = new Map();
-  const inspect = (owner, kind, id, projectId) => {
+  const inspect = (owner, kind, id, projectId, isRecent) => {
     const k = key(ctx.provider, kind, id);
     if (!wants.has(k)) return;
-    const row = { owner, kind, id, projectId };
+    const row = { owner, kind, id, projectId, isRecent };
     if (found.has(k) && !same(found.get(k), row)) fail('ambiguous_selection');
     found.set(k, row);
   };
   for (const { owner, projects, conversations } of proof.entries) {
+    if (ctx.provider === 'chatgpt' && proof.entries.length === 1)
+      inspect(owner, 'recents', 'recents');
     for (const id of projects) inspect(owner, 'project', id);
-    for (const [id, pid] of conversations) inspect(owner, 'conversation', id, pid);
+    for (const [id, pid, isRecent] of conversations)
+      inspect(owner, 'conversation', id, pid, isRecent);
   }
   const owners = new Set([...found.values()].map((r) => r.owner));
   if (proof.owner) owners.add(proof.owner);
@@ -258,13 +268,18 @@ async function handle(message, ctx, adapter) {
     const itemKey = key(ctx.provider, kind, id),
       row = rows.get(itemKey);
     if (!row) continue;
-    const checked = (kind === 'project' ? projects : conversations).has(itemKey);
+    const checked =
+      kind === 'recents'
+        ? saved?.includeRecents === true
+        : (kind === 'project' ? projects : conversations).has(itemKey);
     items.push({
       kind,
       id,
       checked,
       ...(row.projectId ? { projectId: row.projectId } : {}),
-      inherited: !!row.projectId && projects.has(key(ctx.provider, 'project', row.projectId)),
+      inherited:
+        (!!row.projectId && projects.has(key(ctx.provider, 'project', row.projectId))) ||
+        (row.isRecent === true && saved?.includeRecents === true),
     });
   }
   return { ok: true, token: proof.token, items, incomplete: proof.incomplete };

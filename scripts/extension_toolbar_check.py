@@ -32,6 +32,7 @@ BOX = "input[data-memory-sync-id]"
 PROJECT = "g-p-11111111111141118111111111111111"
 MEMBER = "33333333-3333-4333-8333-333333333333"
 STANDALONE = "22222222-2222-4222-8222-222222222222"
+RECENT_ONLY = "55555555-5555-4555-8555-555555555555"
 LATE_MEMBER = "88888888-8888-4888-8888-888888888888"
 CLAUDE = "44444444-4444-4444-8444-444444444444"
 CLAUDE_PROJECT = "77777777-7777-4777-8777-777777777777"
@@ -195,23 +196,25 @@ async def pair_and_enable(toolbar, worker, descriptor):
     assert await toolbar.ui("()=>q('#sync').disabled"), "no saved items must mean no sync"
 
 
-async def expect_scope(worker, provider, projects=(), chats=()):
+async def expect_scope(worker, provider, projects=(), chats=(), *, recents=False):
     """Compare the complete persisted allowlist, not just membership of the last click."""
 
     async def matches():
         scopes = (await state(worker, "providerSyncScopes")) or {}
         entries = scopes.get(provider, {}).get("entries", [])
         if not entries:
-            return not projects and not chats
+            return not projects and not chats and not recents
         return (
             len(entries) == 1
             and bool(entries[0].get("principalId"))
             and sorted(entries[0]["projectIds"]) == sorted(projects)
             and sorted(entries[0]["conversationIds"]) == sorted(chats)
+            and entries[0].get("includeRecents", False) == recents
         )
 
     await wait_for(
-        matches, f"incorrect {provider} scope; expected projects={projects}, chats={chats}"
+        matches,
+        f"incorrect {provider} scope; expected projects={projects}, chats={chats}, recents={recents}",
     )
 
 
@@ -245,6 +248,7 @@ async def chatgpt_checks(worker, toolbar, site):
     await toolbar.toggle(True)
     project = box(site, PROJECT, "project")
     member, standalone = box(site, MEMBER), box(site, STANDALONE)
+    recents = box(site, "recents", "recents")
     await expect(project).to_have_count(2)  # Pinned and Projects refer to the same ID.
     await expect(standalone).to_have_accessible_name(re.compile(".+"))
     anchor_rect = await site.locator("#individual a").bounding_box()
@@ -259,6 +263,13 @@ async def chatgpt_checks(worker, toolbar, site):
     await expect(site.locator("main").get_by_role("checkbox")).to_have_count(0)
     await expect(site.locator("#project > button")).to_have_attribute("aria-expanded", "false")
     await expect(site.locator("#project ul a")).to_have_count(0)
+    await click_row(recents)
+    await expect_scope(worker, "chatgpt", recents=True)
+    await expect(standalone).to_have_js_property("indeterminate", True)
+    await expect(member).to_have_js_property("indeterminate", False)
+    await click_row(recents)
+    await expect_scope(worker, "chatgpt")
+    await expect(standalone).to_have_js_property("indeterminate", False)
     # Host scripts cannot silently opt a user in via an element.click().
     native_before = await worker.evaluate("qa.native.length")
     await standalone.evaluate("el=>el.click()")
@@ -301,6 +312,9 @@ async def chatgpt_checks(worker, toolbar, site):
     await toolbar.toggle(True)
     await expect(project.first).to_be_checked()
     await expect(standalone).to_be_checked()
+    await click_row(recents)
+    await expect_scope(worker, "chatgpt", [PROJECT], [MEMBER, STANDALONE], recents=True)
+    await expect(box(site, RECENT_ONLY)).to_have_js_property("indeterminate", True)
     await mode_off(toolbar, site, "chatgpt")
 
 
@@ -404,7 +418,7 @@ async def exercise(context, worker, driver, descriptor, db):
         )
 
     await wait_for(completed, "manual popup sync did not complete")
-    target = sorted([MEMBER, STANDALONE, LATE_MEMBER, CLAUDE, CLAUDE_MEMBER, GEMINI])
+    target = sorted([MEMBER, STANDALONE, RECENT_ONLY, LATE_MEMBER, CLAUDE, CLAUDE_MEMBER, GEMINI])
     report = await worker.evaluate("({detail:qa.detail,unexpected:qa.unexpected,native:qa.native})")
     status = await state(worker, "status")
     assert all(status[k]["progress"]["phase"] == "complete" for k in SITES), status

@@ -2,6 +2,7 @@
 import { fetchJson, NotLoggedInError } from '../lib/common.js';
 import { createSelectionSummary, classifyConversation } from './selection.js';
 import { drainSelected } from './queue.js';
+import { hasScopeItems } from '../popup-scope.js';
 
 const cap = 10000;
 export const nativeId = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(id);
@@ -77,9 +78,7 @@ async function gather(spec, selected, guard) {
   const principals = await spec.principals();
   const include = (p) =>
     selected === undefined ||
-    selected.some(
-      (e) => e.principalId === p.principalId && (e.projectIds.length || e.conversationIds.length),
-    );
+    selected.some((e) => e.principalId === p.principalId && hasScopeItems(e));
   const groups = [];
   let denied = false;
   let pages = 0,
@@ -129,7 +128,9 @@ async function gather(spec, selected, guard) {
         count();
         const id = spec.id(item);
         if (!nativeId(id)) throw invalid();
-        if (scope && !direct.has(id) && !wantedProjects.has(where)) return;
+        // Bulk Recents must also reconcile project membership. An ordinary-list
+        // duplicate can omit its project ID even though its project lists it.
+        if (scope && !scope.includeRecents && !direct.has(id) && !wantedProjects.has(where)) return;
         const parents = new Set([
           ...memberships(item),
           ...(where ? [where] : []),
@@ -174,7 +175,9 @@ async function gather(spec, selected, guard) {
       const projectOrder = scope
         ? [
             ...wantedProjects,
-            ...(direct.size ? [...projects.keys()].filter((id) => !wantedProjects.has(id)) : []),
+            ...(direct.size || scope.includeRecents
+              ? [...projects.keys()].filter((id) => !wantedProjects.has(id))
+              : []),
           ]
         : projects.keys();
       for (const id of projectOrder) {
@@ -193,7 +196,7 @@ async function gather(spec, selected, guard) {
           entryIncomplete = true;
         }
       }
-      if (!scope || direct.size) {
+      if (!scope || direct.size || scope.includeRecents) {
         try {
           for await (const item of spec.chats(p, read)) add(item);
         } catch (err) {
@@ -217,9 +220,9 @@ async function gather(spec, selected, guard) {
           principalId: p.principalId,
           title: p.title,
           projects: [...projects.values()],
-          conversations: [...convs.values()].sort(
-            (a, b) => Number(!!a.projectId) - Number(!!b.projectId),
-          ),
+          conversations: [...convs.values()]
+            .map((c) => (spec.recents && legacyOrdinary.has(c.id) ? { ...c, isRecent: true } : c))
+            .sort((a, b) => Number(!!a.projectId) - Number(!!b.projectId)),
         },
         legacyOrdinary,
       });
@@ -247,7 +250,7 @@ export async function listPopupCatalog(spec) {
   }
 }
 
-function validSelection(value) {
+function validSelection(value, supportsRecents) {
   return (
     Array.isArray(value?.entries) &&
     value.entries.length <= 100 &&
@@ -256,6 +259,8 @@ function validSelection(value) {
       (e) =>
         e &&
         typeof e.principalId === 'string' &&
+        (e.includeRecents === undefined ||
+          (supportsRecents && typeof e.includeRecents === 'boolean')) &&
         ['projectIds', 'conversationIds'].every(
           (k) => Array.isArray(e[k]) && e[k].length <= cap && e[k].every(nativeId),
         ) &&
@@ -282,10 +287,9 @@ export async function syncPopupScope(
     });
     return { state: {}, conversations: 0, selection, selectionWarning: message };
   };
-  if (!validSelection(selectedScope)) return stop('Invalid saved selection. Reopen the popup.');
-  const chosen = selectedScope.entries.filter(
-    (e) => e.conversationIds.length || e.projectIds.length,
-  );
+  if (!validSelection(selectedScope, spec.recents))
+    return stop('Invalid saved selection. Reopen the popup.');
+  const chosen = selectedScope.entries.filter(hasScopeItems);
   if (!chosen.length) return stop(null);
   await report({ phase: 'discovering', selection });
   const { groups, incomplete, principals } = await gather(spec, chosen, guard);
@@ -316,14 +320,15 @@ export async function syncPopupScope(
         .filter(
           (c) =>
             (direct.has(c.id) && (!legacy.has(c.id) || legacyOrdinary.has(c.id))) ||
-            projects.has(c.projectId),
+            projects.has(c.projectId) ||
+            (entry.includeRecents && c.isRecent),
         )
         .map((c) => [c.id, c]),
     );
     missing ||=
       [...direct].some((id) => !allowed.has(id)) ||
       [...projects].some((id) => !catalog.projects.some((c) => c.id === id));
-    current.set(p.principalId, { p, allowed, legacy, projects });
+    current.set(p.principalId, { p, allowed, legacy, projects, direct });
     const prev = prior?.groups?.find((g) => g.principalId === p.principalId);
     const ids = prev
       ? [...new Set([...prev.ids, ...prev.failed])].filter((id) => allowed.has(id))
@@ -362,14 +367,14 @@ export async function syncPopupScope(
       await guard();
     },
     read: async (pid, id) => {
-      const { p, allowed, legacy, projects } = current.get(pid),
+      const { p, allowed, legacy, projects, direct } = current.get(pid),
         row = allowed.get(id);
       if (!row) return null;
       const detail = await spec.detail(p, id);
       if (spec.id(detail) !== id) throw invalid();
       if (unavailable(detail) || memberships(detail).some((v) => v !== row.projectId)) return null;
       if (
-        legacy.has(id) &&
+        (legacy.has(id) || (row.isRecent && !direct.has(id))) &&
         !projects.has(row.projectId) &&
         classifyConversation(detail).categories.some((k) => k !== 'recents')
       )
