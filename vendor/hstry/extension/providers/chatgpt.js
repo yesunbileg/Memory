@@ -29,8 +29,17 @@ const OVERLAP_MS = 5 * 60 * 1000;
 // Pace detail requests to stay under ChatGPT's rate limit. Backoff in
 // fetchJson handles bursts, but pacing avoids tripping 429 in the first place.
 
-export async function getChatGPTSession() {
-  const data = await fetchJson(`${BASE}/api/auth/session`, { cache: 'no-store' });
+export async function getChatGPTSession(context) {
+  const data = context
+    ? await chrome.tabs.sendMessage(
+        context.tabId,
+        { type: 'GET_CHATGPT_TAB_SESSION' },
+        {
+          frameId: 0,
+          ...(context.documentId ? { documentId: context.documentId } : {}),
+        },
+      )
+    : await fetchJson(`${BASE}/api/auth/session`, { cache: 'no-store' });
   if (!data?.accessToken) throw new NotLoggedInError('chatgpt.com');
   return data;
 }
@@ -43,10 +52,11 @@ function authHeaders(token, accountId) {
 
 /** Enumerate accounts (personal + Teams workspaces). Falls back to the
  * default account when the accounts endpoint is unavailable. */
-async function listAccounts(token) {
+async function listAccounts(token, options) {
   try {
     const data = await fetchJson(`${BASE}/backend-api/accounts/check/v4-2023-04-27`, {
       headers: authHeaders(token),
+      ...options,
     });
     const accounts = [];
     let incomplete = false;
@@ -399,10 +409,14 @@ function explicitProjects(item) {
     .filter((id) => typeof id === 'string' && id);
 }
 
-async function popupPrincipals() {
-  const session = await getChatGPTSession();
+const tabRequestOptions = { credentials: 'omit', redirect: 'error' };
+const readFor = (p, read) => (url, init) => read(url, { ...init, ...p.requestOptions });
+
+async function popupPrincipals(context) {
+  const session = await getChatGPTSession(context);
   const { userId, accountId } = sessionPrincipal(session);
-  const discovery = await listAccounts(session.accessToken);
+  const requestOptions = context ? tabRequestOptions : undefined;
+  const discovery = await listAccounts(session.accessToken, requestOptions);
   const account = discovery.accounts.find((a) => a.id === accountId);
   if (!account) throw new Error('Current ChatGPT account is not verified.');
   return [
@@ -411,41 +425,45 @@ async function popupPrincipals() {
       id: accountId,
       title: account.name,
       token: session.accessToken,
+      requestOptions,
       sourceId: account.isWorkspace ? `chatgpt-web-${shortId(accountId)}` : 'chatgpt-web',
     },
   ];
 }
 
-const popup = {
+const popup = (context) => ({
   name: 'ChatGPT',
   field: 'accounts',
   adapter: 'chatgpt-web',
-  principals: popupPrincipals,
+  principals: () => popupPrincipals(context),
   owns: async (p) => {
-    const { userId, accountId } = sessionPrincipal(await getChatGPTSession());
+    const { userId, accountId } = sessionPrincipal(await getChatGPTSession(context));
     return JSON.stringify([userId, accountId]) === p.principalId;
   },
   id: (item) =>
     item?.id != null && item?.conversation_id != null && item.id !== item.conversation_id
       ? null
       : (item?.id ?? item?.conversation_id),
-  projects: (p, read) => listProjectGizmos(p.token, p.id, read),
-  chats: (p, read) => listUpdatedConversations(p.token, p.id, null, read),
-  members: (p, id, read) => listProjectConversations(p.token, p.id, id, read),
+  projects: (p, read) => listProjectGizmos(p.token, p.id, readFor(p, read)),
+  chats: (p, read) => listUpdatedConversations(p.token, p.id, null, readFor(p, read)),
+  members: (p, id, read) => listProjectConversations(p.token, p.id, id, readFor(p, read)),
   detail: (p, id) =>
     fetchJson(`${BASE}/backend-api/conversation/${encodeURIComponent(id)}`, {
       headers: authHeaders(p.token, p.id),
+      ...p.requestOptions,
     }),
   parse: (detail, id, p) => toParsedConversation(detail, id, p.id),
-};
-export const listChatGPTCatalog = () => listPopupCatalog(popup);
-export const chatGPTPrincipalIds = async () => (await popupPrincipals()).map((p) => p.principalId);
+});
+export const listChatGPTCatalog = (context) => listPopupCatalog(popup(context));
+export const chatGPTPrincipalIds = async (context) =>
+  (await popupPrincipals(context)).map((p) => p.principalId);
 
 export async function syncChatGPT({
   state = {},
   captureTypes,
   chatgptSyncList,
   selectedScope,
+  chatgptTab,
   push,
   register = async () => {},
   log = () => {},
@@ -454,7 +472,7 @@ export async function syncChatGPT({
   report = async () => {},
 }) {
   if (selectedScope !== undefined)
-    return syncPopupScope(popup, {
+    return syncPopupScope(popup(chatgptTab), {
       selectedScope,
       state,
       push,

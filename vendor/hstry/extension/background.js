@@ -273,6 +273,12 @@ async function scheduleContinuation(providerName, deadline = 0) {
   });
 }
 
+async function activeChatGPTTab() {
+  const [tab] = (await chrome.tabs?.query?.({ active: true, lastFocusedWindow: true })) ?? [];
+  if (!Number.isInteger(tab?.id) || !tab?.url) return undefined;
+  return new URL(tab.url).origin === 'https://chatgpt.com' ? { tabId: tab.id } : undefined;
+}
+
 async function runSync(
   trigger,
   { onlyProvider = null, full = false, onStarted = async () => {} } = {},
@@ -325,6 +331,9 @@ async function runSync(
     if (activeProviders.get(name) === owner) activeProviders.delete(name);
   };
   try {
+    const chatgptTab = selected.some(([name]) => name === 'chatgpt')
+      ? await activeChatGPTTab()
+      : undefined;
     await chrome.action.setBadgeBackgroundColor({ color: '#007aff' });
     await chrome.action.setBadgeText({ text: '…' });
 
@@ -461,6 +470,7 @@ async function runSync(
             state: entry.state ?? {},
             captureTypes: { ...settings.captureTypes },
             selectedScope: saved.scope,
+            ...(name === 'chatgpt' && chatgptTab ? { chatgptTab } : {}),
             push,
             report,
             guard,

@@ -175,6 +175,95 @@ test('an unverified open conversation rejects mode and removes all of its UI, ev
   assert.equal(f.sends.at(-1).type, 'CLOSE_PAGE_SELECTION');
 });
 
+test('an unverified open chat does not hide verified sidebar rows', async () => {
+  const open = '33333333-3333-4333-8333-333333333333';
+  const saved = '22222222-2222-4222-8222-222222222222';
+  const project = 'g-p-11111111111141118111111111111111';
+  const f = fixture({
+    href: 'https://chatgpt.com/c/' + open,
+    read: async () => ({
+      ok: true,
+      token: 'proof',
+      items: [
+        { kind: 'conversation', id: saved, checked: true },
+        { kind: 'project', id: project, checked: false },
+      ],
+    }),
+  });
+  const row = (href) => ({
+    isConnected: true,
+    parentElement: f.doc.body,
+    textContent: 'Sidebar row',
+    checkVisibility: () => true,
+    closest: () => null,
+    matches: () => true,
+    getBoundingClientRect: () => ({ left: 0, right: 200, width: 200, height: 30 }),
+    getAttribute: (name) => (name === 'href' ? href : null),
+    setAttribute() {},
+    style: { setProperty() {} },
+    after(box) {
+      this.nextElementSibling = box;
+      f.mounted.add(box);
+    },
+  });
+  const create = f.doc.createElement;
+  f.doc.createElement = (tag) => ({ ...create(tag), style: { setProperty() {} } });
+  f.doc.querySelectorAll = (selector) =>
+    selector.includes('a[href')
+      ? [row('/c/' + open), row('/c/' + saved), row('/g/' + project + '/project')]
+      : [];
+  const result = await f.message({ type: 'SET_PAGE_LIST_MODE', enabled: true });
+  assert.equal(result.enabled, true);
+  const boxes = [...f.mounted].filter((element) => element.type === 'checkbox');
+  assert.deepEqual(
+    boxes.map((box) => [box.dataset.memorySyncId, box.checked]),
+    [
+      [saved, true],
+      [project, false],
+    ],
+  );
+});
+
+test('a ChatGPT project button with the native row attributes is verified and gets a checkbox', async () => {
+  const id = 'g-p-11111111111141118111111111111111';
+  const projectAttrs = {
+    role: 'button',
+    'data-app-action-sidebar-project-row': '',
+    'data-app-action-sidebar-project-id': id,
+  };
+  const f = fixture({
+    read: async (request) => ({
+      ok: true,
+      token: 'proof',
+      items: request.items.filter((item) => item.kind === 'project' && item.id === id),
+    }),
+  });
+  const row = {
+    isConnected: true,
+    parentElement: f.doc.body,
+    textContent: 'A project',
+    checkVisibility: () => true,
+    closest: () => null,
+    matches: (selector) => selector.includes('[data-app-action-sidebar-project-row]'),
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ left: 0, right: 200, width: 200, height: 30 }),
+    getAttribute: (name) => projectAttrs[name] ?? null,
+    setAttribute() {},
+    style: { setProperty() {} },
+    after(box) {
+      this.nextElementSibling = box;
+      f.mounted.add(box);
+    },
+  };
+  const create = f.doc.createElement;
+  f.doc.createElement = (tag) => ({ ...create(tag), style: { setProperty() {} } });
+  f.doc.querySelectorAll = (selector) => (row.matches(selector) ? [row] : []);
+  await f.message({ type: 'SET_PAGE_LIST_MODE', enabled: true });
+  const box = [...f.mounted].find((element) => element.type === 'checkbox');
+  assert.equal(box?.dataset.memorySyncId, id);
+  assert.equal(box?.dataset.memorySyncKind, 'project');
+});
+
 test('turning mode off cancels an outstanding metadata read and closes its late proof', async () => {
   let resolve;
   const f = fixture({

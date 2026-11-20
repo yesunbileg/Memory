@@ -1,7 +1,79 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { syncChatGPT } from '../providers/chatgpt.js';
+import { listChatGPTCatalog, syncChatGPT } from '../providers/chatgpt.js';
 import { syncClaude } from '../providers/claude.js';
+
+test('ChatGPT discovery and manual capture use the selected tab account rather than browser default', async (t) => {
+  const principalId = JSON.stringify(['pwa-user', 'pwa-account']);
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === '/api/auth/session') {
+      return Response.json({
+        user: { id: 'browser-user' },
+        account: { id: 'browser-account' },
+        accessToken: 'browser-token',
+      });
+    }
+    const tab = init.credentials === 'omit' && init.headers.Authorization === 'Bearer pwa-token';
+    if (path.includes('/accounts/check/')) {
+      return Response.json({
+        accounts: { a: { account: { id: tab ? 'pwa-account' : 'browser-account' } } },
+      });
+    }
+    if (path.endsWith('/snorlax/sidebar')) return Response.json({ items: [] });
+    if (path.endsWith('/conversations')) {
+      return Response.json({ items: [{ id: tab ? 'pwa-chat' : 'browser-chat', title: 'A chat' }] });
+    }
+    assert.equal(path, '/backend-api/conversation/pwa-chat');
+    assert.ok(tab);
+    return Response.json({
+      id: 'pwa-chat',
+      current_node: 'm',
+      mapping: {
+        m: {
+          id: 'm',
+          message: {
+            id: 'm',
+            author: { role: 'user' },
+            content: { content_type: 'text', parts: ['Fixture'] },
+          },
+        },
+      },
+    });
+  });
+  const oldChrome = globalThis.chrome;
+  t.after(() => {
+    globalThis.chrome = oldChrome;
+  });
+  globalThis.chrome = {
+    tabs: {
+      sendMessage: async (tabId, message) => {
+        assert.equal(tabId, 123);
+        assert.equal(message.type, 'GET_CHATGPT_TAB_SESSION');
+        return {
+          user: { id: 'pwa-user' },
+          account: { id: 'pwa-account' },
+          accessToken: 'pwa-token',
+        };
+      },
+    },
+  };
+  const context = { tabId: 123, documentId: 'pwa-document' };
+  const catalog = await listChatGPTCatalog(context);
+  assert.equal(catalog.entries[0].principalId, principalId);
+  assert.deepEqual(
+    catalog.entries[0].conversations.map((c) => c.id),
+    ['pwa-chat'],
+  );
+  const captured = [];
+  await syncChatGPT({
+    chatgptTab: context,
+    selectedScope: { entries: [{ principalId, projectIds: [], conversationIds: ['pwa-chat'] }] },
+    push: async (_source, _adapter, chats) =>
+      captured.push(...chats.map((chat) => chat.externalId)),
+  });
+  assert.deepEqual(captured, ['pwa-chat']);
+});
 
 // Exercise the provider adapters through their actual cursor and offset APIs. The second
 // membership page has no corresponding sidebar or ordinary history rows.

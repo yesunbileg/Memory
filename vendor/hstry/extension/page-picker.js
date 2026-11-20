@@ -27,9 +27,12 @@
   const privateLabel =
     /^(?:(?:locked|archived)(?:\s+(?:chats?|conversations?|projects?))?|(?:түгжээтэй|түгжигдсэн|архивласан)\s+чатууд)(?:\s*\(\d+\))?$/i;
   const privateSuffix = /,\s*(?:locked|archived)(?: chat)?(?:,|$)/i;
+  const nativeProjectRow = 'data-app-action-sidebar-project-row';
+  const nativeProjectId = 'data-app-action-sidebar-project-id';
   const selectors = {
     chatgpt:
-      'a[href*="/c/"],a[href*="/g/g-p-" i],button[data-project-id],[role="button"][data-project-id]',
+      'a[href*="/c/"],a[href*="/g/g-p-" i],button[data-project-id],[role="button"][data-project-id],' +
+      `[role="button"][${nativeProjectRow}][${nativeProjectId}]`,
     claude: 'a[href*="/chat/"],a[href*="/project/"]',
     gemini: 'a[href*="/app/"]',
   };
@@ -106,7 +109,10 @@
   function itemOf(el, href) {
     if (el.matches('a[href]')) return routes.rowFromHref(el.getAttribute('href'), href);
     if (el.querySelector('a[href*="/g/g-p-" i]')) return null;
-    return routes.projectButton(el.getAttribute('data-project-id'), href);
+    const id = el.matches(`[${nativeProjectRow}]`)
+      ? el.getAttribute(nativeProjectId)
+      : el.getAttribute('data-project-id');
+    return routes.projectButton(id, href);
   }
   function scan(s) {
     const href = location.href,
@@ -186,11 +192,9 @@
     return c;
   }
   function paint(s) {
-    const permittedPage = !s.current || s.known.get(key(s.current));
     for (const [row, c] of s.controls) {
       const i = s.rows.get(row);
       if (
-        !permittedPage ||
         !i ||
         key(i) !== key(c.item) ||
         !s.known.get(key(i)) ||
@@ -199,7 +203,8 @@
       )
         detach(s, row, c);
     }
-    if (!permittedPage) return;
+    // Each sidebar row has its own proof. The open chat may be absent from
+    // the catalog even when other visible chats and projects are verified.
     for (const [row, i] of s.rows) {
       const k = key(i),
         state = s.known.get(k);
@@ -277,20 +282,24 @@
     // A virtualized row, a privacy section, or the entire page can have changed
     // while the worker checked account membership. Never decorate a stale node.
     snapshot(s);
-    if (!s.current || s.known.get(key(s.current))) {
-      note(
-        s,
-        s.error ||
-          (s.controls.size
-            ? ''
-            : 'No verified rows here yet. Expand the sidebar, or open AI Memory and turn List mode on again.'),
-      );
-    } else if (s.known.has(key(s.current))) {
+    if (
+      !s.controls.size &&
+      s.current &&
+      s.known.has(key(s.current)) &&
+      !s.known.get(key(s.current))
+    ) {
       throw problem(
         'page_unverified',
         'Cannot verify this chat or project. Open the provider home page and try List mode there.',
       );
     }
+    note(
+      s,
+      s.error ||
+        (s.controls.size
+          ? ''
+          : 'No verified rows here yet. Expand the sidebar, or open AI Memory and turn List mode on again.'),
+    );
   }
   // Coalesce subtree changes while a read is running. A streamed transcript
   // causes no row scans, and a new/recycled row requests only previously unseen IDs.
@@ -540,6 +549,8 @@
           'data-testid',
           'data-state',
           'data-project-id',
+          nativeProjectRow,
+          nativeProjectId,
           ...privacyAttrs,
           ...sectionLabels.filter((a) => a !== 'aria-label'),
         ],
@@ -554,6 +565,36 @@
     }
   }
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
+    if (m?.type === 'GET_CHATGPT_TAB_SESSION') {
+      if (
+        sender?.id !== chrome.runtime.id ||
+        sender.tab ||
+        sender.url !== chrome.runtime.getURL('background.js') ||
+        location.origin !== 'https://chatgpt.com'
+      )
+        return;
+      // Use this document's browser session. Some browsers isolate a PWA's
+      // cookies from the extension worker's default cookie context.
+      fetch('/api/auth/session', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then(
+          (s) =>
+            reply(
+              s && {
+                user: { id: s.user?.id },
+                account: { id: s.account?.id ?? s.account?.account_id },
+                accessToken: s.accessToken,
+              },
+            ),
+          () => reply(null),
+        );
+      return true;
+    }
     if (
       !m ||
       !['GET_PAGE_LIST_MODE', 'SET_PAGE_LIST_MODE'].includes(m.type) ||

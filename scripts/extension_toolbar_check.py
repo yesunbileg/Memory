@@ -315,6 +315,20 @@ async def exercise(context, worker, driver, descriptor, db):
     unexpected_navigation = []
 
     async def fixture(route):
+        if route.request.url == "https://chatgpt.com/api/auth/session":
+            signed_in = await worker.evaluate(
+                "() => { qa.requests.push('chatgpt.com/api/auth/session'); return qa.signedIn; }"
+            )
+            return await route.fulfill(
+                status=200 if signed_in else 401,
+                json={
+                    "user": {"id": "fixture-user"},
+                    "account": {"id": "fixture-account"},
+                    "accessToken": "synthetic-tab-token",
+                }
+                if signed_in
+                else {},
+            )
         if route.request.is_navigation_request() and route.request.frame == site.main_frame:
             if route.request.url in SITES.values():
                 return await route.fulfill(content_type="text/html", path=SIDEBAR)
