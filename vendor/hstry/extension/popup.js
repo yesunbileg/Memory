@@ -4,8 +4,10 @@ import {
   enterToggles,
   sameConnection,
   captureOutcome,
+  captureProgress,
   statusForPairing,
   friendlyError,
+  updateLocalSettings,
 } from './ui.js';
 import { parseConnectionFile, connectionPresentation } from './connection-file.js';
 import { nonempty, scopeFor } from './popup-scope.js';
@@ -41,12 +43,9 @@ function setSettings(open) {
 }
 el('settings').addEventListener('click', () => setSettings(el('settings-panel').hidden));
 function updateCommand() {
-  const family = el('browser-family').value || 'chrome';
+  const family = el('browser-family').value || 'brave';
   el('setup-command').textContent =
-    'ai-memory --db /path/to/archive.sqlite connect --extension-id ' +
-    chrome.runtime.id +
-    ' --browser ' +
-    family;
+    'ai-memory connect --extension-id ' + chrome.runtime.id + ' --browser ' + family;
 }
 el('browser-family').addEventListener('change', updateCommand);
 el('version').textContent = 'AI Memory ' + chrome.runtime.getManifest().version;
@@ -83,14 +82,21 @@ function summary() {
   el('schedule').textContent = settings.autoPaused
     ? 'Automatic sync paused'
     : 'Automatic sync every ' + settings.intervalMinutes + 'm';
+  el('plan-hint').hidden = connected && enabled.length > 0;
   el('plan-hint').textContent = !connected
     ? 'Connect your archive in Settings to sync.'
-    : enabled.length
-      ? 'Saved items from ' + enabled.map((p) => names[p]).join(', ') + '.'
-      : providers.some((p) => nonempty(scopes[p]))
-        ? 'Enable the selected provider in Settings to sync.'
-        : 'Check a chat or project on its website to sync it.';
-  el('notice').textContent = captureOutcome(runs, settings.providers, syncSince) || notice;
+    : providers.some((p) => nonempty(scopes[p]))
+      ? 'Enable the selected provider in Settings to sync.'
+      : 'Check a chat or project on its website to sync it.';
+  const progress = captureProgress(runs, settings.providers, syncSince);
+  const bar = el('sync-progress');
+  bar.hidden = !progress && !syncPending;
+  if (progress?.max) {
+    bar.max = progress.max;
+    bar.value = progress.value;
+  } else bar.removeAttribute('value');
+  el('notice').textContent =
+    progress?.text || captureOutcome(runs, settings.providers, syncSince) || notice;
 }
 async function readStorage() {
   const ticket = ++storageTicket;
@@ -136,10 +142,7 @@ async function readStorage() {
 }
 function writeSettings(update) {
   const job = writes.then(async () => {
-    const prev = normalizeSettings((await chrome.storage.local.get('settings')).settings);
-    const next = update(prev);
-    if (!next) return false;
-    await chrome.storage.local.set({ settings: next });
+    if (!(await updateLocalSettings((prev) => update(normalizeSettings(prev))))) return false;
     await readStorage();
     await send({ type: 'settingsChanged' });
     return true;
@@ -194,7 +197,7 @@ async function check() {
   if (ticket !== checking || !sameConnection(expected, settings)) return;
   const info = connectionPresentation(result);
   connected = result?.ok === true;
-  el('api-title').textContent = connected ? 'Connected to your computer' : info.label;
+  el('api-title').textContent = connected ? 'Local archive connected' : info.label;
   el('api-detail').textContent = info.detail;
   el('retry').disabled = false;
   summary();
@@ -286,8 +289,8 @@ async function updateListMode(toggle = false) {
         next = { ...page, enabled: reply.enabled };
         const items = page.provider === 'gemini' ? 'chats' : 'chats or whole projects';
         hint = next.enabled
-          ? 'Check or uncheck ' + items + ' on ' + name + '. Your sync list updates immediately.'
-          : 'Turn on list mode to show checkboxes beside ' + items + ' on ' + name + '.';
+          ? 'Choose chats in the sidebar.'
+          : 'Show checkboxes beside ' + items + ' on ' + name + '.';
       } else if (reply?.ok === false && reply.code === 'page_unavailable') {
         hint = 'Open the ' + name + ' chat list in this tab to use list mode.';
       } else if (reply?.ok === false && reply.code === 'page_unverified') {

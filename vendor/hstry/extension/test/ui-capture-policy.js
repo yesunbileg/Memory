@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { eligibleCapture } from '../providers/selection.js';
 import {
   captureOutcome,
+  captureProgress,
   describeEffectivePlan,
   normalizeSettings,
+  providerState,
   statusForPairing,
   formatSyncBreakdown,
 } from '../ui.js';
@@ -63,6 +65,28 @@ assert.match(
 );
 assert.match(captureOutcome({ claude: run({ running: true }) }, { claude: true }), /Capturing/);
 assert.equal(captureOutcome({ claude: run() }, { claude: true }, 21), '');
+const progress = {
+  chatgpt: run({
+    running: true,
+    progress: { phase: 'importing', detected: 200, processed: 11, accepted: 10, accountsTotal: 1 },
+    selection: { selected: 71 },
+  }),
+};
+assert.deepEqual(captureProgress(progress, { chatgpt: true }, 20), {
+  value: 11,
+  max: 71,
+  text: 'Capturing selected chats… 11/71 checked · 10 saved',
+});
+assert.equal(captureProgress(progress, { chatgpt: true }, 21), null);
+assert.equal(
+  providerState(
+    run({ capturePolicy: { agents: true, pinned: true, projects: true, recents: false } }),
+    true,
+    { apiConnected: true, captureTypes: organized },
+  ).label,
+  'Up to date',
+  'Brave storage can reorder capture policy keys without changing the policy',
+);
 
 const archive = 'a'.repeat(32);
 const otherArchive = 'b'.repeat(32);

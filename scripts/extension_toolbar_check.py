@@ -62,7 +62,12 @@ def register(folder, profile, extension_id, env):
         timeout=30,
         text=True,
     )
-    return json.loads(Path(json.loads(result.stdout)["connection_file"]).read_text())
+    registration = json.loads(result.stdout)
+    assert registration["auto_connect"] is True
+    connection_file = Path(registration["connection_file"])
+    archive_id = json.loads(connection_file.read_text())["archive_instance_id"]
+    connection_file.unlink()  # Prove the extension setup works without the optional file.
+    return archive_id
 
 
 def archived(db):
@@ -152,34 +157,31 @@ async def state(worker, key):
     return await worker.evaluate("k=>chrome.storage.local.get(k).then(x=>x[k])", key)
 
 
-async def pair_and_enable(toolbar, worker, descriptor):
+async def pair_and_enable(toolbar, worker, archive_id):
     async def settings_match(test):
         return test(await state(worker, "settings") or {})
 
-    assert await toolbar.ui("()=>q('#sync').disabled")
+    await wait_for(
+        lambda: settings_match(lambda s: s.get("archiveId") == archive_id),
+        "opening the popup did not connect the registered archive automatically",
+    )
+    await wait_for(
+        lambda: toolbar.ui("()=>q('#api-title').textContent==='Local archive connected'"),
+        "popup did not show the automatic connection",
+    )
+    assert await worker.evaluate("qa.native[0]==='discover' && qa.native.includes('check')")
     await toolbar.click("#settings")
     await toolbar.ui("""()=>{const input=q('#connection-json');
-      input.closest('details').open=true; input.value='not JSON'; q('#verify-json').click();}""")
+      const details=input.closest('details'); details.parentElement.closest('details').open=true;
+      details.open=true; input.value='not JSON'; q('#verify-json').click();}""")
     await wait_for(
         lambda: toolbar.ui(
             "()=>!!q('#pair-status').textContent && !q('#pair-status').textContent.includes('Verifying')"
         ),
         "invalid pairing did not report an error",
     )
-    assert not (await state(worker, "settings") or {}).get("archiveId"), (
-        "invalid JSON changed the connection"
-    )
-    await toolbar.ui(
-        """value=>{
-      const input=q('#connection-file'), dt=new w.DataTransfer();
-      dt.items.add(new w.File([JSON.stringify(value)],'connection.json',{type:'application/json'}));
-      input.files=dt.files; input.dispatchEvent(new w.Event('change',{bubbles:true}));
-    }""",
-        descriptor,
-    )
-    await wait_for(
-        lambda: settings_match(lambda s: s.get("archiveId") == descriptor["archive_instance_id"]),
-        "popup did not pair",
+    assert (await state(worker, "settings") or {}).get("archiveId") == archive_id, (
+        "invalid JSON changed the automatic connection"
     )
     await toolbar.click("#auto-paused")
     await wait_for(
@@ -231,9 +233,9 @@ async def click_row(control):
 async def no_capture(worker, db):
     assert not archived(db), "selection changed the archive before sync"
     assert not await worker.evaluate("qa.detail.length"), "selection read transcript bodies"
-    assert await worker.evaluate("qa.native.filter(op=>op!=='check')") == [], (
-        "selection sent data to the native host"
-    )
+    assert (
+        await worker.evaluate("qa.native.filter(op=>!['check','discover'].includes(op))") == []
+    ), "selection sent data to the native host"
 
 
 async def mode_off(toolbar, site, provider):
@@ -318,14 +320,15 @@ async def chatgpt_checks(worker, toolbar, site):
     await mode_off(toolbar, site, "chatgpt")
 
 
-async def exercise(context, worker, driver, descriptor, db):
-    # Only the two fixture tabs below are created by the harness. Never put popup.html in a tab.
+async def exercise(context, worker, driver, archive_id, db):
+    # Keep each signed-in provider tab open, including when the popup is opened elsewhere.
     extension_id = worker.url.split("/")[2]
     await worker.evaluate(PROVIDERS)
     await driver.goto(f"chrome-extension://{extension_id}/test-driver.html")
     refused = await driver.evaluate("()=>chrome.runtime.sendMessage({type:'syncNow'})")
     assert not refused.get("ok") and refused.get("code") == "untrusted_sender", refused
-    site = await context.new_page()
+    sites = {name: await context.new_page() for name in SITES}
+    site = sites["chatgpt"]
     unexpected_navigation = []
 
     async def fixture(route):
@@ -343,13 +346,24 @@ async def exercise(context, worker, driver, descriptor, db):
                 if signed_in
                 else {},
             )
-        if route.request.is_navigation_request() and route.request.frame == site.main_frame:
+        if route.request.is_navigation_request() and route.request.frame.parent_frame is None:
             if route.request.url in SITES.values():
                 return await route.fulfill(content_type="text/html", path=SIDEBAR)
             unexpected_navigation.append(route.request.url)
+        elif route.request.url.startswith(("https://claude.ai/api/", "https://gemini.google.com/")):
+            request = route.request
+            payload = await worker.evaluate(
+                """async ({url, method, post}) => {
+                  const reply = await fetch(url, {method, body:post ? new URLSearchParams(post) : undefined});
+                  return {status:reply.status, headers:Object.fromEntries(reply.headers), body:await reply.text()};
+                }""",
+                {"url": request.url, "method": request.method, "post": request.post_data},
+            )
+            return await route.fulfill(**payload)
         await route.abort()
 
-    await site.route("**/*", fixture)
+    for provider_site in sites.values():
+        await provider_site.route("**/*", fixture)
     await driver.evaluate("""async () => {
         window.newTabIds = [];
         chrome.tabs.onCreated.addListener(tab => window.newTabIds.push(tab.id));
@@ -360,7 +374,7 @@ async def exercise(context, worker, driver, descriptor, db):
     await expect(site.locator(BOX)).to_have_count(0)
     await toolbar.open(site)
     await toolbar.expect_mode(False)
-    await pair_and_enable(toolbar, worker, descriptor)
+    await pair_and_enable(toolbar, worker, archive_id)
     # A signed-out visit cannot authorize anything. A retry stays on the same site.
     await toolbar.click("#list-mode")
     await wait_for(lambda: worker.evaluate("qa.requests.length>0"), "sign-in was not verified")
@@ -381,6 +395,7 @@ async def exercise(context, worker, driver, descriptor, db):
     await no_capture(worker, db)
 
     for provider, item in [("claude", CLAUDE), ("gemini", GEMINI)]:
+        site = sites[provider]
         await site.goto(SITES[provider])
         await expect(site.locator(BOX)).to_have_count(0)
         await toolbar.open(site)
@@ -407,6 +422,10 @@ async def exercise(context, worker, driver, descriptor, db):
     assert_layout(await toolbar.ui(f"()=>({LAYOUT})(d)"))
     started = await worker.evaluate("Date.now()")
     await toolbar.click("#sync")
+    await wait_for(
+        lambda: toolbar.ui("()=>!q('#sync-progress').hidden"),
+        "popup did not show sync progress",
+    )
 
     async def completed():
         status = await state(worker, "status") or {}
@@ -473,9 +492,9 @@ async def verify(executable):
                     if context.service_workers
                     else await context.wait_for_event("serviceworker")
                 )
-                descriptor = register(folder, profile, worker.url.split("/")[2], env)
+                archive_id = register(folder, profile, worker.url.split("/")[2], env)
                 await exercise(
-                    context, worker, context.pages[0], descriptor, folder / "fixture.sqlite"
+                    context, worker, context.pages[0], archive_id, folder / "fixture.sqlite"
                 )
             finally:
                 await context.close()

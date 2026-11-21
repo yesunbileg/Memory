@@ -13,6 +13,8 @@ const label = (...values) =>
     .slice(0, 512);
 const invalid = () =>
   new Error('Provider catalog is unavailable. Check the signed-in account and retry.');
+const changed = () =>
+  Object.assign(new Error('The signed-in account changed.'), { code: 'principal_changed' });
 
 export function unavailable(item) {
   return [item, item?.metadata].some(
@@ -87,7 +89,7 @@ async function gather(spec, selected, guard) {
   const read = async (url, init = {}) => {
     await guard();
     if (++pages > 200) throw invalid();
-    return fetchJson(url, { ...init, cache: 'no-store' }, { retries: 0 });
+    return fetchJson(url, { ...init, cache: 'no-store' }, { retries: 0, fetcher: spec.fetcher });
   };
   for (const p of principals.filter(include)) {
     const blocked = new Set(),
@@ -237,7 +239,7 @@ async function gather(spec, selected, guard) {
     incomplete ||= entryIncomplete;
   }
   if (denied && !groups.length) throw invalid();
-  if (groups.length && identity(principals) !== identity(await spec.principals())) throw invalid();
+  if (groups.length && identity(principals) !== identity(await spec.principals())) throw changed();
   return { groups, incomplete, principals };
 }
 
@@ -363,7 +365,7 @@ export async function syncPopupScope(
     canResume: true,
     beforeRead: async (pid) => {
       await guard();
-      if (!(await spec.owns(current.get(pid).p))) throw invalid();
+      if (!(await spec.owns(current.get(pid).p))) throw changed();
       await guard();
     },
     read: async (pid, id) => {
@@ -383,7 +385,7 @@ export async function syncPopupScope(
     },
     push: async (...args) => {
       await guard();
-      if (identity(principals) !== identity(await spec.principals())) throw invalid();
+      if (identity(principals) !== identity(await spec.principals())) throw changed();
       await guard();
       return push(...args);
     },

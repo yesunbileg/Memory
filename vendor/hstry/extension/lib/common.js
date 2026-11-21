@@ -30,9 +30,13 @@ const MAX_BACKOFF_MS = 60_000;
  * otherwise uses exponential backoff with jitter. 401/403 fail fast as
  * "not logged in" — retrying those is pointless.
  */
-export async function fetchJson(url, init = {}, { retries = 5, baseDelayMs = 1000 } = {}) {
+export async function fetchJson(
+  url,
+  init = {},
+  { retries = 5, baseDelayMs = 1000, fetcher = fetch } = {},
+) {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
+    const res = await fetcher(url, {
       credentials: 'include',
       signal: AbortSignal.timeout(20_000),
       ...init,

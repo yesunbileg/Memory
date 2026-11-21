@@ -121,7 +121,7 @@
       }
     }
     if (u.hostname === 'gemini.google.com') {
-      if (path === '/app') {
+      if (path === '/app' || path === '/u/0/app') {
         const r = new Response(
           '<script>{"SNlM0e":"synthetic-csrf","FdrFJe":"synthetic-session","cfb2h":"test-build"}</script>',
         );

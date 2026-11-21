@@ -4,6 +4,7 @@ import {
   CAPTURE_TYPES,
   DEFAULT_CAPTURE_TYPES,
   normalizeCaptureTypes,
+  sameCaptureTypes,
   eligibleCapture,
   supportedCaptureTypes,
 } from './providers/selection.js';
@@ -136,7 +137,7 @@ export function providerState(
   if (
     entry?.lastRunMs &&
     captureTypes &&
-    JSON.stringify(entry.capturePolicy) !== JSON.stringify(normalizeCaptureTypes(captureTypes))
+    !sameCaptureTypes(entry.capturePolicy, normalizeCaptureTypes(captureTypes))
   ) {
     return {
       tone: 'idle',
@@ -376,6 +377,53 @@ export function statusForPairing(status, settings) {
 }
 
 // The status is the receiver's acknowledgement, never a promise of Google consent or retrieval.
+export function captureProgress(status, providers, since = 0) {
+  const active = Object.entries(status)
+    .filter(
+      ([id, entry]) =>
+        providers[id] && entry.lastRunMs >= since && (entry.running || entry.continuationPending),
+    )
+    .map(([, entry]) => entry);
+  if (!active.length) return null;
+  let checked = 0,
+    selected = 0,
+    saved = 0,
+    accounts = 0,
+    accountsChecked = 0;
+  for (const { progress = {}, selection } of active) {
+    checked += progress.processed ?? 0;
+    selected += selection?.selected ?? progress.selection?.selected ?? 0;
+    saved += progress.accepted ?? 0;
+    accounts += progress.accountsTotal ?? 0;
+    accountsChecked += progress.accountsChecked ?? 0;
+  }
+  const running = active.some((entry) => entry.running);
+  const discovering = active.some(
+    (entry) => entry.running && entry.progress?.phase === 'discovering',
+  );
+  const chatMax = !discovering && selected > 0 && accounts <= 1 ? selected : null;
+  const max = accounts > 1 ? accounts : chatMax;
+  const stage = !running
+    ? 'Next batch queued.'
+    : discovering
+      ? 'Checking selected accounts…'
+      : 'Capturing selected chats…';
+  const counts = [
+    chatMax
+      ? `${Math.min(checked, chatMax)}/${chatMax} checked`
+      : checked > 0
+        ? `${checked} checked`
+        : null,
+    chatMax || checked || saved ? `${saved} saved` : null,
+    accounts > 1 ? `${accountsChecked}/${accounts} accounts checked` : null,
+  ].filter(Boolean);
+  return {
+    value: accounts > 1 ? accountsChecked : chatMax ? Math.min(checked, chatMax) : null,
+    max,
+    text: [stage, counts.join(' · ')].filter(Boolean).join(' '),
+  };
+}
+
 export function captureOutcome(status, providers, since = 0) {
   const runs = Object.entries(status).filter(
     ([id, entry]) => providers[id] && entry?.lastRunMs && entry.lastRunMs >= since,
@@ -396,9 +444,11 @@ export function captureOutcome(status, providers, since = 0) {
       problems.push(
         entry.lastErrorCode === 'not_logged_in'
           ? `${name}: sign in and retry`
-          : entry.selectionWarning
-            ? `${name}: some chats could not be classified`
-            : `${name}: ${friendlyError('', entry.lastErrorCode)}`,
+          : entry.progress?.accountsUnavailable
+            ? `${name}: open a signed-in tab for ${entry.progress.accountsUnavailable} saved account${entry.progress.accountsUnavailable === 1 ? '' : 's'}`
+            : entry.selectionWarning
+              ? `${name}: some selected chats could not be verified`
+              : `${name}: ${friendlyError('', entry.lastErrorCode)}`,
       );
     } else complete++;
   }
@@ -451,6 +501,17 @@ export function sameConnection(previous, next) {
     previous.archiveId === next.archiveId &&
     previous.token === next.token
   );
+}
+
+export async function updateLocalSettings(update) {
+  const write = async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    const next = update(settings ?? {});
+    if (!next) return false;
+    await chrome.storage.local.set({ settings: next });
+    return true;
+  };
+  return navigator.locks ? navigator.locks.request('ai-memory-settings', write) : write();
 }
 
 // Rebuilt controls have stable IDs. If a focused action no longer exists,

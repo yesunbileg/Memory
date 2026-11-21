@@ -51,7 +51,7 @@ assert.throws(() => parseConnectionFile(' '.repeat(20_000)), /connection file/i)
 assert.throws(() => parseConnectionFile('null'), /connection file/i);
 assert.equal(connectionPresentation({ ok: true }).tone, 'success');
 assert.equal(connectionPresentation({ ok: false, code: 'missing_token' }).tone, 'idle');
-assert.match(connectionPresentation({ ok: false, code: 'unauthorized' }).detail, /file|token/i);
+assert.match(connectionPresentation({ ok: false, code: 'unauthorized' }).detail, /extension ID/i);
 const unsafe = connectionPresentation({ ok: false, code: 'offline', error: token });
 assert.ok(!JSON.stringify(unsafe).includes(token));
 const settings = normalizeSettings(

@@ -39,12 +39,16 @@
   };
   const css = [
     '[data-memory-sync-row]{anchor-name:var(--ai-memory-picker-anchor)!important;padding-inline-start:2.25rem!important}',
-    'input[data-memory-sync-id]{appearance:auto!important;position:absolute!important;position-anchor:var(--ai-memory-picker-anchor)!important;position-visibility:anchors-visible;inset:auto!important;top:anchor(center)!important;left:anchor(left)!important;transform:translate(.5rem,-50%)!important;z-index:2!important;width:1rem!important;height:1rem!important;box-sizing:border-box!important;margin:0!important;padding:0!important;cursor:pointer!important;accent-color:#2563c8!important}',
+    '[data-memory-sync-row]:has(+input[data-memory-sync-id]:checked):not([aria-current=page]){background-color:rgba(66,127,117,.12);border-radius:.5rem}',
+    'input[data-memory-sync-id]{appearance:auto!important;position:absolute!important;position-anchor:var(--ai-memory-picker-anchor)!important;position-visibility:anchors-visible;inset:auto!important;top:anchor(center)!important;left:anchor(left)!important;transform:translate(.5rem,-50%)!important;z-index:2!important;width:1rem!important;height:1rem!important;box-sizing:border-box!important;margin:0!important;padding:0!important;cursor:pointer!important;accent-color:#3c756f!important}',
     'input[data-memory-sync-id]:dir(rtl){left:auto!important;right:anchor(right)!important;transform:translate(-.5rem,-50%)!important}',
-    'input[data-memory-sync-id]:indeterminate{accent-color:#65778c!important}',
+    'input[data-memory-sync-id]:indeterminate{accent-color:#5a726d!important}',
+    '[data-memory-sync-row=recents]:has(+input[data-memory-sync-id]:checked){padding-inline-end:2.25rem!important}',
+    '[data-memory-sync-row=recents]:has(+input[data-memory-sync-id]:checked)::after{content:"All" / "";position:absolute;position-anchor:var(--ai-memory-picker-anchor);position-visibility:anchors-visible;top:anchor(center);right:anchor(right);transform:translate(-.6rem,-50%);color:inherit;opacity:.78;font:500 .75rem/1 system-ui,sans-serif;pointer-events:none}',
+    '[data-memory-sync-row=recents]:dir(rtl)::after{left:anchor(left);right:auto;transform:translate(.6rem,-50%)}',
     'input[data-memory-sync-id][aria-busy=true]{opacity:.6!important;cursor:progress!important}',
     'input[data-memory-sync-id]:focus-visible{outline:2px solid currentColor!important;outline-offset:2px!important}',
-    '[data-memory-picker-note]{position:fixed!important;z-index:2147483646!important;inset:auto auto 1rem 1rem!important;padding:.48rem .72rem!important;border-radius:.5rem!important;max-width:min(24rem,85vw)!important;background:#243246!important;color:white!important;font:500 13px/1.5 system-ui,sans-serif!important;pointer-events:none!important}',
+    '[data-memory-picker-note]{position:fixed!important;z-index:2147483646!important;inset:auto auto 1rem 1rem!important;padding:.48rem .72rem!important;border-radius:.5rem!important;max-width:min(24rem,85vw)!important;background:#2b514d!important;color:white!important;font:500 13px/1.5 system-ui,sans-serif!important;pointer-events:none!important}',
     '[data-memory-picker-note]:empty{display:none!important}',
   ].join('\n');
   const key = (r) => r.kind + ':' + r.id;
@@ -184,7 +188,7 @@
     box.type = 'checkbox';
     box.dataset.memorySyncId = item.id;
     box.dataset.memorySyncKind = item.kind;
-    row.setAttribute('data-memory-sync-row', '');
+    row.setAttribute('data-memory-sync-row', item.kind);
     row.style.setProperty('--ai-memory-picker-anchor', anchor);
     box.style.setProperty('--ai-memory-picker-anchor', anchor);
     // Siblings provide independent link and checkbox semantics. Reserve the
@@ -574,12 +578,88 @@
       throw e;
     }
   }
+  function workerSender(sender) {
+    return (
+      sender?.id === chrome.runtime.id &&
+      !sender.tab &&
+      sender.url === chrome.runtime.getURL('background.js')
+    );
+  }
+  async function providerTabResponse(message) {
+    const ctx = routes.pageContext(location.href);
+    if (!ctx || (ctx.provider !== 'claude' && ctx.provider !== 'gemini')) return null;
+    const url = new URL(message.url);
+    if (url.origin !== location.origin || url.username || url.password) return null;
+    const { method, body } = message;
+    const { pathname: path } = url;
+    const geminiBoot = ctx.provider === 'gemini' && /^\/(?:u\/\d+\/)?app$/.test(path);
+    if (ctx.provider === 'claude') {
+      if (
+        method !== 'GET' ||
+        body != null ||
+        !/^\/api\/(?:account|organizations(?:\/[\w-]+\/(?:projects(?:\/[\w-]+\/conversations_v2)?|chat_conversations(?:\/[\w-]+|_v2)?))?)\/?$/.test(
+          path,
+        )
+      )
+        return null;
+    } else {
+      const slot = path.match(/^\/u\/(\d+)\//)?.[1] ?? null;
+      if (ctx.slot !== null && ctx.slot !== slot) return null;
+      if (geminiBoot) {
+        if (method !== 'GET' || body != null || url.search) return null;
+      } else {
+        if (
+          method !== 'POST' ||
+          !/^\/(?:u\/\d+\/)?_\/BardChatUi\/data\/batchexecute$/.test(path) ||
+          typeof body !== 'string' ||
+          body.length > 65536
+        )
+          return null;
+        const calls = JSON.parse(new URLSearchParams(body).get('f.req'));
+        const rpc = url.searchParams.get('rpcids');
+        if (
+          !['MaZiqc', 'hNvQHb'].includes(rpc) ||
+          calls?.length !== 1 ||
+          calls[0]?.length !== 1 ||
+          calls[0][0]?.[0] !== rpc
+        )
+          return null;
+      }
+    }
+    const response = await fetch(url.href, {
+      method,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: geminiBoot ? 'follow' : 'error',
+      signal: AbortSignal.timeout(20_000),
+      ...(method === 'POST' && {
+        body,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+          'X-Same-Domain': '1',
+        },
+      }),
+    });
+    if (new URL(response.url).origin !== location.origin) return null;
+    const text = await response.text();
+    if (text.length > 24 * 1024 * 1024) return null;
+    return {
+      status: response.status,
+      url: response.url,
+      body: text,
+      retryAfter: response.headers.get('retry-after'),
+    };
+  }
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
+    if (m?.type === 'FETCH_PROVIDER_TAB') {
+      if (!workerSender(sender)) return;
+      providerTabResponse(m).then(reply, () => reply(null));
+      return true;
+    }
     if (m?.type === 'GET_CHATGPT_TAB_SESSION') {
       if (
-        sender?.id !== chrome.runtime.id ||
-        sender.tab ||
-        sender.url !== chrome.runtime.getURL('background.js') ||
+        !workerSender(sender) ||
+        !routes.pageContext(location.href) ||
         location.origin !== 'https://chatgpt.com'
       )
         return;

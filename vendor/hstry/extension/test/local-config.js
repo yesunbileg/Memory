@@ -31,6 +31,7 @@ globalThis.chrome = {
             ? { settings }
             : { status },
       set: async (value) => {
+        if (value.settings) settings = structuredClone(value.settings);
         if (value.status) {
           status = structuredClone(value.status);
           writes.push(status);
@@ -117,6 +118,43 @@ settings = originalUnpairedSettings;
 const blockedFull = await send({ type: 'fullSyncProvider', provider: 'chatgpt' });
 assert.equal(blockedFull.ok, false, 'blocked sync must not acknowledge a successful start');
 assert.equal(blockedFull.code, 'missing_token');
+
+const discoveryHost = 'org.ai_memory.connect_' + runtimeId;
+const checkPacket = { op: 'check', archive_instance_id: archiveId };
+const health = { status: 'ok', service: 'ai-memory', schema: 2, archive_instance_id: archiveId };
+const hostCalls = [];
+let archiveReply = { error: 'unauthorized' };
+chrome.runtime.sendNativeMessage = async (host, packet) => {
+  hostCalls.push([host, packet]);
+  return host === discoveryHost ? health : archiveReply;
+};
+assert.equal((await send({ type: 'checkApi' })).code, 'unauthorized');
+assert.equal(settings.archiveId, undefined, 'discovery alone does not pair');
+archiveReply = health;
+hostCalls.length = 0;
+assert.deepEqual(await send({ type: 'checkApi' }), { ok: true, archiveId });
+assert.deepEqual(hostCalls.splice(0), [
+  [discoveryHost, { op: 'discover' }],
+  [nativeHost, checkPacket],
+]);
+assert.equal(settings.archiveId, archiveId);
+assert.deepEqual(settings.providers, { chatgpt: true });
+assert.equal((await send({ type: 'checkApi' })).ok, true);
+assert.deepEqual(hostCalls, [[nativeHost, checkPacket]], 'an existing pairing skips discovery');
+assert.equal(calls.length, 0, 'auto-connection does not access providers');
+
+settings = originalUnpairedSettings;
+const otherId = 'b'.repeat(32),
+  otherHost = 'org.ai_memory.archive_' + otherId;
+chrome.runtime.sendNativeMessage = async (host) => {
+  if (host === nativeHost) {
+    // Simulate a valid manual pairing saved while discovery checks the native host.
+    settings = { ...settings, archiveId: otherId, nativeHost: otherHost };
+  }
+  return host === otherHost ? { ...health, archive_instance_id: otherId } : health;
+};
+assert.deepEqual(await send({ type: 'checkApi' }), { ok: true, archiveId: otherId });
+assert.equal(settings.nativeHost, otherHost, 'auto-connection cannot replace a later pairing');
 
 settings = { ...settings, archiveId, nativeHost, token: 'synthetic-private-worker-token-123456' };
 status.chatgpt = {

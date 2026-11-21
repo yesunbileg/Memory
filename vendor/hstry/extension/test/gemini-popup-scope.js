@@ -154,3 +154,62 @@ test('website catalog and proof reject a foreground Google slot that is not the 
   assert.equal((await listGeminiCatalog({ slot: '0' })).entries.length, 1);
   assert.equal((await geminiPrincipalIds({ slot: '0' })).length, 1);
 });
+
+test('different Gemini tabs use their own boot session and only the selected tab receives RPCs', async (t) => {
+  const oldChrome = globalThis.chrome;
+  t.after(() => {
+    globalThis.chrome = oldChrome;
+  });
+  const calls = [];
+  const tabs = [
+    { tabId: 6, slot: '1' },
+    { tabId: 10, slot: '2' },
+    { tabId: 11, slot: '1' },
+  ];
+  t.mock.method(globalThis, 'fetch', async () => {
+    throw Error('default cookies were used');
+  });
+  globalThis.chrome = {
+    tabs: {
+      async sendMessage(tabId, packet, target) {
+        const slot = tabs.find((tab) => tab.tabId === tabId).slot;
+        const url = new URL(packet.url);
+        assert.equal(packet.type, 'FETCH_PROVIDER_TAB');
+        assert.equal(target.frameId, 0);
+        assert.ok(url.pathname.startsWith(`/u/${slot}/`));
+        calls.push([tabId, url.pathname]);
+        if (packet.method === 'GET') {
+          return {
+            url: url.href,
+            status: 200,
+            body: `<script>{"SNlM0e":"at${tabId}","FdrFJe":"sid${tabId}"}</script>`,
+          };
+        }
+        const rpcId = url.searchParams.get('rpcids');
+        assert.equal(new URLSearchParams(packet.body).get('at'), `at${tabId}`);
+        const response = rpc(
+          rpcId,
+          rpcId === 'MaZiqc'
+            ? [null, null, [row('selected')]]
+            : [[['T', null, [['text for this tab']], null]], null],
+        );
+        return { url: url.href, status: 200, body: await response.text() };
+      },
+    },
+  };
+  const owners = (await Promise.all(tabs.map(geminiPrincipalIds))).flat();
+  assert.equal(new Set(owners).size, 3, 'cookie isolation can occur at the same account slot');
+  const result = await syncGemini({
+    selectedScope: saved(owners[1], ['selected']),
+    tabContext: tabs[1],
+    push: async (_source, _adapter, rows) => {
+      assert.equal(rows[0].metadata.accountId, owners[1]);
+      return rows.length;
+    },
+  });
+  assert.equal(result.conversations, 1);
+  assert.deepEqual(
+    new Set(calls.filter(([, path]) => path.endsWith('batchexecute')).map(([id]) => id)),
+    new Set([10]),
+  );
+});

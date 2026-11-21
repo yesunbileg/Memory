@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 const file = (name) => new URL('../' + name, import.meta.url);
 const src = (name) => readFileSync(file(name), 'utf8');
-function fixture({ href = 'https://chatgpt.com/', framed = false, read } = {}) {
+function fixture({ href = 'https://chatgpt.com/', framed = false, read, fetch } = {}) {
   let listener;
   const sends = [],
     touches = [],
@@ -54,6 +54,9 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read } = {}) {
     top: window.top,
     location: loc,
     URL,
+    URLSearchParams,
+    AbortSignal,
+    fetch,
     AbortController,
     setTimeout,
     clearTimeout,
@@ -108,6 +111,33 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read } = {}) {
     },
   };
 }
+
+test('same-origin provider reads use the tab cookie context and reject unrelated endpoints', async () => {
+  const requests = [];
+  const f = fixture({
+    href: 'https://claude.ai/new',
+    fetch: async (url, init) => {
+      requests.push([url, init]);
+      return { url, status: 200, headers: new Headers(), text: async () => '{}' };
+    },
+  });
+  const worker = { ...f.sender, url: f.sender.url.replace('popup.html', 'background.js') };
+  const packet = {
+    type: 'FETCH_PROVIDER_TAB',
+    url: 'https://claude.ai/api/account',
+    method: 'GET',
+  };
+  assert.equal(await f.message(packet), undefined);
+  assert.equal(
+    await f.message({ ...packet, url: 'https://example.com/api/account' }, worker),
+    null,
+  );
+  assert.equal(await f.message({ ...packet, method: 'POST' }, worker), null);
+  assert.equal(await f.message({ ...packet, url: 'https://claude.ai/api/other' }, worker), null);
+  assert.equal((await f.message(packet, worker)).body, '{}');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0][1].credentials, 'same-origin');
+});
 
 test('opening a provider page or checking mode from the popup does not inspect the DOM, install an observer or fetch metadata', async () => {
   const f = fixture();

@@ -33,6 +33,9 @@ class Element {
   getAttribute(k) {
     return this.attributes[k];
   }
+  removeAttribute(k) {
+    delete this.attributes[k];
+  }
   addEventListener(k, v) {
     this.events[k] = v;
   }

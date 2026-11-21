@@ -4,6 +4,7 @@ import { drainSelected, preparePrincipalRun } from './queue.js';
 // authenticated with the browser session cookies (no bearer token needed).
 
 import { fetchJson, shortId, textPart, thinkingPart, toMs } from '../lib/common.js';
+import { fetchInTab } from '../lib/tab-fetch.js';
 
 import {
   normalizeCaptureTypes,
@@ -17,8 +18,18 @@ const BASE = 'https://claude.ai';
 const PAGE_SIZE = 50;
 const OVERLAP_MS = 5 * 60 * 1000;
 
-async function listOrganizations() {
-  const data = await fetchJson(`${BASE}/api/organizations`);
+// A tab context keeps every Claude request in the cookies/container of the
+// provider page the user selected, instead of the extension worker's context.
+const fetcherFor = (context) =>
+  context ? (url, init) => fetchInTab(context, url, init) : undefined;
+
+function readerFor(context) {
+  const fetcher = fetcherFor(context);
+  return (url, init = {}) => (fetcher ? fetchJson(url, init, { fetcher }) : fetchJson(url, init));
+}
+
+async function listOrganizations(context) {
+  const data = await readerFor(context)(`${BASE}/api/organizations`);
   const orgs = Array.isArray(data) ? data : (data?.organizations ?? data?.data);
   if (!Array.isArray(orgs)) {
     throw new Error('Claude returned an unreadable organizations response');
@@ -201,8 +212,8 @@ function toParsedConversation(detail, orgId) {
   };
 }
 
-async function signedInAccount() {
-  const account = await fetchJson(`${BASE}/api/account`, { cache: 'no-store' });
+async function signedInAccount(context) {
+  const account = await readerFor(context)(`${BASE}/api/account`, { cache: 'no-store' });
   if (!nativeId(account?.uuid) || !Array.isArray(account.memberships))
     throw new Error('Current Claude account is not verified.');
   const allowed = new Set(
@@ -213,9 +224,9 @@ async function signedInAccount() {
   );
   return { userId: account.uuid, allowed };
 }
-async function popupPrincipals() {
-  const { userId, allowed } = await signedInAccount();
-  const orgs = await listOrganizations();
+async function popupPrincipals(context) {
+  const { userId, allowed } = await signedInAccount(context);
+  const orgs = await listOrganizations(context);
   const result = orgs
     .filter((o) => allowed.has(o.id))
     .map((o) => ({
@@ -227,32 +238,39 @@ async function popupPrincipals() {
   if (!result.length) throw new Error('Current Claude organization is not verified.');
   return result;
 }
-const popup = {
-  name: 'Claude',
-  field: 'orgs',
-  adapter: 'claude-web',
-  principals: popupPrincipals,
-  id: (item) => item?.uuid,
-  projects: (p, read) => listProjects(p.id, read),
-  chats: (p, read) => listUpdatedConversations(p.id, null, read, true),
-  members: (p, id, read) => listProjectConversations(p.id, id, read),
-  owns: async (p) => {
-    const { userId, allowed } = await signedInAccount();
-    return JSON.stringify([userId, p.id]) === p.principalId && allowed.has(p.id);
-  },
-  detail: (p, id) =>
-    fetchJson(
-      `${BASE}/api/organizations/${encodeURIComponent(p.id)}/chat_conversations/${encodeURIComponent(id)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`,
-    ),
-  parse: (detail, id, p) => toParsedConversation(detail, p.id),
+const popup = (context) => {
+  const read = readerFor(context);
+  const fetcher = fetcherFor(context);
+  return {
+    name: 'Claude',
+    field: 'orgs',
+    adapter: 'claude-web',
+    principals: () => popupPrincipals(context),
+    ...(fetcher ? { fetcher } : {}),
+    id: (item) => item?.uuid,
+    projects: (p, page) => listProjects(p.id, page),
+    chats: (p, page) => listUpdatedConversations(p.id, null, page, true),
+    members: (p, id, page) => listProjectConversations(p.id, id, page),
+    owns: async (p) => {
+      const { userId, allowed } = await signedInAccount(context);
+      return JSON.stringify([userId, p.id]) === p.principalId && allowed.has(p.id);
+    },
+    detail: (p, id) =>
+      read(
+        `${BASE}/api/organizations/${encodeURIComponent(p.id)}/chat_conversations/${encodeURIComponent(id)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`,
+      ),
+    parse: (detail, id, p) => toParsedConversation(detail, p.id),
+  };
 };
-export const listClaudeCatalog = () => listPopupCatalog(popup);
-export const claudePrincipalIds = async () => (await popupPrincipals()).map((p) => p.principalId);
+export const listClaudeCatalog = (context) => listPopupCatalog(popup(context));
+export const claudePrincipalIds = async (context) =>
+  (await popupPrincipals(context)).map((p) => p.principalId);
 
 export async function syncClaude({
   state = {},
   captureTypes,
   selectedScope,
+  tabContext,
   push,
   register = async () => {},
   log = () => {},
@@ -261,7 +279,7 @@ export async function syncClaude({
   report = async () => {},
 }) {
   if (selectedScope !== undefined)
-    return syncPopupScope(popup, {
+    return syncPopupScope(popup(tabContext), {
       selectedScope,
       state,
       push,

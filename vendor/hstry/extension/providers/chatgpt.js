@@ -30,16 +30,19 @@ const OVERLAP_MS = 5 * 60 * 1000;
 // fetchJson handles bursts, but pacing avoids tripping 429 in the first place.
 
 export async function getChatGPTSession(context) {
-  const data = context
-    ? await chrome.tabs.sendMessage(
-        context.tabId,
-        { type: 'GET_CHATGPT_TAB_SESSION' },
-        {
-          frameId: 0,
-          ...(context.documentId ? { documentId: context.documentId } : {}),
-        },
-      )
-    : await fetchJson(`${BASE}/api/auth/session`, { cache: 'no-store' });
+  const data = await (context
+    ? chrome.tabs
+        .sendMessage(
+          context.tabId,
+          { type: 'GET_CHATGPT_TAB_SESSION' },
+          { frameId: 0, ...(context.documentId ? { documentId: context.documentId } : {}) },
+        )
+        .catch(() => {
+          throw Object.assign(new Error('The ChatGPT tab is unavailable.'), {
+            code: 'provider_tab_unavailable',
+          });
+        })
+    : fetchJson(`${BASE}/api/auth/session`, { cache: 'no-store' }));
   if (!data?.accessToken) throw new NotLoggedInError('chatgpt.com');
   return data;
 }
@@ -465,6 +468,7 @@ export async function syncChatGPT({
   chatgptSyncList,
   selectedScope,
   chatgptTab,
+  tabContext,
   push,
   register = async () => {},
   log = () => {},
@@ -473,7 +477,7 @@ export async function syncChatGPT({
   report = async () => {},
 }) {
   if (selectedScope !== undefined)
-    return syncPopupScope(popup(chatgptTab), {
+    return syncPopupScope(popup(tabContext ?? chatgptTab), {
       selectedScope,
       state,
       push,

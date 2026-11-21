@@ -18,7 +18,7 @@ export function parseConnectionFile(text) {
   }
   if (file?.schema === 1 && file?.application === 'ai-memory' && file?.host === '127.0.0.1')
     throw new Error(
-      'Legacy connection file. Run ai-memory connect --extension-id with your extension ID and choose the new connection file.',
+      'Legacy connection file. Run ai-memory connect --extension-id with your extension ID, then check the connection.',
     );
   if (
     !file ||
@@ -44,12 +44,12 @@ export function connectionPresentation(result) {
     missing_token: [
       'Let’s connect your computer',
       'Not connected',
-      'Start the local app, then choose its connection file below.',
+      'Run the one-time setup below, then click Check connection.',
     ],
     legacy_pairing: [
       'Upgrade your connection',
       'Reconnect',
-      'Run ai-memory connect --extension-id with this extension ID and select the new connection file.',
+      'Run the updated setup command below, then click Check connection.',
     ],
     archive_changed: [
       'Your archive changed',
@@ -59,7 +59,7 @@ export function connectionPresentation(result) {
     unauthorized: [
       'Your connection needs an update',
       'Check connection',
-      'Register the native host for this extension ID, then choose its connection file.',
+      'Register AI Memory for this extension ID, then check the connection.',
     ],
     offline: [
       'Your computer is not connected',
@@ -69,7 +69,12 @@ export function connectionPresentation(result) {
     incompatible_server: [
       'Update your local app',
       'Update needed',
-      'Update AI Memory, restart it, and choose the new connection file.',
+      'Update AI Memory, run the setup command below, then check the connection.',
+    ],
+    storage_unavailable: [
+      'Connection could not be saved',
+      'Check connection',
+      'Check that browser storage is available, then try again.',
     ],
   };
   const [title, label, detail] = messages[result?.code] ?? messages.offline;

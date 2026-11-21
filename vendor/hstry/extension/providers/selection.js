@@ -43,6 +43,10 @@ export function normalizeCaptureTypes(values) {
   );
 }
 
+export function sameCaptureTypes(stored, expected) {
+  return Object.keys(CAPTURE_TYPES).every((key) => stored?.[key] === expected[key]);
+}
+
 const PROJECT_IDS = ['project_id', 'project_uuid', 'folder_id', 'folder_uuid'];
 const PIN_FLAGS = [
   'is_pinned',

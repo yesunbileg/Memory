@@ -18,6 +18,12 @@ export async function drainSelected({
   const retryMessage = `Some selected ${provider} conversations could not be read. Capture is incomplete; retry after checking your sign-in.`;
   let budget = 10,
     conversations = 0;
+  await report({
+    phase: 'importing',
+    detected: run.detected,
+    processed: run.processed,
+    selection: run.selection,
+  });
   if (canResume && run.groups.some((g) => g.ids.length)) {
     state.pending = run;
     await guard();
@@ -27,6 +33,7 @@ export async function drainSelected({
     const ids = group.ids.slice(0, budget);
     const batch = [],
       failed = [];
+    let processed = run.processed;
     for (const id of ids) {
       await guard();
       if (budget < 10) await sleep(400);
@@ -40,6 +47,7 @@ export async function drainSelected({
         failed.push(id);
       }
       budget--;
+      await report({ processed: ++processed });
     }
     // Never move an ID past the durable frontier on a partial receiver receipt.
     if (batch.length) {

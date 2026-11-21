@@ -79,7 +79,7 @@ def parser():
     serve.add_argument("--port", type=int, default=41770)
     serve.add_argument("--token-file", type=Path)
     connect = sub.add_parser(
-        "connect", help="Create a private extension connection file and start AI Memory"
+        "connect", help="Register a browser extension with a local AI Memory archive"
     )
     connect.add_argument(
         "--extension-id",

@@ -4,9 +4,11 @@ import { scopeFor, nonempty } from './popup-scope.js';
 import { pageSelection, forgetPageTab } from './page-selection.js';
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { PROVIDERS } from './providers/index.js';
-import { normalizeSettings } from './ui.js';
-import { checkConnection } from './worker-auth.js';
+import { normalizeSettings, updateLocalSettings } from './ui.js';
+import { checkConnection, discoverConnection, unpaired } from './worker-auth.js';
 import { requestGroups } from './transport.js';
+import { syncTabScopes } from './providers/tab-scopes.js';
+import { sameCaptureTypes } from './providers/selection.js';
 
 const ALARM_NAME = 'hstry-sync';
 const CONTINUE_ALARM_PREFIX = 'hstry-sync-continue-';
@@ -204,14 +206,28 @@ function configuredSources(settings) {
 }
 
 async function checkApi() {
-  return checkConnection(await getSettings());
+  const settings = await getSettings();
+  if (!unpaired(settings)) return checkConnection(settings);
+  const found = await discoverConnection(chrome.runtime.id);
+  if (!found.ok) return found.code === 'missing_token' ? checkConnection(settings) : found;
+  const saved = await updateLocalSettings((current) =>
+    unpaired(current)
+      ? {
+          ...current,
+          archiveId: found.archiveId,
+          nativeHost: 'org.ai_memory.archive_' + found.archiveId,
+          token: '',
+        }
+      : null,
+  );
+  return saved ? found : checkConnection(await getSettings());
 }
 
 const LOCAL_ERRORS = {
   storage_unavailable: 'Browser storage could not save capture progress. Free space and retry.',
-  missing_token: 'Connect AI Memory using your private connection file first.',
-  unauthorized: 'This connection file does not match the running AI Memory receiver.',
-  offline: 'AI Memory is offline. Run ai-memory connect and keep its terminal open.',
+  missing_token: 'Set up the local connection in AI Memory Settings first.',
+  unauthorized: 'The local AI Memory host does not allow this extension.',
+  offline: 'The local AI Memory host is offline. Check the connection in Settings.',
   archive_changed: 'The receiving archive changed during capture. Capture again to replay safely.',
   archive_unavailable: 'AI Memory could not save this batch. Check its terminal and retry.',
   body_too_large:
@@ -273,10 +289,17 @@ async function scheduleContinuation(providerName, deadline = 0) {
   });
 }
 
-async function activeChatGPTTab() {
-  const [tab] = (await chrome.tabs?.query?.({ active: true, lastFocusedWindow: true })) ?? [];
-  if (!Number.isInteger(tab?.id) || !tab?.url) return undefined;
-  return new URL(tab.url).origin === 'https://chatgpt.com' ? { tabId: tab.id } : undefined;
+async function providerTabs(selected) {
+  const tabs =
+    (await chrome.tabs?.query?.({ url: selected.map(([, p]) => `https://${p.site}/*`) })) ?? [];
+  const contexts = new Map(selected.map(([name]) => [name, []]));
+  for (const tab of tabs.sort((a, b) => Number(b.active) - Number(a.active))) {
+    if (!Number.isInteger(tab.id) || tab.id < 0 || tab.discarded) continue;
+    const ctx = globalThis.aiMemoryPageRoutes.pageContext(tab.url);
+    if (ctx && contexts.has(ctx.provider))
+      contexts.get(ctx.provider).push({ ...ctx, tabId: tab.id });
+  }
+  return contexts;
 }
 
 async function runSync(
@@ -331,9 +354,7 @@ async function runSync(
     if (activeProviders.get(name) === owner) activeProviders.delete(name);
   };
   try {
-    const chatgptTab = selected.some(([name]) => name === 'chatgpt')
-      ? await activeChatGPTTab()
-      : undefined;
+    const tabs = await providerTabs(selected);
     await chrome.action.setBadgeBackgroundColor({ color: '#007aff' });
     await chrome.action.setBadgeText({ text: '…' });
 
@@ -405,9 +426,7 @@ async function runSync(
           release(name);
           return;
         }
-        const policyChanged =
-          !status[name]?.capturePolicy ||
-          JSON.stringify(status[name].capturePolicy) !== JSON.stringify(settings.captureTypes);
+        const policyChanged = !sameCaptureTypes(status[name]?.capturePolicy, settings.captureTypes);
         const continuing =
           !full && !scopeChanged && !policyChanged && Boolean(status[name]?.continuationPending);
         const entry = {
@@ -466,11 +485,10 @@ async function runSync(
         );
         try {
           await guard();
-          const result = await provider.sync({
+          const options = {
             state: entry.state ?? {},
             captureTypes: { ...settings.captureTypes },
             selectedScope: saved.scope,
-            ...(name === 'chatgpt' && chatgptTab ? { chatgptTab } : {}),
             push,
             report,
             guard,
@@ -482,7 +500,12 @@ async function runSync(
             },
             // Provider diagnostics can contain account or conversation text.
             log: () => {},
-          });
+          };
+          const contexts = tabs.get(name);
+          const result =
+            contexts.length || saved.scope.entries.length > 1 || options.state.accountRun
+              ? await syncTabScopes(provider, contexts, { ...options, continuing })
+              : await provider.sync(options);
           await guard();
           entry.state = result.state;
           entry.selection = Object.hasOwn(result, 'selection')
@@ -707,7 +730,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'checkApi') {
-    checkApi().then(sendResponse);
+    checkApi().then(sendResponse, () => sendResponse({ ok: false, code: 'storage_unavailable' }));
     return true;
   }
   return false;

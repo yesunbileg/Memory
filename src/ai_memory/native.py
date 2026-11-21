@@ -48,6 +48,19 @@ def _install(path: Path, content: bytes, mode: int):
         os.fsync(stream.fileno())
 
 
+def _install_discovery(
+    executable: Path, launcher: bytes, manifest_file: Path, manifest: dict
+) -> bool:
+    """Register the immutable discovery alias, or report that another archive owns it."""
+    content = (json.dumps(manifest, indent=2) + "\n").encode()
+    try:
+        _install(executable, launcher, 0o700)
+        _install(manifest_file, content, 0o600)
+    except PublicInputError:
+        return False
+    return True
+
+
 def register(db_path: Path, extension_id: str, browser: str, user_data_dir: Path | None = None):
     if not re.fullmatch(r"[a-p]{32}", extension_id):
         raise PublicInputError("Use the 32-letter ID displayed by the installed extension.")
@@ -93,7 +106,52 @@ def register(db_path: Path, extension_id: str, browser: str, user_data_dir: Path
         "archive_instance_id": archive_id,
     }
     _install(descriptor, (json.dumps(pair, indent=2) + "\n").encode(), 0o600)
-    return {"connection_file": str(descriptor), "transport": "native", "browser": browser}
+    discovery_host = "org.ai_memory.connect_" + extension_id
+    discovery_executable = directory / "discovery"
+    discovery_manifest_file = root / "NativeMessagingHosts" / (discovery_host + ".json")
+    discovery_args = [
+        sys.executable,
+        "-m",
+        "ai_memory.native",
+        "--discover",
+        str(db_path),
+        archive_id,
+        origin,
+    ]
+    discovery_launcher = ("#!/bin/sh\nexec " + shlex.join(discovery_args) + ' "$@"\n').encode()
+    discovery_manifest = {
+        "name": discovery_host,
+        "description": "AI Memory local archive discovery",
+        "path": str(discovery_executable),
+        "type": "stdio",
+        "allowed_origins": [origin],
+    }
+    auto_connect = _install_discovery(
+        discovery_executable, discovery_launcher, discovery_manifest_file, discovery_manifest
+    )
+    return {
+        "connection_file": str(descriptor),
+        "transport": "native",
+        "browser": browser,
+        "auto_connect": auto_connect,
+    }
+
+
+def _archive_unchanged(db: Path, archive_id: str) -> bool:
+    if not db.is_file() or db.is_symlink():
+        return False
+    # Probe before Store() can initialize, migrate or chmod an unrelated file at
+    # the previous path. Then recheck on the connection that performs the write.
+    try:
+        with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as probe:
+            row = probe.execute(
+                "SELECT value FROM settings WHERE key='archive_instance_id'"
+            ).fetchone()
+            if row is None or json.loads(row[0]) != archive_id:
+                return False
+    except (sqlite3.DatabaseError, ValueError):
+        return False
+    return True
 
 
 def _handle(args, stream):
@@ -106,22 +164,16 @@ def _handle(args, stream):
     if len(raw) != size:
         return {"error": "invalid_payload"}
     packet = json.loads(raw.decode("utf-8"))
-    if not isinstance(packet, dict) or packet.get("archive_instance_id") != args.archive_id:
+    if args.discover:
+        if packet != {"op": "discover"}:
+            return {"error": "invalid_payload"}
+    elif not isinstance(packet, dict) or packet.get("archive_instance_id") != args.archive_id:
         return {"error": "archive_changed"}
-    if not args.db.is_file() or args.db.is_symlink():
+    if not _archive_unchanged(args.db, args.archive_id):
         return {"error": "archive_changed"}
-    # Probe before Store() can initialize, migrate or chmod an unrelated file at
-    # the previous path. Then recheck on the connection that performs the write.
-    try:
-        with closing(sqlite3.connect(args.db.as_uri() + "?mode=ro", uri=True)) as probe:
-            row = probe.execute(
-                "SELECT value FROM settings WHERE key='archive_instance_id'"
-            ).fetchone()
-            if row is None or json.loads(row[0]) != args.archive_id:
-                return {"error": "archive_changed"}
-    except (sqlite3.DatabaseError, ValueError):
-        return {"error": "archive_changed"}
-    if packet.get("op") == "check":
+    if not args.discover and packet.get("op") == "discover":
+        return {"error": "invalid_payload"}
+    if args.discover or packet.get("op") == "check":
         return {
             "status": "ok",
             "service": "ai-memory",
@@ -136,6 +188,7 @@ def _handle(args, stream):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--discover", action="store_true")
     parser.add_argument("db", type=Path)
     parser.add_argument("archive_id")
     parser.add_argument("allowed_origin")

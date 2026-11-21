@@ -9,51 +9,63 @@
   </head>
   <body>
     <header class="mast">
-      <img src="icons/icon-48.png" alt="" width="32" height="32" />
+      <img src="icons/icon-48.png" alt="" width="36" height="36" />
       <div class="brand">
         <strong>AI Memory</strong><small id="api-title" role="status">Checking connection…</small>
       </div>
       <button id="settings" aria-expanded="false" aria-controls="settings-panel">Settings</button>
     </header>
     <main>
+      <section class="archive" aria-labelledby="archive-title">
+        <div class="line">
+          <h1 id="archive-title">Local archive</h1>
+          <button id="sync" class="primary" disabled>Sync now</button>
+        </div>
+        <p id="plan-hint" class="muted" hidden></p>
+        <progress id="sync-progress" aria-label="Local sync progress" hidden></progress>
+        <p id="notice" class="feedback" role="status"></p>
+      </section>
       <section id="settings-panel" hidden aria-labelledby="settings-title" class="panel">
         <div class="line">
           <h2 id="settings-title">Local connection</h2>
           <button id="retry">Check connection</button>
         </div>
         <p id="api-detail" class="muted"></p>
-        <label class="field"
-          >Connection file<input id="connection-file" type="file" accept=".json,application/json"
-        /></label>
         <details>
-          <summary>Paste connection file contents instead</summary>
-          <label class="field"
-            >Connection JSON<textarea
-              id="connection-json"
-              spellcheck="false"
-              autocomplete="off"
-              maxlength="16384"
-              rows="2"
-            ></textarea>
-          </label>
-          <button id="verify-json" type="button">Verify connection</button>
-        </details>
-        <p id="pair-status" class="feedback" role="status"></p>
-        <details>
-          <summary>Get a connection file</summary>
+          <summary>Set up automatic connection</summary>
           <label class="field"
             >Browser<select id="browser-family">
-              <option value="chrome">Chrome</option>
               <option value="brave">Brave</option>
+              <option value="chrome">Chrome</option>
               <option value="chromium">Chromium</option>
             </select></label
           >
           <p class="muted">
-            Run this command on the computer that holds your archive. Choose the JSON file it
-            creates.
+            Run this once from your AI Memory folder, then click Check connection. For a custom
+            archive, add <kbd>--db PATH</kbd> before <kbd>connect</kbd>.
           </p>
           <code id="setup-command"></code>
         </details>
+        <details>
+          <summary>Connect a different archive manually</summary>
+          <label class="field"
+            >Connection file<input id="connection-file" type="file" accept=".json,application/json"
+          /></label>
+          <details>
+            <summary>Paste connection file contents instead</summary>
+            <label class="field"
+              >Connection JSON<textarea
+                id="connection-json"
+                spellcheck="false"
+                autocomplete="off"
+                maxlength="16384"
+                rows="2"
+              ></textarea>
+            </label>
+            <button id="verify-json" type="button">Verify connection</button>
+          </details>
+        </details>
+        <p id="pair-status" class="feedback" role="status"></p>
         <h2>Sync preferences</h2>
         <p class="muted">Only checked items from enabled providers can sync.</p>
         <div class="toggles">
@@ -68,6 +80,7 @@
           >Check every
           <input id="interval" type="number" min="1" max="720" step="1" /> minutes</label
         >
+        <p id="schedule" class="muted"></p>
         <details>
           <summary>Sync activity and rescan</summary>
           <p class="muted">Rescan checks older saved items without duplicating messages.</p>
@@ -78,31 +91,23 @@
         </details>
         <small id="version" class="muted"></small>
       </section>
-      <section id="list-panel" aria-labelledby="list-title">
-        <div class="line">
-          <h1 id="list-title">Sync list</h1>
-          <span id="mode-site" class="eyebrow">Current tab</span>
-        </div>
+      <section id="list-panel" aria-label="Choose items to sync">
+        <span id="mode-site" hidden>Current tab</span>
         <button
           type="button"
           id="list-mode"
           aria-pressed="false"
-          aria-describedby="mode-status"
+          aria-describedby="mode-site mode-status"
           disabled
         >
-          List mode <span aria-hidden="true" id="mode-state">Off</span>
+          List mode
+          <span class="switch-state" aria-hidden="true">
+            <span class="switch-track"></span><span id="mode-state">Off</span>
+          </span>
         </button>
         <p id="mode-status" class="muted" role="status">Checking the current tab…</p>
       </section>
     </main>
-    <footer>
-      <div class="line">
-        <span id="schedule" class="muted"></span
-        ><button id="sync" class="primary" disabled>Sync now</button>
-      </div>
-      <p id="plan-hint" class="muted"></p>
-      <p id="notice" class="feedback" role="status"></p>
-    </footer>
     <script src="popup.js" type="module"></script>
   </body>
 </html>
