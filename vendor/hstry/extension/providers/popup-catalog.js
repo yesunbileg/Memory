@@ -1,10 +1,12 @@
-// Popup discovery is metadata-only. The only durable state of an explicit run is IDs.
+// Popup discovery is metadata-only. Durable capture state includes IDs and acknowledged update times.
 import { fetchJson, NotLoggedInError } from '../lib/common.js';
 import { createSelectionSummary, classifyConversation } from './selection.js';
 import { drainSelected } from './queue.js';
 import { hasScopeItems } from '../popup-scope.js';
 
 const cap = 10000;
+// hstry rechecks the last five minutes so a concurrent edit can settle before we skip it.
+const OVERLAP_MS = 5 * 60 * 1000;
 export const nativeId = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(id);
 const label = (...values) =>
   values
@@ -76,7 +78,7 @@ export function memberships(item) {
 const identity = (ps) => JSON.stringify(ps.map((p) => p.principalId).sort());
 
 // One reader and one total budget per popup action. Do not retry a vanished account.
-async function gather(spec, selected, guard) {
+async function gather(spec, selected, guard, signal) {
   const principals = await spec.principals();
   const include = (p) =>
     selected === undefined ||
@@ -89,7 +91,11 @@ async function gather(spec, selected, guard) {
   const read = async (url, init = {}) => {
     await guard();
     if (++pages > 200) throw invalid();
-    return fetchJson(url, { ...init, cache: 'no-store' }, { retries: 0, fetcher: spec.fetcher });
+    return fetchJson(
+      url,
+      { ...init, cache: 'no-store', signal },
+      { retries: 0, fetcher: spec.fetcher },
+    );
   };
   for (const p of principals.filter(include)) {
     const blocked = new Set(),
@@ -133,10 +139,11 @@ async function gather(spec, selected, guard) {
         // Bulk Recents must also reconcile project membership. An ordinary-list
         // duplicate can omit its project ID even though its project lists it.
         if (scope && !scope.includeRecents && !direct.has(id) && !wantedProjects.has(where)) return;
+        const previous = convs.get(id);
         const parents = new Set([
           ...memberships(item),
           ...(where ? [where] : []),
-          ...(convs.get(id)?.projectId ? [convs.get(id).projectId] : []),
+          ...(previous?.projectId ? [previous.projectId] : []),
         ]);
         if (
           unavailable(item) ||
@@ -148,8 +155,7 @@ async function gather(spec, selected, guard) {
         }
         // A verified project member can be untitled. Its collection ID, not its display
         // name, establishes membership. Ordinary-list rows still need a real title.
-        const title =
-          label(item.title, item.name) ?? convs.get(id)?.title ?? (where && 'Untitled chat');
+        const title = label(item.title, item.name) ?? previous?.title ?? (where && 'Untitled chat');
         if (!title) {
           entryIncomplete = true;
           return;
@@ -161,17 +167,23 @@ async function gather(spec, selected, guard) {
         }).categories.every((k) => k === 'recents');
         if (!recentOnly) legacyOrdinary.delete(id);
         else if (!convs.has(id)) legacyOrdinary.add(id);
+        const incomingTime = scope ? spec.updatedAt?.(item) : null;
+        const previousTime = previous?.updatedAt;
+        const conflict =
+          previousTime === false || (previousTime && incomingTime && previousTime !== incomingTime);
         convs.set(id, {
           id,
           title,
           ...(projectId ? { projectId } : {}),
+          ...(scope ? { updatedAt: conflict ? false : (incomingTime ?? previousTime) } : {}),
         });
       }
       // Resolve project pages first so a long ordinary list cannot starve them.
       // A failed membership page cannot grant access to that project via Recents.
       let membershipComplete = true;
       const verifiedMember = new Set();
-      const required = (e) => ['selection_changed', 'storage_unavailable'].includes(e?.code);
+      const required = (e) =>
+        ['selection_changed', 'storage_unavailable', 'sync_stopped'].includes(e?.code);
       // Independent chat selections may require searching the remaining projects. Give whole
       // projects the page budget first, even when the provider orders them last.
       const projectOrder = scope
@@ -229,7 +241,8 @@ async function gather(spec, selected, guard) {
         legacyOrdinary,
       });
     } catch (error) {
-      if (['selection_changed', 'storage_unavailable'].includes(error?.code)) throw error;
+      if (['selection_changed', 'storage_unavailable', 'sync_stopped'].includes(error?.code))
+        throw error;
       // An inaccessible organization cannot supply titles or queue entries. Other
       // organizations remain usable only after fresh principal verification below.
       if (error instanceof NotLoggedInError) denied = true;
@@ -276,7 +289,7 @@ function validSelection(value, supportsRecents) {
 
 export async function syncPopupScope(
   spec,
-  { selectedScope, state = {}, push, register, guard, report, checkpoint },
+  { selectedScope, state = {}, push, register, guard, report, checkpoint, signal },
 ) {
   const selection = createSelectionSummary();
   const stop = async (message) => {
@@ -294,7 +307,7 @@ export async function syncPopupScope(
   const chosen = selectedScope.entries.filter(hasScopeItems);
   if (!chosen.length) return stop(null);
   await report({ phase: 'discovering', selection });
-  const { groups, incomplete, principals } = await gather(spec, chosen, guard);
+  const { groups, incomplete, principals } = await gather(spec, chosen, guard, signal);
   if (!groups.length) return stop('The selected account or its catalog is unavailable.');
   const signature = JSON.stringify([identity(principals), chosen]);
   const prior = state.pending?.signature === signature ? state.pending : null;
@@ -303,6 +316,7 @@ export async function syncPopupScope(
       signature,
       started: prior?.started ?? now,
       processed: prior?.processed ?? 0,
+      alreadyCurrent: prior?.alreadyCurrent ?? 0,
       detected: 0,
       selection,
       groups: [],
@@ -330,11 +344,29 @@ export async function syncPopupScope(
     missing ||=
       [...direct].some((id) => !allowed.has(id)) ||
       [...projects].some((id) => !catalog.projects.some((c) => c.id === id));
-    current.set(p.principalId, { p, allowed, legacy, projects, direct });
+    const saved = state[spec.field]?.[p.principalId]?.archivedUpdates;
+    const archivedUpdates = new Map(
+      (Array.isArray(saved) ? saved : []).filter(
+        (pair) => Array.isArray(pair) && allowed.has(pair[0]) && Number.isFinite(pair[1]),
+      ),
+    );
+    next[spec.field][p.principalId] = { archivedUpdates: [...archivedUpdates] };
+    current.set(p.principalId, { p, allowed, legacy, projects, direct, archivedUpdates });
     const prev = prior?.groups?.find((g) => g.principalId === p.principalId);
     const ids = prev
       ? [...new Set([...prev.ids, ...prev.failed])].filter((id) => allowed.has(id))
-      : [...allowed.keys()];
+      : [...allowed.values()]
+          .filter(
+            ({ id, updatedAt }) =>
+              !(
+                Number.isFinite(updatedAt) &&
+                updatedAt > 0 &&
+                updatedAt <= now - OVERLAP_MS &&
+                archivedUpdates.get(id) === updatedAt
+              ),
+          )
+          .map(({ id }) => id);
+    if (!prev) run.alreadyCurrent += allowed.size - ids.length;
     await guard();
     await register(p.sourceId, spec.adapter);
     run.groups.push({
@@ -361,8 +393,23 @@ export async function syncPopupScope(
     provider: spec.name,
     checkpoint,
     guard,
+    signal,
     report,
     canResume: true,
+    onAccepted(principalId, batch) {
+      const { archivedUpdates, allowed } = current.get(principalId);
+      for (const chat of batch) {
+        const listed = allowed.get(chat.externalId)?.updatedAt;
+        if (
+          Number.isFinite(listed) &&
+          listed > 0 &&
+          Number.isFinite(chat.updatedAt) &&
+          chat.updatedAt >= listed
+        )
+          archivedUpdates.set(chat.externalId, listed);
+      }
+      next[spec.field][principalId].archivedUpdates = [...archivedUpdates];
+    },
     beforeRead: async (pid) => {
       await guard();
       if (!(await spec.owns(current.get(pid).p))) throw changed();

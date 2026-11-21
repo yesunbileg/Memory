@@ -48,6 +48,7 @@ globalThis.chrome = {
   alarms: {
     get: async (name) => alarms.get(name),
     create: async (name, v) => alarms.set(name, v),
+    clear: async (name) => alarms.delete(name),
     onAlarm: {
       addListener(fn) {
         alarmListener = fn;
@@ -128,3 +129,63 @@ alarmListener({ name: 'hstry-sync-continue-chatgpt' });
 await new Promise((r) => setTimeout(r, 10));
 assert.equal(providerReads, previous);
 assert.equal(alarms.get('hstry-sync-continue-chatgpt')?.when, next);
+
+// A healthy worker should finish queued slices without waiting for the alarm.
+// Keep that alarm available as a recovery path if the worker is suspended.
+const resumedStates = [];
+PROVIDERS.chatgpt.sync = async ({ state }) => {
+  resumedStates.push(state.slice ?? 0);
+  const slice = (state.slice ?? 0) + 1;
+  return { state: { slice }, conversations: 0, hasMore: slice < 3 };
+};
+await send({ type: 'syncNow' });
+const waitUntil = Date.now() + 3_000;
+while (Date.now() < waitUntil && (resumedStates.length < 3 || mem.status.chatgpt.running))
+  await new Promise((r) => setTimeout(r, 20));
+assert.deepEqual(resumedStates, [0, 1, 2]);
+assert.equal(mem.status.chatgpt.continuationPending, false);
+assert.ok(alarms.has('hstry-sync-continue-chatgpt'), 'the recovery alarm was persisted');
+
+const stop = () =>
+  new Promise((resolve) => {
+    if (!listener({ type: 'stopSync' }, popup, resolve)) resolve({ ok: false });
+  });
+const until = async (check) => {
+  for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(check(), 'worker did not reach the expected state');
+};
+const pausedRead = Promise.withResolvers();
+let entered = false;
+let followupReads = 0;
+PROVIDERS.chatgpt.sync = async ({ guard, checkpoint }) => {
+  await checkpoint({ accounts: { fixture: { archivedUpdates: [['saved', 123]] } }, pending: true });
+  entered = true;
+  await pausedRead.promise;
+  await guard();
+  followupReads++;
+  return { state: {}, conversations: 0 };
+};
+await send({ type: 'syncNow' });
+await until(() => entered);
+assert.equal((await stop()).ok, true, 'the popup can stop an active run');
+assert.equal(mem.status.chatgpt.progress.phase, 'stopping');
+pausedRead.resolve();
+await until(() => mem.status.chatgpt.progress.phase === 'cancelled');
+assert.equal(followupReads, 0);
+assert.equal(mem.status.chatgpt.continuationPending, false);
+assert.deepEqual(mem.status.chatgpt.state.accounts.fixture.archivedUpdates, [['saved', 123]]);
+
+let queuedRuns = 0;
+PROVIDERS.chatgpt.sync = async () => {
+  queuedRuns++;
+  return { state: {}, conversations: 0, hasMore: true };
+};
+await send({ type: 'syncNow' });
+await until(() => !mem.status.chatgpt.running && mem.status.chatgpt.continuationPending);
+assert.equal((await stop()).ok, true, 'the popup can also stop a queued run');
+assert.equal(mem.status.chatgpt.progress.phase, 'cancelled');
+assert.ok(!alarms.has('hstry-sync-continue-chatgpt'));
+assert.ok(alarms.has('hstry-sync'), 'stop does not disable the normal periodic schedule');
+alarmListener({ name: 'hstry-sync-continue-chatgpt' });
+await new Promise((r) => setTimeout(r, 450));
+assert.equal(queuedRuns, 1, 'neither the queued timer nor the alarm may resume a stopped run');

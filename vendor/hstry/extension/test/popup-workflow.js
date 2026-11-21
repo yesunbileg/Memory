@@ -323,3 +323,29 @@ test('the popup verifies pairing, merges preferences, and syncs only on request 
   await chatgptRescan.fire('click');
   assert.deepEqual(calls.at(-1), { type: 'fullSyncProvider', provider: 'chatgpt' });
 });
+
+test('the popup replaces Sync now with Stop sync while a run is queued or active', async () => {
+  const archiveId = 'a'.repeat(32);
+  const entry = {
+    captureScope: JSON.stringify([archiveId, 'chatgpt', 'profile', 'browser-local', {}]),
+    lastRunMs: Date.now(),
+    continuationPending: true,
+    progress: { phase: 'queued', created: 2 },
+  };
+  const { get, calls } = await popup({
+    data: {
+      settings: {
+        archiveId,
+        nativeHost: 'org.ai_memory.archive_' + archiveId,
+        providers: { chatgpt: true },
+      },
+      status: { chatgpt: entry },
+    },
+    workerReply: () => ({ ok: true }),
+  });
+  const button = get('sync');
+  assert.equal(button.textContent, 'Stop sync');
+  assert.equal(button.disabled, false);
+  await button.fire('click');
+  assert.deepEqual(calls.at(-1), { type: 'stopSync' });
+});

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { fetchJson, RateLimitedError } from '../lib/common.js';
 
 let calls = 0;
@@ -27,3 +28,23 @@ try {
       : `FAIL wrong error: ${e.name}`,
   );
 }
+
+const stopping = new AbortController();
+let cancelledCalls = 0;
+const backoff = fetchJson(
+  'https://example.com/stop',
+  { signal: stopping.signal },
+  {
+    fetcher: async () => {
+      cancelledCalls++;
+      return new Response('', { status: 429, headers: { 'retry-after': '60' } });
+    },
+  },
+);
+await Promise.resolve();
+stopping.abort(new Error('Sync stopped.'));
+await assert.rejects(
+  Promise.race([backoff, new Promise((r) => setTimeout(r, 100))]),
+  /Sync stopped/,
+);
+assert.equal(cancelledCalls, 1);

@@ -227,6 +227,7 @@ export function progressDetail(progress) {
 }
 
 export function friendlyError(error, code = null) {
+  if (code === 'sync_stopped') return 'Sync stopped.';
   const text = String(error ?? 'Unknown sync error');
   if (code === 'selection_changed' || text.includes('selection changed'))
     return 'Your selection changed. Capture again with your new checklist.';
@@ -391,23 +392,26 @@ export function captureProgress(status, providers, since = 0) {
     accounts = 0,
     accountsChecked = 0;
   for (const { progress = {}, selection } of active) {
-    checked += progress.processed ?? 0;
+    checked += (progress.processed ?? 0) + (progress.alreadyCurrent ?? 0);
     selected += selection?.selected ?? progress.selection?.selected ?? 0;
     saved += progress.accepted ?? 0;
     accounts += progress.accountsTotal ?? 0;
     accountsChecked += progress.accountsChecked ?? 0;
   }
   const running = active.some((entry) => entry.running);
+  const stopping = active.some((entry) => entry.stopRequested);
   const discovering = active.some(
     (entry) => entry.running && entry.progress?.phase === 'discovering',
   );
   const chatMax = !discovering && selected > 0 && accounts <= 1 ? selected : null;
   const max = accounts > 1 ? accounts : chatMax;
-  const stage = !running
-    ? 'Next batch queued.'
-    : discovering
-      ? 'Checking selected accounts…'
-      : 'Capturing selected chats…';
+  const stage = stopping
+    ? 'Stopping sync…'
+    : !running
+      ? 'Next batch queued.'
+      : discovering
+        ? 'Checking selected accounts…'
+        : 'Capturing selected chats…';
   const counts = [
     chatMax
       ? `${Math.min(checked, chatMax)}/${chatMax} checked`
@@ -432,14 +436,16 @@ export function captureOutcome(status, providers, since = 0) {
   if (runs.some(([, entry]) => entry.running)) return 'Capturing selected chats…';
   if (runs.some(([, entry]) => entry.continuationPending))
     return 'More selected chats are queued for the next batch.';
-  const totals = { created: 0, updated: 0, unchanged: 0, skipped: 0 };
+  const totals = { created: 0, updated: 0, unchanged: 0, alreadyCurrent: 0, skipped: 0 };
   const problems = [];
+  let stopped = false;
   let complete = 0;
   for (const [id, entry] of runs) {
-    for (const key of ['created', 'updated', 'unchanged'])
+    for (const key of ['created', 'updated', 'unchanged', 'alreadyCurrent'])
       totals[key] += entry.progress?.[key] ?? 0;
     totals.skipped += entry.selection?.skipped ?? 0;
-    if (entry.lastErrorCode || entry.lastError || entry.selectionWarning) {
+    if (entry.lastErrorCode === 'sync_stopped') stopped = true;
+    else if (entry.lastErrorCode || entry.lastError || entry.selectionWarning) {
       const name = PROVIDERS[id]?.name ?? 'Website';
       problems.push(
         entry.lastErrorCode === 'not_logged_in'
@@ -452,11 +458,13 @@ export function captureOutcome(status, providers, since = 0) {
       );
     } else complete++;
   }
-  const { created, updated, unchanged, skipped } = totals;
-  const counts = `${created} new · ${updated} updated · ${unchanged} unchanged · ${skipped} skipped`;
+  const { created, updated, unchanged, alreadyCurrent, skipped } = totals;
+  const counts = `${created} new · ${updated} updated · ${unchanged + alreadyCurrent} unchanged · ${skipped} skipped`;
+  if (stopped)
+    return ['Sync stopped.', ...problems.map((problem) => problem + '.'), counts + '.'].join(' ');
   if (problems.length)
-    return `${complete || created + updated + unchanged > 0 ? 'Partial capture' : 'Capture needs attention'} — ${problems.join('. ')}. ${counts}.`;
-  return `${created + updated + unchanged ? 'Saved locally' : 'No matching chats'} — ${counts}.`;
+    return `${complete || created + updated + unchanged + alreadyCurrent > 0 ? 'Partial capture' : 'Capture needs attention'} — ${problems.join('. ')}. ${counts}.`;
+  return `${created + updated + unchanged ? 'Saved locally' : alreadyCurrent ? 'Up to date' : 'No matching chats'} — ${counts}.`;
 }
 
 export function enterToggles(input) {

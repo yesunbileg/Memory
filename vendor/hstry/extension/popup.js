@@ -31,6 +31,9 @@ let settings = normalizeSettings(),
   pairTicket = 0,
   storageTicket = 0;
 let syncPending = false,
+  stopPending = false,
+  stopAvailable = false,
+  stopError = '',
   syncSince = 0,
   notice = '',
   writes = Promise.resolve();
@@ -54,31 +57,42 @@ updateCommand();
 function summary() {
   const enabled = providers.filter((p) => settings.providers[p] && nonempty(scopes[p]));
   const runs = statusForPairing(status, settings);
-  const working = Object.entries(runs).some(([p, v]) => settings.providers[p] && v.running);
+  const progress = captureProgress(runs, settings.providers);
+  const stopping = stopPending || Object.values(runs).some((entry) => entry.stopRequested);
+  stopAvailable = Boolean(progress);
   el('provider-status').replaceChildren();
   for (const p of providers) {
     const state = runs[p],
       row = create('div', 'row'),
       desc = create('span', 'copy');
-    const detail = state?.running
-      ? 'Syncing…'
-      : state?.lastErrorCode
-        ? friendlyError('', state.lastErrorCode)
-        : state?.selectionWarning
-          ? 'Some items could not be verified.'
-          : state?.lastRunMs
-            ? 'Last checked ' + new Date(state.lastRunMs).toLocaleTimeString()
-            : 'No run for this archive.';
+    const detail = state?.stopRequested
+      ? 'Stopping…'
+      : state?.running
+        ? 'Syncing…'
+        : state?.lastErrorCode
+          ? friendlyError('', state.lastErrorCode)
+          : state?.selectionWarning
+            ? 'Some items could not be verified.'
+            : state?.lastRunMs
+              ? 'Last checked ' + new Date(state.lastRunMs).toLocaleTimeString()
+              : 'No run for this archive.';
     desc.append(create('strong', '', names[p]), create('small', '', detail));
     const btn = create('button', '', 'Rescan');
     btn.setAttribute('aria-label', 'Rescan saved ' + names[p] + ' items');
-    btn.disabled = !connected || !enabled.includes(p) || working || syncPending;
+    btn.disabled = !connected || !enabled.includes(p) || stopAvailable || syncPending || stopping;
     btn.addEventListener('click', () => requestSync(p));
     row.append(desc, btn);
     el('provider-status').append(row);
   }
-  el('sync').disabled = !connected || !enabled.length || syncPending || working;
-  el('sync').textContent = syncPending || working ? 'Syncing…' : 'Sync now';
+  el('sync').disabled =
+    stopping || (!stopAvailable && (!connected || !enabled.length || syncPending));
+  el('sync').textContent = stopping
+    ? 'Stopping…'
+    : stopAvailable
+      ? 'Stop sync'
+      : syncPending
+        ? 'Syncing…'
+        : 'Sync now';
   el('schedule').textContent = settings.autoPaused
     ? 'Automatic sync paused'
     : 'Automatic sync every ' + settings.intervalMinutes + 'm';
@@ -88,7 +102,6 @@ function summary() {
     : providers.some((p) => nonempty(scopes[p]))
       ? 'Enable the selected provider in Settings to sync.'
       : 'Check a chat or project on its website to sync it.';
-  const progress = captureProgress(runs, settings.providers, syncSince);
   const bar = el('sync-progress');
   bar.hidden = !progress && !syncPending;
   if (progress?.max) {
@@ -96,7 +109,11 @@ function summary() {
     bar.value = progress.value;
   } else bar.removeAttribute('value');
   el('notice').textContent =
-    progress?.text || captureOutcome(runs, settings.providers, syncSince) || notice;
+    stopError ||
+    (stopPending ? 'Stopping sync…' : '') ||
+    progress?.text ||
+    captureOutcome(runs, settings.providers, syncSince) ||
+    notice;
 }
 async function readStorage() {
   const ticket = ++storageTicket;
@@ -111,6 +128,7 @@ async function readStorage() {
   const next = normalizeSettings(data.settings);
   if (!sameConnection(settings, next)) {
     syncSince = 0;
+    stopError = '';
     notice = '';
     connected = false;
   }
@@ -323,7 +341,24 @@ async function updateListMode(toggle = false) {
 }
 el('list-mode').addEventListener('click', () => updateListMode(true));
 
-el('sync').addEventListener('click', () => requestSync());
+el('sync').addEventListener('click', () => (stopAvailable ? requestStop() : requestSync()));
+async function requestStop() {
+  if (el('sync').disabled) return;
+  stopError = '';
+  stopPending = true;
+  summary();
+  try {
+    const result = await send({ type: 'stopSync' });
+    if (!result?.ok) throw new Error();
+    syncSince = 0;
+  } catch {
+    stopError = 'Could not stop sync. Try again.';
+  } finally {
+    stopPending = false;
+    await readStorage();
+  }
+}
+
 async function requestSync(provider) {
   if (
     el('sync').disabled ||
@@ -332,6 +367,7 @@ async function requestSync(provider) {
   )
     return;
   syncPending = true;
+  stopError = '';
   syncSince = Date.now();
   notice = 'Requesting local sync…';
   summary();

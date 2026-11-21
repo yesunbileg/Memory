@@ -13,7 +13,19 @@
   const rpc = (id, value) =>
     new Response(")]}'\n" + JSON.stringify([['wrb.fr', id, JSON.stringify(value), null]]) + '\n');
   const result = (value, status = 200) => Response.json(value, { status });
-  self.qa = { detail: [], requests: [], unexpected: [], native: [], signedIn: false, late: false };
+  self.qa = {
+    detail: [],
+    requests: [],
+    unexpected: [],
+    native: [],
+    signedIn: false,
+    late: false,
+    changed: false,
+    holdDetail: false,
+    aborted: false,
+  };
+  const gptTime = (id) => 1700000000 + (id === standalone && self.qa.changed ? 300 : 0);
+  const claudeTime = '2023-11-14T22:13:20.000Z';
   // Observe the real native host, never replace its responses or store the packet contents.
   const native = chrome.runtime.sendNativeMessage.bind(chrome.runtime);
   chrome.runtime.sendNativeMessage = (host, packet) => {
@@ -45,6 +57,7 @@
             title: 'Chat ' + id,
             is_pinned: false,
             gizmo_id: null,
+            update_time: gptTime(id),
             project_id: id === member ? project : null,
           })),
         });
@@ -56,16 +69,37 @@
       if (path === '/backend-api/gizmos/' + project + '/conversations') {
         const next = u.searchParams.get('cursor') === 'more';
         return result({
-          items: [{ id: next ? lateMember : member, title: 'Project member', project_id: project }],
+          items: [
+            {
+              id: next ? lateMember : member,
+              title: 'Project member',
+              project_id: project,
+              update_time: gptTime(next ? lateMember : member),
+            },
+          ],
           cursor: self.qa.late && !next ? 'more' : null,
         });
       }
       if (path.startsWith('/backend-api/conversation/')) {
         const id = path.split('/').pop();
         self.qa.detail.push(id);
+        if (id === standalone && self.qa.holdDetail) {
+          return new Promise((_, reject) => {
+            init.signal.throwIfAborted();
+            init.signal.addEventListener(
+              'abort',
+              () => {
+                self.qa.aborted = true;
+                reject(init.signal.reason);
+              },
+              { once: true },
+            );
+          });
+        }
         return result({
           id,
           title: 'Fixture ' + id,
+          update_time: gptTime(id),
           current_node: 'm',
           mapping: {
             m: {
@@ -74,7 +108,14 @@
               message: {
                 id: 'm-' + id,
                 author: { role: 'user' },
-                content: { content_type: 'text', parts: ['Synthetic GPT message'] },
+                content: {
+                  content_type: 'text',
+                  parts: [
+                    id === standalone && self.qa.changed
+                      ? 'Updated GPT message'
+                      : 'Synthetic GPT message',
+                  ],
+                },
               },
             },
           },
@@ -93,7 +134,14 @@
         return result([{ uuid: claudeProject, name: 'Claude project', archived_at: null }]);
       if (path === '/api/organizations/' + org + '/projects/' + claudeProject + '/conversations_v2')
         return result({
-          data: [{ uuid: claudeMember, name: 'Unrendered project chat', project_uuid: claudeProject }],
+          data: [
+            {
+              uuid: claudeMember,
+              name: 'Unrendered project chat',
+              project_uuid: claudeProject,
+              updated_at: claudeTime,
+            },
+          ],
         });
       if (path === '/api/organizations/' + org + '/chat_conversations_v2')
         return result(
@@ -101,6 +149,7 @@
             uuid: id,
             name: i ? 'Unselected Claude chat' : 'Selected Claude chat',
             project_uuid: null,
+            updated_at: claudeTime,
             is_starred: false,
           })),
         );
@@ -110,6 +159,7 @@
         return result({
           uuid: id,
           name: 'Fixture ' + id,
+          updated_at: claudeTime,
           chat_messages: [
             {
               uuid: 'm-' + id,

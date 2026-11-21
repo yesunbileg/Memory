@@ -74,3 +74,7 @@ Patch history:
     only an authenticated, verified choice changes a saved identifier. Selection
     is distinct from native archive capture. The toolbar keeps connection
     settings, provider status, the mode switch and manual sync.
+18. Selected ChatGPT and Claude sync borrows hstry's incremental update checks
+    and five-minute overlap. It saves the provider update time per chat after
+    the local archive acknowledges the batch. Each pass still verifies the
+    current account and selected IDs. Rescan rereads the saved selection.

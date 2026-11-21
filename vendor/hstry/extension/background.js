@@ -12,6 +12,7 @@ import { sameCaptureTypes } from './providers/selection.js';
 
 const ALARM_NAME = 'hstry-sync';
 const CONTINUE_ALARM_PREFIX = 'hstry-sync-continue-';
+const QUEUED_SLICE_DELAY_MS = 400;
 const MAX_ACTIVITY_LOG = 12;
 const activeProviders = new Map();
 let profilePromise;
@@ -29,6 +30,8 @@ function profileNamespace() {
 }
 let statusWriteQueue = Promise.resolve();
 let activityWriteQueue = Promise.resolve();
+let stopEpoch = 0;
+let stopTask;
 let captureEpoch = 0;
 let captureKey = null;
 
@@ -83,15 +86,72 @@ async function setStatus(status) {
   await chrome.storage.local.set({ status });
 }
 
-function setStatusEntry(name, entry) {
+function updateStatus(change) {
   statusWriteQueue = statusWriteQueue
     .catch(() => {})
     .then(async () => {
       const status = await getStatus();
-      status[name] = entry;
-      await setStatus(status);
+      if (change(status) !== false) await setStatus(status);
     });
   return statusWriteQueue;
+}
+
+function setStatusEntry(name, entry, owner) {
+  return updateStatus((status) => {
+    status[name] = owner?.signal.aborted && entry.running ? stoppingEntry(entry) : entry;
+  });
+}
+
+function stoppingEntry(entry) {
+  return {
+    ...entry,
+    stopRequested: true,
+    progress: { ...entry.progress, phase: 'stopping' },
+  };
+}
+
+function withoutQueue(state) {
+  if (!state) return state;
+  const { pending, discovery, ...saved } = state;
+  if (saved.accountRun) {
+    saved.accountRun = {
+      entries: saved.accountRun.entries.map(([id, account]) => [
+        id,
+        { state: withoutQueue(account.state) },
+      ]),
+    };
+  }
+  return saved;
+}
+
+function markStopped(entry) {
+  entry.running = false;
+  entry.stopRequested = false;
+  entry.continuationPending = false;
+  entry.nextRetryMs = null;
+  entry.lastError = LOCAL_ERRORS.sync_stopped;
+  entry.lastErrorCode = 'sync_stopped';
+  entry.progress = { ...entry.progress, phase: 'cancelled' };
+  entry.state = withoutQueue(entry.state);
+}
+
+async function stopSync() {
+  stopEpoch++;
+  for (const owner of activeProviders.values()) owner.abort(localError('sync_stopped'));
+  await startupReady;
+  const stopped = [];
+  await updateStatus((status) => {
+    for (const [name, entry] of Object.entries(status)) {
+      if (!Object.hasOwn(PROVIDERS, name)) continue;
+      if (!entry.running && !entry.continuationPending && !entry.nextRetryMs) continue;
+      if (entry.running && activeProviders.has(name)) status[name] = stoppingEntry(entry);
+      else markStopped(entry);
+      stopped.push(name);
+    }
+    return stopped.length > 0;
+  });
+  await Promise.all(stopped.map((name) => chrome.alarms.clear(CONTINUE_ALARM_PREFIX + name)));
+  return { ok: true };
 }
 
 // Only these explicit fields may enter the persistent activity log.
@@ -134,6 +194,11 @@ async function clearInterruptedRuns() {
   let changed = false;
   for (const entry of Object.values(status)) {
     if (!entry?.running) continue;
+    if (entry.stopRequested) {
+      markStopped(entry);
+      changed = true;
+      continue;
+    }
     entry.running = false;
     entry.continuationPending = true;
     entry.nextRetryMs ??= Date.now() + 30_000;
@@ -233,6 +298,7 @@ const LOCAL_ERRORS = {
   body_too_large:
     'A conversation item is too large for the local receiver. Split the source item before retrying.',
   selection_changed: 'Your selection changed. Capture again to use the updated settings.',
+  sync_stopped: 'Sync stopped.',
 };
 
 function localError(code) {
@@ -304,9 +370,11 @@ async function providerTabs(selected) {
 
 async function runSync(
   trigger,
-  { onlyProvider = null, full = false, onStarted = async () => {} } = {},
+  { onlyProvider = null, full = false, onStarted = async () => {}, expected = null } = {},
 ) {
+  const startStopEpoch = stopEpoch;
   await startupReady;
+  await stopTask?.catch(() => {});
   const settings = await getSettings();
   const epoch = observeSettings(settings);
   if (
@@ -321,6 +389,15 @@ async function runSync(
     };
   }
   const status = await getStatus();
+  if (startStopEpoch !== stopEpoch) return { ok: false, code: 'sync_stopped' };
+  if (
+    expected &&
+    (epoch !== expected.epoch ||
+      status[onlyProvider]?.lastRunMs !== expected.lastRunMs ||
+      !status[onlyProvider]?.continuationPending ||
+      JSON.stringify(settings.scopes[onlyProvider]?.scope) !== expected.listKey)
+  )
+    return { ok: false, code: 'stale_alarm' };
   if (
     settings.autoPaused &&
     (trigger === 'alarm' ||
@@ -348,7 +425,8 @@ async function runSync(
         ? 'This provider is already syncing.'
         : 'Choose a provider in settings before syncing.',
     };
-  const owner = Symbol();
+  const owner = new AbortController();
+  const { signal } = owner;
   for (const [name] of selected) activeProviders.set(name, owner);
   const release = (name) => {
     if (activeProviders.get(name) === owner) activeProviders.delete(name);
@@ -360,6 +438,10 @@ async function runSync(
 
     // Verify local credentials before any provider makes remote account or chat reads.
     const connection = await checkConnection(settings);
+    if (signal.aborted) {
+      await chrome.action.setBadgeText({ text: activeProviders.size > selected.length ? '…' : '' });
+      return { ok: false, code: 'sync_stopped' };
+    }
     if (!connection.ok) {
       for (const [name] of selected) {
         await setStatusEntry(name, {
@@ -395,7 +477,11 @@ async function runSync(
         const startedAt = Date.now();
         const saved = settings.scopes[name];
         const listKey = JSON.stringify(saved.scope);
-        const guard = () => assertCurrentCapture(epoch, name, listKey);
+        const guard = async () => {
+          signal.throwIfAborted();
+          await assertCurrentCapture(epoch, name, listKey);
+          signal.throwIfAborted();
+        };
         // A changed list invalidates both discovery pages and queued detail IDs.
         // Do not duplicate the saved IDs into the public status summary.
         const listHash = Array.from(
@@ -444,6 +530,7 @@ async function runSync(
             trigger === 'full' ||
             (trigger === 'continuation' && status[name]?.manualContinuation),
           continuationPending: false,
+          stopRequested: false,
           lastRunMs: startedAt,
           trigger,
           running: true,
@@ -458,7 +545,7 @@ async function runSync(
             unchanged: continuing ? (status[name]?.progress?.unchanged ?? 0) : 0,
           },
         };
-        await setStatusEntry(name, entry);
+        await setStatusEntry(name, entry, owner);
         if (!startedReported) {
           startedReported = true;
           await onStarted();
@@ -468,7 +555,7 @@ async function runSync(
           if (Object.hasOwn(progress, 'selection')) entry.selection = progress.selection;
           if (Object.hasOwn(progress, 'selectionWarning'))
             entry.selectionWarning = progress.selectionWarning;
-          await setStatusEntry(name, entry);
+          await setStatusEntry(name, entry, owner);
         };
         const push = makePush(
           settings,
@@ -492,11 +579,12 @@ async function runSync(
             push,
             report,
             guard,
+            signal,
             checkpoint: async (state) => {
               await guard();
               entry.state = state;
               entry.continuationPending = Boolean(state?.pending || state?.discovery);
-              await setStatusEntry(name, entry);
+              await setStatusEntry(name, entry, owner);
             },
             // Provider diagnostics can contain account or conversation text.
             log: () => {},
@@ -529,16 +617,18 @@ async function runSync(
             selectionWarning: entry.selectionWarning,
           };
           entry.nextRetryMs = null;
-          if (result.hasMore) {
-            await setStatusEntry(name, entry);
-            await scheduleContinuation(name);
-          }
           await recordActivity(
             name,
             entry,
             result.hasMore ? 'queued' : entry.selectionWarning ? 'warning' : 'success',
           );
         } catch (err) {
+          if (signal.aborted) {
+            markStopped(entry);
+            entry.durationMs = Math.max(0, Date.now() - startedAt);
+            await recordActivity(name, entry, 'cancelled');
+            return;
+          }
           anyError = true;
           const failure = safeSyncFailure(err);
           entry.lastError = failure.error;
@@ -565,9 +655,24 @@ async function runSync(
             failure.code === 'selection_changed' ? 'cancelled' : 'error',
           );
         } finally {
-          release(name);
-          await setStatusEntry(name, entry);
-          if (entry.nextRetryMs) await scheduleContinuation(name, entry.nextRetryMs);
+          try {
+            if (signal.aborted && (entry.continuationPending || entry.nextRetryMs))
+              markStopped(entry);
+            await setStatusEntry(name, entry, owner);
+            if (!signal.aborted && (entry.nextRetryMs || entry.continuationPending))
+              await scheduleContinuation(name, entry.nextRetryMs ?? 0);
+            if (!signal.aborted && entry.continuationPending && !entry.nextRetryMs) {
+              // The alarm still recovers the checkpoint if this worker is suspended.
+              setTimeout(() => {
+                runSync('continuation', {
+                  onlyProvider: name,
+                  expected: { epoch, listKey, lastRunMs: entry.lastRunMs },
+                }).catch(() => {});
+              }, QUEUED_SLICE_DELAY_MS);
+            }
+          } finally {
+            release(name);
+          }
         }
       }),
     );
@@ -672,6 +777,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   };
   if (message?.type === 'syncNow') {
     start('manual');
+    return true;
+  }
+  if (message?.type === 'stopSync') {
+    stopTask = stopSync();
+    stopTask.then(sendResponse, () =>
+      sendResponse({ ok: false, error: 'Could not stop the sync. Try again.' }),
+    );
     return true;
   }
   if (message?.type === 'syncProvider') {

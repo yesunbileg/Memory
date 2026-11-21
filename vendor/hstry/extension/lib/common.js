@@ -17,8 +17,28 @@ export class NotLoggedInError extends Error {
   }
 }
 
-export function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export async function withAbort(request, signal) {
+  if (!signal) return request();
+  signal.throwIfAborted();
+  let cancel;
+  const aborted = new Promise((_, reject) => {
+    cancel = () => reject(signal.reason);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
+  try {
+    return await Promise.race([aborted, request()]);
+  } finally {
+    signal.removeEventListener('abort', cancel);
+  }
+}
+
+export async function sleep(ms, signal) {
+  let timer;
+  try {
+    await withAbort(() => new Promise((resolve) => (timer = setTimeout(resolve, ms))), signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Cap on how long we honor a server-provided Retry-After (ms). */
@@ -35,12 +55,16 @@ export async function fetchJson(
   init = {},
   { retries = 5, baseDelayMs = 1000, fetcher = fetch } = {},
 ) {
+  const { signal, ...request } = init;
   for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(20_000);
     const res = await fetcher(url, {
       credentials: 'include',
-      signal: AbortSignal.timeout(20_000),
-      ...init,
+      ...request,
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
+    signal?.throwIfAborted();
 
     if (res.status === 401 || res.status === 403) {
       throw new NotLoggedInError(new URL(url).hostname);
@@ -55,7 +79,7 @@ export async function fetchJson(
       const retryAfter = Number(res.headers.get('retry-after'));
       const headerMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
       const backoffMs = baseDelayMs * 2 ** attempt + Math.floor(Math.random() * 500);
-      await sleep(Math.min(MAX_BACKOFF_MS, Math.max(headerMs, backoffMs)));
+      await sleep(Math.min(MAX_BACKOFF_MS, Math.max(headerMs, backoffMs)), signal);
       continue;
     }
 

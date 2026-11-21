@@ -7,6 +7,7 @@ function summarize(records, phase) {
     phase,
     detected: 0,
     processed: 0,
+    alreadyCurrent: 0,
     accountsTotal: records.size,
     accountsChecked: 0,
     accountsUnavailable: 0,
@@ -15,6 +16,7 @@ function summarize(records, phase) {
     const p = entry.progress ?? {};
     progress.detected += p.detected ?? 0;
     progress.processed += p.processed ?? 0;
+    progress.alreadyCurrent += p.alreadyCurrent ?? 0;
     progress.accountsChecked += Number(entry.done === true && !entry.unavailable);
     progress.accountsUnavailable += Number(entry.unavailable === true);
     for (const key of ['selected', 'classified', 'skipped', 'unknown'])
@@ -26,7 +28,7 @@ function summarize(records, phase) {
 }
 
 export async function syncTabScopes(provider, contexts, options) {
-  const { selectedScope, state, continuing, guard, report, checkpoint } = options;
+  const { selectedScope, state, continuing, guard, report, checkpoint, signal } = options;
   const selected = selectedScope.entries.filter(hasScopeItems);
   const previous = new Map(state.accountRun?.entries ?? []);
   const records = new Map(
@@ -55,7 +57,9 @@ export async function syncTabScopes(provider, contexts, options) {
   // container has no usable tab and cannot impersonate that regular session.
   const candidates = contexts.length ? contexts : [undefined];
   const routes = new Map();
-  const verified = await Promise.allSettled(candidates.map((ctx) => provider.principalIds(ctx)));
+  const verified = await Promise.allSettled(
+    candidates.map((ctx) => provider.principalIds(ctx, { signal })),
+  );
   verified.forEach((result, index) => {
     if (result.status === 'fulfilled' && Array.isArray(result.value)) {
       for (const principalId of result.value)

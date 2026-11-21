@@ -75,6 +75,15 @@ def archived(db):
         return sorted(row[0] for row in connection.execute("SELECT external_id FROM conversations"))
 
 
+def fixture_message(db, external_id):
+    with closing(sqlite3.connect(db)) as connection:
+        return connection.execute(
+            "SELECT m.text FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            "WHERE c.external_id=?",
+            (external_id,),
+        ).fetchone()[0]
+
+
 async def wait_for(check, message):
     # Await actual values, not the truthiness of JavaScript Promise objects.
     try:
@@ -446,6 +455,41 @@ async def exercise(context, worker, driver, archive_id, db):
         "missing, extra, or duplicate transcript reads: " + str(report)
     )
     assert "ingest" in report["native"] and not report["unexpected"], report
+    await worker.evaluate("qa.detail.length=0")
+    started = await worker.evaluate("Date.now()")
+    await toolbar.click("#sync")
+    await wait_for(completed, "unchanged repeat sync did not complete")
+    assert await worker.evaluate("qa.detail") == [], "unchanged transcripts were downloaded"
+    status = await state(worker, "status")
+    assert status["chatgpt"]["progress"]["alreadyCurrent"] == 4
+    assert status["claude"]["progress"]["alreadyCurrent"] == 2
+    await worker.evaluate("qa.changed=true")
+    started = await worker.evaluate("Date.now()")
+    await toolbar.click("#sync")
+    await wait_for(completed, "changed chat repeat sync did not complete")
+    assert await worker.evaluate("qa.detail") == [STANDALONE], "repeat sync read unexpected chats"
+    assert (await state(worker, "status"))["chatgpt"]["progress"]["updated"] == 1
+    assert archived(db) == target
+    assert fixture_message(db, STANDALONE) == "Updated GPT message"
+
+    await worker.evaluate("Object.assign(qa, {detail: [], changed: false, holdDetail: true})")
+    await toolbar.click("#sync")
+    await wait_for(lambda: worker.evaluate("qa.detail.length > 0"), "held detail did not start")
+    await wait_for(
+        lambda: toolbar.ui("()=>q('#sync').textContent==='Stop sync'"),
+        "the toolbar offered no way to stop a running sync",
+    )
+    await toolbar.click("#sync")
+    await wait_for(
+        lambda: toolbar.ui(
+            "()=>q('#sync').textContent==='Sync now' && q('#notice').textContent.includes('Sync stopped.')"
+        ),
+        "stop did not return the toolbar to an idle state",
+    )
+    assert await worker.evaluate("qa.aborted && qa.detail.length === 1")
+    status = (await state(worker, "status"))["chatgpt"]
+    assert status["progress"]["phase"] == "cancelled" and not status["continuationPending"]
+    assert fixture_message(db, STANDALONE) == "Updated GPT message"
     assert not unexpected_navigation, unexpected_navigation
     opened = await driver.evaluate("window.newTabIds")
     assert not opened, ("extension opened a new tab", opened)
@@ -459,6 +503,8 @@ async def exercise(context, worker, driver, archive_id, db):
                 "actual_popup_contexts_per_open": 1,
                 "extra_tabs": len(opened),
                 "real_native_archive_records": len(target),
+                "repeat_detail_reads": {"unchanged": 0, "after_one_update": 1},
+                "stop_sync_aborts_active_detail": True,
                 "providers": ["ChatGPT", "Claude", "Gemini"],
             }
         )

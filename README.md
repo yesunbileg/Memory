@@ -112,6 +112,10 @@ Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the 
 
 Existing selections keep their account and workspace restrictions on upgrade. In Brave, keep a signed-in provider tab open for each container you want to sync. You can select different chats or projects on each account, then click **Sync now** once. The extension looks for matching signed-in tabs across browser windows and reports when a saved account needs a tab. The popup shows accounts checked, chats checked and chats saved while capture runs. A provider switch alone does not authorize capture. If the account or item cannot be verified, it cannot be added. Sync reports incomplete provider listings rather than treating them as a complete project. An empty list captures nothing.
 
+After the archive acknowledges a ChatGPT or Claude chat, later runs can skip its message body when the provider reports the same update time. New selections, missing update times, and updates from the last five minutes still get checked. **Settings → Sync activity and rescan → Rescan** rereads the saved selection for that provider.
+
+**Stop sync** cancels the current sync and any remaining batches. Chats already saved stay in the local archive. The regular automatic schedule remains in effect unless you pause it in Settings.
+
 To send an archived conversation to NotebookLM, separately review it, approve it and run `ai-memory sync`. This is different from the popup’s **Sync now**. Private provider interfaces can change. Offline verification uses synthetic data, not personal accounts. See the [Mongolian setup guide](docs/extension-setup.mn.md).
 
 ## Reliability and scope

@@ -81,8 +81,18 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
   const gpt = provider === 'ChatGPT';
   const principalId = JSON.stringify(['user', 'workspace']);
   const names = [...Array.from({ length: unrelatedProjects }, (_, i) => 'other-' + i), 'chosen'];
+  const versions = new Map();
+  const detailVersions = new Map();
+  const version = (seconds) =>
+    !seconds
+      ? {}
+      : gpt
+        ? { update_time: seconds }
+        : { updated_at: new Date(seconds * 1000).toISOString() };
   const row = (id, title, flags = {}) =>
-    gpt ? { id, title, ...flags } : { uuid: id, name: title, ...flags };
+    gpt
+      ? { id, title, ...version(versions.get(id)), ...flags }
+      : { uuid: id, name: title, ...version(versions.get(id)), ...flags };
   const first = [
     row('overlap', 'Checked independently'),
     row('locked-at-read', 'Still in the list'),
@@ -154,6 +164,7 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
     const item = gpt
       ? { id, current_node: 'm', mapping: { m: { id: 'm', parent: null, message: visible } } }
       : { uuid: id, chat_messages: [{ uuid: 'm', sender: 'human', text: 'Visible' }] };
+    Object.assign(item, version(detailVersions.get(id) ?? versions.get(id)));
     if (id === 'locked-at-read') item.is_locked = true;
     if (id === 'moved') item.is_pinned = true;
     return Response.json(item);
@@ -171,7 +182,7 @@ function fixture(t, provider, sync, unrelatedProjects = 0) {
         return batch.length;
       },
     });
-  return { run, sent, reads, pages };
+  return { run, sent, reads, pages, versions, detailVersions };
 }
 
 test('ChatGPT bulk Recents discovers current ordinary chats and excludes projects, pins, and chats that moved', async (t) => {
@@ -185,6 +196,34 @@ for (const [provider, sync] of [
   ['ChatGPT', syncChatGPT],
   ['Claude', syncClaude],
 ]) {
+  test(
+    provider + ' rereads changed or unverified chats while skipping acknowledged older revisions',
+    async (t) => {
+      const f = fixture(t, provider, sync);
+      const direct = ['overlap', 'standalone', 'offscreen'];
+      f.versions.set('overlap', 1_700_000_000);
+      f.versions.set('offscreen', 1_700_000_000);
+      f.detailVersions.set('offscreen', 1_699_999_900);
+      const first = await f.run(['chosen'], direct);
+      assert.ok(f.reads.includes('overlap'));
+      assert.ok(f.reads.includes('standalone'));
+      assert.ok(!f.reads.includes('unselected'));
+      f.sent.length = f.reads.length = 0;
+      const second = await f.run(['chosen'], direct, first.state);
+      assert.ok(!f.reads.includes('overlap'));
+      assert.ok(f.reads.includes('standalone'), 'missing listing time must not skip the detail');
+      assert.ok(
+        f.reads.includes('offscreen'),
+        'an older detail timestamp must not certify the listing',
+      );
+      f.sent.length = f.reads.length = 0;
+      f.versions.set('overlap', 1_700_000_300);
+      await f.run(['chosen'], direct, second.state);
+      assert.ok(f.sent.includes('overlap'));
+      assert.ok(!f.reads.includes('unselected'));
+    },
+  );
+
   test(
     provider +
       ' expands a selected project past visible rows without duplicating direct selections',

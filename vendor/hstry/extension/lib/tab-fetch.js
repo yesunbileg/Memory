@@ -1,19 +1,26 @@
 // Ask the provider document to use its own browser cookie container.
+import { withAbort } from './common.js';
+
 export async function fetchInTab(context, url, init = {}) {
   const target = new URL(url);
   let reply;
   try {
-    reply = await chrome.tabs.sendMessage(
-      context.tabId,
-      {
-        type: 'FETCH_PROVIDER_TAB',
-        url: target.href,
-        method: init.method ?? 'GET',
-        body: init.body?.toString(),
-      },
-      { frameId: 0, ...(context.documentId ? { documentId: context.documentId } : {}) },
+    reply = await withAbort(
+      () =>
+        chrome.tabs.sendMessage(
+          context.tabId,
+          {
+            type: 'FETCH_PROVIDER_TAB',
+            url: target.href,
+            method: init.method ?? 'GET',
+            body: init.body?.toString(),
+          },
+          { frameId: 0, ...(context.documentId ? { documentId: context.documentId } : {}) },
+        ),
+      init.signal,
     );
   } catch {
+    init.signal?.throwIfAborted();
     // The tab can close or navigate between account verification and a read.
   }
   if (

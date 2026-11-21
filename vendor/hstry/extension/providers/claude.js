@@ -23,13 +23,13 @@ const OVERLAP_MS = 5 * 60 * 1000;
 const fetcherFor = (context) =>
   context ? (url, init) => fetchInTab(context, url, init) : undefined;
 
-function readerFor(context) {
+function readerFor(context, signal) {
   const fetcher = fetcherFor(context);
-  return (url, init = {}) => (fetcher ? fetchJson(url, init, { fetcher }) : fetchJson(url, init));
+  return (url, init = {}) => fetchJson(url, { ...init, signal }, { fetcher });
 }
 
-async function listOrganizations(context) {
-  const data = await readerFor(context)(`${BASE}/api/organizations`);
+async function listOrganizations(context, signal) {
+  const data = await readerFor(context, signal)(`${BASE}/api/organizations`);
   const orgs = Array.isArray(data) ? data : (data?.organizations ?? data?.data);
   if (!Array.isArray(orgs)) {
     throw new Error('Claude returned an unreadable organizations response');
@@ -212,8 +212,8 @@ function toParsedConversation(detail, orgId) {
   };
 }
 
-async function signedInAccount(context) {
-  const account = await readerFor(context)(`${BASE}/api/account`, { cache: 'no-store' });
+async function signedInAccount(context, signal) {
+  const account = await readerFor(context, signal)(`${BASE}/api/account`, { cache: 'no-store' });
   if (!nativeId(account?.uuid) || !Array.isArray(account.memberships))
     throw new Error('Current Claude account is not verified.');
   const allowed = new Set(
@@ -224,9 +224,9 @@ async function signedInAccount(context) {
   );
   return { userId: account.uuid, allowed };
 }
-async function popupPrincipals(context) {
-  const { userId, allowed } = await signedInAccount(context);
-  const orgs = await listOrganizations(context);
+async function popupPrincipals(context, signal) {
+  const { userId, allowed } = await signedInAccount(context, signal);
+  const orgs = await listOrganizations(context, signal);
   const result = orgs
     .filter((o) => allowed.has(o.id))
     .map((o) => ({
@@ -238,21 +238,22 @@ async function popupPrincipals(context) {
   if (!result.length) throw new Error('Current Claude organization is not verified.');
   return result;
 }
-const popup = (context) => {
-  const read = readerFor(context);
+const popup = (context, signal) => {
+  const read = readerFor(context, signal);
   const fetcher = fetcherFor(context);
   return {
     name: 'Claude',
     field: 'orgs',
     adapter: 'claude-web',
-    principals: () => popupPrincipals(context),
+    principals: () => popupPrincipals(context, signal),
     ...(fetcher ? { fetcher } : {}),
     id: (item) => item?.uuid,
+    updatedAt: (item) => toMs(item.updated_at),
     projects: (p, page) => listProjects(p.id, page),
     chats: (p, page) => listUpdatedConversations(p.id, null, page, true),
     members: (p, id, page) => listProjectConversations(p.id, id, page),
     owns: async (p) => {
-      const { userId, allowed } = await signedInAccount(context);
+      const { userId, allowed } = await signedInAccount(context, signal);
       return JSON.stringify([userId, p.id]) === p.principalId && allowed.has(p.id);
     },
     detail: (p, id) =>
@@ -263,8 +264,8 @@ const popup = (context) => {
   };
 };
 export const listClaudeCatalog = (context) => listPopupCatalog(popup(context));
-export const claudePrincipalIds = async (context) =>
-  (await popupPrincipals(context)).map((p) => p.principalId);
+export const claudePrincipalIds = async (context, { signal } = {}) =>
+  (await popupPrincipals(context, signal)).map((p) => p.principalId);
 
 export async function syncClaude({
   state = {},
@@ -276,15 +277,17 @@ export async function syncClaude({
   log = () => {},
   checkpoint = async () => {},
   guard = async () => {},
+  signal,
   report = async () => {},
 }) {
   if (selectedScope !== undefined)
-    return syncPopupScope(popup(tabContext), {
+    return syncPopupScope(popup(tabContext, signal), {
       selectedScope,
       state,
       push,
       register,
       guard,
+      signal,
       report,
       checkpoint,
     });

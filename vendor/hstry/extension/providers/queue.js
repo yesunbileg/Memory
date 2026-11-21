@@ -9,10 +9,12 @@ export async function drainSelected({
   read,
   beforeRead,
   push,
+  onAccepted,
   report,
   checkpoint,
   canResume,
   guard,
+  signal,
 }) {
   const warnings = new Set(run.warnings);
   const retryMessage = `Some selected ${provider} conversations could not be read. Capture is incomplete; retry after checking your sign-in.`;
@@ -22,6 +24,7 @@ export async function drainSelected({
     phase: 'importing',
     detected: run.detected,
     processed: run.processed,
+    alreadyCurrent: run.alreadyCurrent ?? 0,
     selection: run.selection,
   });
   if (canResume && run.groups.some((g) => g.ids.length)) {
@@ -36,7 +39,7 @@ export async function drainSelected({
     let processed = run.processed;
     for (const id of ids) {
       await guard();
-      if (budget < 10) await sleep(400);
+      if (budget < 10) await sleep(400, signal);
       // An invalidated scope is not a failed conversation. Leave the durable
       // frontier untouched so it cannot resume on behalf of a different user.
       if (beforeRead) await beforeRead(group.principalId);
@@ -44,6 +47,7 @@ export async function drainSelected({
         const item = await read(group.principalId, id);
         if (item) batch.push(item);
       } catch {
+        signal?.throwIfAborted();
         failed.push(id);
       }
       budget--;
@@ -53,12 +57,14 @@ export async function drainSelected({
     if (batch.length) {
       const accepted = await push(group.sourceId, group.adapter, batch);
       if (accepted !== batch.length) throw new Error('Incomplete archive receipt');
+      onAccepted?.(group.principalId, batch);
       conversations += accepted;
     }
     group.failed.push(...failed);
     group.ids.splice(0, ids.length);
     run.processed += ids.length;
     state[field][group.key] = {
+      ...state[field][group.key],
       principalId: group.principalId,
       name: group.name,
       lastSyncMs:
@@ -91,6 +97,7 @@ export async function drainSelected({
   await report({
     phase: hasMore ? 'queued' : selectionWarning ? 'attention' : 'complete',
     processed: run.processed,
+    alreadyCurrent: run.alreadyCurrent ?? 0,
     detected: run.detected,
     selection: run.selection,
     selectionWarning,

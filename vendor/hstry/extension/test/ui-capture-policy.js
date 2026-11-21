@@ -65,6 +65,13 @@ assert.match(
 );
 assert.match(captureOutcome({ claude: run({ running: true }) }, { claude: true }), /Capturing/);
 assert.equal(captureOutcome({ claude: run() }, { claude: true }, 21), '');
+assert.match(
+  captureOutcome(
+    { chatgpt: run({ progress: { phase: 'complete', alreadyCurrent: 74 } }) },
+    { chatgpt: true },
+  ),
+  /^Up to date.*74 unchanged/,
+);
 const progress = {
   chatgpt: run({
     running: true,

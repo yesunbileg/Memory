@@ -70,7 +70,12 @@ async function providerFetch(context, url, init) {
   return context?.tabId != null ? fetchInTab(context, String(url), init) : fetch(url, init);
 }
 
-async function getSession(context) {
+function requestTimeout(signal) {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function getSession(context, signal) {
   const tab = context?.tabId != null ? context : null;
   const slot = context?.slot == null ? null : String(context.slot);
   // An originating tab keeps both the boot page and every RPC inside the same
@@ -80,7 +85,7 @@ async function getSession(context) {
   const res = await providerFetch(context, `${BASE}${bootPath}`, {
     credentials: 'include',
     cache: 'no-store',
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestTimeout(signal),
   });
   if (res.status === 401 || res.status === 403 || res.url.includes('accounts.google.com')) {
     throw new NotLoggedInError('gemini.google.com');
@@ -114,7 +119,7 @@ async function hashHex(bytes) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function batchExecute(session, rpcId, arg, context) {
+async function batchExecute(session, rpcId, arg, context, signal) {
   const reqId = Math.floor(Math.random() * 900000) + 100000;
   const accountPath = session.userIndex === null ? '' : `/u/${session.userIndex}`;
   const url = new URL(`${BASE}${accountPath}/_/BardChatUi/data/batchexecute`);
@@ -136,7 +141,7 @@ async function batchExecute(session, rpcId, arg, context) {
       'X-Same-Domain': '1',
     },
     body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestTimeout(signal),
   });
   if (res.status === 401 || res.status === 403) throw new NotLoggedInError('gemini.google.com');
   if (!res.ok) throw new Error(`Gemini ${rpcId} -> ${res.status}`);
@@ -152,14 +157,14 @@ async function captureBinding(session, preferAccount = true) {
   return { accountId: fingerprint && 'gemini-session-' + fingerprint, fingerprint };
 }
 
-export async function geminiPrincipalIds(context) {
-  const { accountId: id } = await captureBinding(await getSession(context));
+export async function geminiPrincipalIds(context, { signal } = {}) {
+  const { accountId: id } = await captureBinding(await getSession(context, signal));
   return id ? [id] : [];
 }
 
 // Only the list RPC is allowed here. Older responses expose a cursor; newer
 // ones may cap a plain [limit] window without returning any continuation.
-async function catalogSummaries(session, context, guard = async () => {}) {
+async function catalogSummaries(session, context, guard = async () => {}, signal) {
   const rows = new Map(),
     seen = new Set();
   const limits = [200, 1000, 5000];
@@ -174,6 +179,7 @@ async function catalogSummaries(session, context, guard = async () => {}) {
         'MaZiqc',
         cursor === null ? [limit] : [limit, cursor],
         context,
+        signal,
       );
       if (!Array.isArray(response) || !Array.isArray(response[2])) break;
       for (const item of response[2]) {
@@ -204,6 +210,7 @@ async function catalogSummaries(session, context, guard = async () => {}) {
         return { summaries: [...rows.values()], incomplete: false };
       }
     } catch {
+      signal?.throwIfAborted();
       break;
     }
   }
@@ -233,7 +240,7 @@ export async function listGeminiCatalog(context) {
   };
 }
 
-async function listChats(session, sinceMs, previous, guard, save, context) {
+async function listChats(session, sinceMs, previous, guard, save, context, signal) {
   const chats = new Map((previous?.summaries ?? []).map((c) => [c.rawId, c]));
   const cursors = new Set(previous?.cursors ?? []);
   let cursor = previous?.cursor ?? null;
@@ -243,7 +250,7 @@ async function listChats(session, sinceMs, previous, guard, save, context) {
       if (!budget--) return { queued: true };
       await guard();
       const arg = cursor === null ? [PAGE_SIZE] : [PAGE_SIZE, cursor];
-      const data = await batchExecute(session, 'MaZiqc', arg, context);
+      const data = await batchExecute(session, 'MaZiqc', arg, context, signal);
       if (!Array.isArray(data) || !Array.isArray(data[2]))
         throw new Error('Gemini conversation list shape is unavailable');
       const nextCursor = data[1] ?? null;
@@ -300,7 +307,7 @@ function assistantText(turn) {
   return '';
 }
 
-async function readChat(session, summary, guard, context) {
+async function readChat(session, summary, guard, context, signal) {
   const turns = [];
   const turnIds = new Set();
   const pages = new Set();
@@ -315,6 +322,7 @@ async function readChat(session, summary, guard, context) {
         'hNvQHb',
         [summary.rawId, 20, cursor, 1, [0], [4], null, 1],
         context,
+        signal,
       );
       if (!Array.isArray(data) || data.length < 2 || !Array.isArray(data[0]))
         throw new Error('Gemini conversation detail shape is unavailable');
@@ -349,6 +357,7 @@ async function readChat(session, summary, guard, context) {
       cursor = nextCursor;
     }
   } catch (error) {
+    signal?.throwIfAborted();
     if (error?.code === 'selection_changed' || error?.code === 'storage_unavailable') throw error;
     // The old completion watermark keeps unavailable history eligible.
   }
@@ -410,6 +419,7 @@ export async function syncGemini({
   log = () => {},
   report = async () => {},
   guard = async () => {},
+  signal,
   checkpoint = async () => {},
 }) {
   const policy = normalizeCaptureTypes(captureTypes);
@@ -439,7 +449,7 @@ export async function syncGemini({
     return { state, conversations: 0, selection, selectionWarning, hasMore: false };
   }
   await report({ phase: 'discovering', selection, selectionWarning });
-  const session = await getSession(tabContext);
+  const session = await getSession(tabContext, signal);
   const { fingerprint, accountId: boundId } = await captureBinding(session, explicit);
   const accountId = boundId || 'gemini-session-' + crypto.randomUUID();
   const wanted = explicit
@@ -467,7 +477,7 @@ export async function syncGemini({
     state.selectedIdsKey === scopeKey;
   const verifySession = async () => {
     await guard();
-    if (explicit && !(await geminiPrincipalIds(tabContext)).includes(accountId))
+    if (explicit && !(await geminiPrincipalIds(tabContext, { signal })).includes(accountId))
       throw Object.assign(new Error('The Gemini session changed. Refresh your saved list.'), {
         code: tabContext ? 'principal_changed' : 'selection_changed',
       });
@@ -488,7 +498,7 @@ export async function syncGemini({
   let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint, ...scopeState };
   const resuming = Array.isArray(pending?.summaries);
   const discovery = explicit
-    ? await catalogSummaries(session, tabContext, guard)
+    ? await catalogSummaries(session, tabContext, guard, signal)
     : resuming
       ? { summaries: pending.summaries, incomplete: Boolean(pending.discoveryIncomplete) }
       : await listChats(
@@ -507,6 +517,7 @@ export async function syncGemini({
             await checkpoint(discoveryState);
           },
           tabContext,
+          signal,
         );
   if (discovery.queued) {
     if (!fingerprint)
@@ -587,7 +598,13 @@ export async function syncGemini({
   for (const summary of summaries.slice(startIndex, endIndex)) {
     await guard();
     try {
-      const detail = await readChat(session, summary, explicit ? verifySession : guard, tabContext);
+      const detail = await readChat(
+        session,
+        summary,
+        explicit ? verifySession : guard,
+        tabContext,
+        signal,
+      );
       if (detail.incomplete) {
         failures++;
         retrySummaries.push(summary);
@@ -597,6 +614,7 @@ export async function syncGemini({
         batch.push(detail.conversation);
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if (
         [
           'selection_changed',
