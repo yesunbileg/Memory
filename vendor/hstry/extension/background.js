@@ -98,6 +98,7 @@ function updateStatus(change) {
 
 function setStatusEntry(name, entry, owner) {
   return updateStatus((status) => {
+    if (entry.running) entry.progressAtMs = Date.now();
     status[name] = owner?.signal.aborted && entry.running ? stoppingEntry(entry) : entry;
   });
 }
@@ -201,10 +202,10 @@ async function clearInterruptedRuns() {
     }
     entry.running = false;
     entry.continuationPending = true;
-    entry.nextRetryMs ??= Date.now() + 30_000;
-    entry.lastError = 'Previous sync was interrupted. Run it again.';
+    entry.nextRetryMs = null;
+    entry.lastError = 'Sync interrupted. Resuming from the last saved batch.';
     entry.lastErrorCode = 'interrupted';
-    entry.progress = { ...entry.progress, phase: 'failed' };
+    entry.progress = { ...entry.progress, phase: 'recovering' };
     changed = true;
   }
   if (changed) await setStatus(status);
@@ -355,6 +356,8 @@ async function scheduleContinuation(providerName, deadline = 0) {
   });
 }
 
+const hasPendingCheckpoint = (state) => Boolean(state?.pending || state?.discovery);
+
 async function providerTabs(selected) {
   const tabs =
     (await chrome.tabs?.query?.({ url: selected.map(([, p]) => `https://${p.site}/*`) })) ?? [];
@@ -406,6 +409,7 @@ async function runSync(
     return { ok: false, code: 'paused' };
   if (
     trigger === 'continuation' &&
+    !status[onlyProvider]?.running &&
     !status[onlyProvider]?.continuationPending &&
     !status[onlyProvider]?.nextRetryMs
   )
@@ -514,7 +518,12 @@ async function runSync(
         }
         const policyChanged = !sameCaptureTypes(status[name]?.capturePolicy, settings.captureTypes);
         const continuing =
-          !full && !scopeChanged && !policyChanged && Boolean(status[name]?.continuationPending);
+          !full &&
+          !scopeChanged &&
+          !policyChanged &&
+          Boolean(status[name]?.continuationPending) &&
+          (status[name]?.lastErrorCode !== 'interrupted' ||
+            hasPendingCheckpoint(status[name]?.state));
         const entry = {
           ...(status[name] ?? {}),
           ...((full && name === onlyProvider) || policyChanged || scopeChanged
@@ -531,6 +540,9 @@ async function runSync(
             (trigger === 'continuation' && status[name]?.manualContinuation),
           continuationPending: false,
           stopRequested: false,
+          nextRetryMs: null,
+          lastError: null,
+          lastErrorCode: null,
           lastRunMs: startedAt,
           trigger,
           running: true,
@@ -545,6 +557,10 @@ async function runSync(
             unchanged: continuing ? (status[name]?.progress?.unchanged ?? 0) : 0,
           },
         };
+        // Arm before publishing a running state or awaiting any provider work.
+        // A new worker can resume even if this one never reaches its finally block.
+        await scheduleContinuation(name);
+        if (signal.aborted) return;
         await setStatusEntry(name, entry, owner);
         if (!startedReported) {
           startedReported = true;
@@ -583,7 +599,7 @@ async function runSync(
             checkpoint: async (state) => {
               await guard();
               entry.state = state;
-              entry.continuationPending = Boolean(state?.pending || state?.discovery);
+              entry.continuationPending = hasPendingCheckpoint(state);
               await setStatusEntry(name, entry, owner);
             },
             // Provider diagnostics can contain account or conversation text.
@@ -703,9 +719,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name.startsWith(CONTINUE_ALARM_PREFIX)) {
     const providerName = alarm.name.slice(CONTINUE_ALARM_PREFIX.length);
     if (Object.hasOwn(PROVIDERS, providerName)) {
-      runSync('continuation', { onlyProvider: providerName }).then((result) => {
-        if (result.code === 'already_syncing') scheduleContinuation(providerName);
-      });
+      runSync('continuation', { onlyProvider: providerName })
+        .then((result) => {
+          const owner = activeProviders.get(providerName);
+          if (result.code === 'already_syncing' && owner && !owner.signal.aborted)
+            return scheduleContinuation(providerName);
+        })
+        .catch(() => {});
     }
   }
 });

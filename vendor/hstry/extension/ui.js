@@ -228,6 +228,7 @@ export function progressDetail(progress) {
 
 export function friendlyError(error, code = null) {
   if (code === 'sync_stopped') return 'Sync stopped.';
+  if (code === 'interrupted') return 'Sync interrupted. Resuming from the last saved batch.';
   const text = String(error ?? 'Unknown sync error');
   if (code === 'selection_changed' || text.includes('selection changed'))
     return 'Your selection changed. Capture again with your new checklist.';
@@ -400,18 +401,24 @@ export function captureProgress(status, providers, since = 0) {
   }
   const running = active.some((entry) => entry.running);
   const stopping = active.some((entry) => entry.stopRequested);
+  const recovering = active.some((entry) => entry.progress?.phase === 'recovering');
   const discovering = active.some(
     (entry) => entry.running && entry.progress?.phase === 'discovering',
   );
+  const latestProgress = Math.max(
+    0,
+    ...active.filter((entry) => entry.running).map((entry) => entry.progressAtMs || 0),
+  );
+  const waitAt = !stopping && latestProgress ? latestProgress + 35_000 : 0;
+  const now = Date.now();
   const chatMax = !discovering && selected > 0 && accounts <= 1 ? selected : null;
   const max = accounts > 1 ? accounts : chatMax;
-  const stage = stopping
-    ? 'Stopping sync…'
-    : !running
-      ? 'Next batch queued.'
-      : discovering
-        ? 'Checking selected accounts…'
-        : 'Capturing selected chats…';
+  let stage = 'Capturing selected chats…';
+  if (stopping) stage = 'Stopping sync…';
+  else if (recovering) stage = 'Sync interrupted. Resuming from the last saved batch…';
+  else if (!running) stage = 'Next batch queued.';
+  else if (waitAt && waitAt <= now) stage = 'Waiting for sync progress…';
+  else if (discovering) stage = 'Checking selected accounts…';
   const counts = [
     chatMax
       ? `${Math.min(checked, chatMax)}/${chatMax} checked`
@@ -425,6 +432,7 @@ export function captureProgress(status, providers, since = 0) {
     value: accounts > 1 ? accountsChecked : chatMax ? Math.min(checked, chatMax) : null,
     max,
     text: [stage, counts.join(' · ')].filter(Boolean).join(' '),
+    ...(waitAt > now ? { refreshAt: waitAt } : {}),
   };
 }
 

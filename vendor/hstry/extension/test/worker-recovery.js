@@ -155,21 +155,32 @@ const until = async (check) => {
   assert.ok(check(), 'worker did not reach the expected state');
 };
 const pausedRead = Promise.withResolvers();
+const pausedCheckpoint = Promise.withResolvers();
 let entered = false;
 let followupReads = 0;
+const continuationAlarm = 'hstry-sync-continue-chatgpt';
+alarms.delete(continuationAlarm);
 PROVIDERS.chatgpt.sync = async ({ guard, checkpoint }) => {
-  await checkpoint({ accounts: { fixture: { archivedUpdates: [['saved', 123]] } }, pending: true });
+  assert.ok(alarms.has(continuationAlarm), 'a wake-up exists before the first provider read');
   entered = true;
   await pausedRead.promise;
+  await checkpoint({ accounts: { fixture: { archivedUpdates: [['saved', 123]] } }, pending: true });
+  await pausedCheckpoint.promise;
   await guard();
   followupReads++;
   return { state: {}, conversations: 0 };
 };
 await send({ type: 'syncNow' });
 await until(() => entered);
+assert.equal(mem.status.chatgpt.continuationPending, false, 'the first provider read is blocked');
+alarms.delete(continuationAlarm); // One-shot alarms disappear when delivered.
+alarmListener({ name: continuationAlarm });
+await until(() => alarms.has(continuationAlarm));
+pausedRead.resolve();
+await until(() => mem.status.chatgpt.continuationPending);
 assert.equal((await stop()).ok, true, 'the popup can stop an active run');
 assert.equal(mem.status.chatgpt.progress.phase, 'stopping');
-pausedRead.resolve();
+pausedCheckpoint.resolve();
 await until(() => mem.status.chatgpt.progress.phase === 'cancelled');
 assert.equal(followupReads, 0);
 assert.equal(mem.status.chatgpt.continuationPending, false);
@@ -189,3 +200,41 @@ assert.ok(alarms.has('hstry-sync'), 'stop does not disable the normal periodic s
 alarmListener({ name: 'hstry-sync-continue-chatgpt' });
 await new Promise((r) => setTimeout(r, 450));
 assert.equal(queuedRuns, 1, 'neither the queued timer nor the alarm may resume a stopped run');
+
+// A one-shot alarm may be the event that starts a fresh worker. It should resume
+// at the acknowledged checkpoint on that wake, without another retry delay.
+const checkpoint = { accounts: { fixture: { archivedUpdates: [['saved', 123]] } }, pending: true };
+mem.status.chatgpt = {
+  ...mem.status.chatgpt,
+  running: true,
+  manualContinuation: true,
+  state: checkpoint,
+};
+mem.settings.autoPaused = true;
+let resumed;
+PROVIDERS.chatgpt.sync = async ({ state }) => {
+  resumed = state;
+  return { state: { accounts: state.accounts }, conversations: 0 };
+};
+await import('../background.js?worker-restarted');
+alarmListener({ name: continuationAlarm });
+await until(() => resumed && !mem.status.chatgpt.running);
+assert.deepEqual(resumed, checkpoint);
+assert.equal(mem.status.chatgpt.progress.phase, 'complete');
+
+// Discovery can be interrupted before the new run creates a checkpoint.
+// Account records marked done by the previous run cannot finish the new one.
+mem.status.chatgpt.running = true;
+mem.status.chatgpt.state = {
+  accountRun: { entries: [['test-owner', { done: true, state: { marker: 42 } }]], next: 0 },
+};
+resumed = undefined;
+PROVIDERS.chatgpt.principalIds = async () => ['test-owner'];
+PROVIDERS.chatgpt.sync = async ({ state }) => {
+  resumed = state;
+  return { state, conversations: 0 };
+};
+await import('../background.js?worker-restarted-before-checkpoint');
+alarmListener({ name: continuationAlarm });
+await until(() => resumed && !mem.status.chatgpt.running);
+assert.deepEqual(resumed, { marker: 42 });

@@ -349,3 +349,34 @@ test('the popup replaces Sync now with Stop sync while a run is queued or active
   await button.fire('click');
   assert.deepEqual(calls.at(-1), { type: 'stopSync' });
 });
+
+test('a quiet or interrupted sync shows its actual state and keeps Stop available', async () => {
+  const archiveId = 'a'.repeat(32);
+  const entry = {
+    captureScope: JSON.stringify([archiveId, 'chatgpt', 'profile', 'browser-local', {}]),
+    lastRunMs: Date.now() - 40_000,
+    progressAtMs: Date.now() - 36_000,
+    running: true,
+    progress: { phase: 'importing', processed: 3, accepted: 0 },
+    selection: { selected: 74 },
+  };
+  const { get, data, changed } = await popup({
+    data: {
+      settings: {
+        archiveId,
+        nativeHost: 'org.ai_memory.archive_' + archiveId,
+        providers: { chatgpt: true },
+      },
+      status: { chatgpt: entry },
+    },
+    workerReply: () => ({ ok: true }),
+  });
+  assert.match(get('notice').textContent, /^Waiting for sync progress… 3\/74 checked · 0 saved$/);
+  assert.equal(get('sync').textContent, 'Stop sync');
+  entry.running = false;
+  entry.continuationPending = true;
+  entry.progress.phase = 'recovering';
+  await changed({ status: { newValue: data.status } }, 'local');
+  assert.match(get('notice').textContent, /Sync interrupted\. Resuming from the last saved batch…/);
+  assert.equal(get('sync').disabled, false);
+});

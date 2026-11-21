@@ -37,6 +37,7 @@ let syncPending = false,
   syncSince = 0,
   notice = '',
   writes = Promise.resolve();
+let progressTimer;
 
 function setSettings(open) {
   el('settings-panel').hidden = !open;
@@ -58,6 +59,8 @@ function summary() {
   const enabled = providers.filter((p) => settings.providers[p] && nonempty(scopes[p]));
   const runs = statusForPairing(status, settings);
   const progress = captureProgress(runs, settings.providers);
+  clearTimeout(progressTimer);
+  if (progress?.refreshAt) progressTimer = setTimeout(summary, progress.refreshAt - Date.now());
   const stopping = stopPending || Object.values(runs).some((entry) => entry.stopRequested);
   stopAvailable = Boolean(progress);
   el('provider-status').replaceChildren();
