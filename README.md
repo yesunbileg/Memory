@@ -124,4 +124,6 @@ Segments target 150,000 body words, with a 450,000-body-word merge ceiling and a
 
 If a previously published source disappears remotely, sync records the missing source and retrieval excludes it. Re-publication is a separate choice: run `ai-memory republish SEGMENT_ID` for the segment reported missing, then `ai-memory sync`. A normal sync alone does not undo a manual deletion.
 
+Run `ai-memory cleanup-legacy` to review superseded NotebookLM copies from an older archive. To remove specific copies, run `ai-memory cleanup-legacy --delete SOURCE_ID [...]` with the IDs from that preview. The command rechecks the current replacements before deleting.
+
 The current implementation supports Codex and OpenCode local adapters plus the three web providers. Other local agents, full historical web coverage, long-running Google auth stability, 150k/300k/450k retrieval benchmarks, and real Mongolian retrieval quality remain unverified. See [donor audit](docs/donor-audit.md), [validation](docs/validation.md), and [third-party notices](THIRD_PARTY_NOTICES.md).

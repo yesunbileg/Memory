@@ -65,6 +65,14 @@ def parser():
     )
     recover.add_argument("segment_id")
     sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
+    cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
+    cleanup.add_argument(
+        "--delete",
+        nargs="+",
+        default=[],
+        metavar="SOURCE_ID",
+        help="Delete only these verified legacy source IDs",
+    )
     ask = sub.add_parser(
         "ask", help="Retrieve prior context from NotebookLM through the memory gateway"
     )
@@ -142,6 +150,22 @@ async def sync_archive(store):
         finally:
             if adapter is not None:
                 await adapter.close()
+
+
+async def cleanup_legacy_archive(store, approved_ids):
+    from .archive_lock import archive_lock
+    from .notebook import NotebookLMAdapter
+    from .publication import cleanup_legacy_sources
+
+    with archive_lock(store.path):
+        notebook_id = store.get_setting("notebook_id")
+        if not notebook_id:
+            raise PublicInputError("Set a notebook ID with init --notebook-id before cleanup")
+        adapter = NotebookLMAdapter(notebook_id, store.get_setting("storage_path"))
+        try:
+            return await cleanup_legacy_sources(store, adapter, approved_ids)
+        finally:
+            await adapter.close()
 
 
 def _preflight_errors(result):
@@ -298,6 +322,8 @@ def execute(args):
             return republish(store, args.segment_id)
         if args.command == "sync":
             return asyncio.run(sync_archive(store))
+        if args.command == "cleanup-legacy":
+            return asyncio.run(cleanup_legacy_archive(store, args.delete))
         if args.command == "show":
             return store.get_conversation(args.conversation_id)
         return store.status()

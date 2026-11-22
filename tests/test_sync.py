@@ -664,6 +664,59 @@ async def test_legacy_mapped_raw_source_replaced_but_unproven_copy_never_deleted
 
 
 @pytest.mark.asyncio
+async def test_explicit_legacy_cleanup_retries_completed_replacement(tmp_path):
+    from ai_memory.diagnostics import PublicInputError
+    from ai_memory.publication import cleanup_legacy_sources
+
+    with Store(tmp_path / "db") as store:
+        store.ingest(conversation(), consent=True)
+        builder = SegmentBuilder(store)
+        builder.build()
+        remote = Remote()
+        title, old_text = add_legacy_source(store, builder, remote)
+        with store.connection:
+            store.connection.execute(
+                """INSERT INTO sync_jobs(segment_id,revision,title,stage,new_source_id)
+                VALUES('SEG-001',1,?,'done','legacy-raw')""",
+                (title,),
+            )
+        remote.sources["same-title"] = {"title": title, "ready": True, "text": old_text}
+        await SyncEngine(store, builder, remote, tmp_path / "md").run_once()
+        (current,) = store.connection.execute("SELECT source_id FROM source_map").fetchone()
+        assert set(remote.sources) == {"legacy-raw", "same-title", current}
+        before = remote.operations.copy()
+
+        preview = await cleanup_legacy_sources(store, remote, [])
+        assert [row["source_id"] for row in preview["candidates"]] == ["legacy-raw"]
+        assert remote.operations == before
+        for source_id in ("same-title", current):
+            with pytest.raises(PublicInputError):
+                await cleanup_legacy_sources(store, remote, ["legacy-raw", source_id])
+
+        remote.sources[current]["ready"] = False
+        with pytest.raises(PublicInputError):
+            await cleanup_legacy_sources(store, remote, ["legacy-raw"])
+        remote.sources[current]["ready"] = True
+        with store.connection:
+            store.connection.execute("INSERT INTO retained_sources VALUES('legacy-raw')")
+        with pytest.raises(PublicInputError):
+            await cleanup_legacy_sources(store, remote, ["legacy-raw"])
+        with store.connection:
+            store.connection.execute("DELETE FROM retained_sources")
+        assert remote.operations == before
+
+        result = await cleanup_legacy_sources(store, remote, ["legacy-raw"])
+        assert result["deleted"] == ["legacy-raw"]
+        assert result["candidates"] == []
+        assert set(remote.sources) == {"same-title", current}
+        assert remote.operations[len(before) :] == [("delete", "legacy-raw")]
+        assert (await cleanup_legacy_sources(store, remote, ["legacy-raw"]))["already_absent"] == [
+            "legacy-raw"
+        ]
+        assert (await cleanup_legacy_sources(store, remote, []))["candidates"] == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["uploading", "processing"])
 async def test_legacy_inflight_unproven_source_never_claimed_or_deleted(tmp_path, stage):
     secret = "password = 'SyntheticPass987654!'"
