@@ -63,6 +63,133 @@ class Remote:
         self.sources.pop(source_id, None)
 
 
+async def test_progress_reports_live_segment_phases_during_replacement(tmp_path):
+    progress = []
+
+    class ObservedRemote(Remote):
+        async def upload(self, path, title):
+            assert progress[-1] == {"phase": "upload", "segment_id": "SEG-001"}
+            return await super().upload(path, title)
+
+        async def wait_ready(self, source_id):
+            assert progress[-1] == {"phase": "readiness", "segment_id": "SEG-001"}
+            await super().wait_ready(source_id)
+
+        async def delete(self, source_id):
+            assert progress[-1] == {"phase": "cleanup", "segment_id": "SEG-001"}
+            await super().delete(source_id)
+
+    with Store(tmp_path / "db") as store:
+        chat = conversation()
+        store.ingest(chat, consent=True)
+        remote = ObservedRemote()
+        engine = SyncEngine(
+            store, SegmentBuilder(store), remote, tmp_path / "md", progress=progress.append
+        )
+        assert (await engine.run_once())["completed"] == 1
+        old_id = next(iter(remote.sources))
+        progress.clear()
+        chat["messages"][0]["text"] = "replacement revision"
+        store.ingest(chat)
+        result = await engine.run_once()
+
+    assert result["completed"] == 1
+    assert result["blocked"] == []
+    assert progress[:2] == [{"phase": "prepare"}, {"phase": "reconcile"}]
+    assert [event["phase"] for event in progress[-3:]] == ["upload", "readiness", "cleanup"]
+    assert all(set(event) <= {"phase", "segment_id"} for event in progress)
+    assert old_id not in remote.sources
+
+
+@pytest.mark.asyncio
+async def test_sync_rebuilds_a_pending_snapshot_changed_by_capture(tmp_path):
+    path = tmp_path / "db"
+    first = conversation(external_id="first")
+    second = conversation(external_id="second")
+    first["messages"][0]["text"] = "first snapshot"
+    second["messages"][0]["text"] = "stale snapshot"
+
+    class ConcurrentCapture(Remote):
+        async def wait_ready(self, source_id):
+            await super().wait_ready(source_id)
+            if self.sources[source_id]["title"].startswith("SEG-001-"):
+                second["messages"][0]["text"] = "fresh snapshot"
+                with Store(path, existing=True) as writer:
+                    writer.ingest(second)
+
+    with Store(path) as store:
+        store.ingest(first, consent=True)
+        store.ingest(second, consent=True)
+        remote = ConcurrentCapture()
+        engine = SyncEngine(store, SegmentBuilder(store, target_words=3), remote, tmp_path / "md")
+        result = await engine.run_once()
+        assert result["blocked"] == []
+        assert result["completed"] == 2
+        assert result["status"]["sync_status"] == "up_to_date"
+        assert len(remote.sources) == 2
+        assert any("fresh snapshot" in row["text"] for row in remote.sources.values())
+        assert all("stale snapshot" not in row["text"] for row in remote.sources.values())
+
+
+@pytest.mark.asyncio
+async def test_sync_rechecks_pending_snapshot_after_remote_inventory(tmp_path):
+    path = tmp_path / "db"
+    c = conversation()
+    c["messages"][0]["text"] = "stale snapshot"
+
+    class ConcurrentCapture(Remote):
+        changed = False
+
+        async def list_sources(self):
+            if not self.changed:
+                self.changed = True
+                c["messages"][0]["text"] = "fresh snapshot"
+                with Store(path, existing=True) as writer:
+                    writer.ingest(c)
+            return await super().list_sources()
+
+    with Store(path) as store:
+        store.ingest(c, consent=True)
+        remote = ConcurrentCapture()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        result = await engine.run_once()
+        assert result["blocked"] == []
+        assert result["completed"] == 1
+        assert result["status"]["sync_status"] == "up_to_date"
+        [source] = remote.sources.values()
+        assert "fresh snapshot" in source["text"]
+        assert "stale snapshot" not in source["text"]
+        assert sum(kind == "upload" for kind, _ in remote.operations) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_defers_a_segment_that_changes_again_during_the_retry(tmp_path):
+    path = tmp_path / "db"
+    c = conversation()
+
+    class BusyCapture(Remote):
+        checks = 0
+
+        async def list_sources(self):
+            self.checks += 1
+            c["messages"][0]["text"] = f"capture edit {self.checks}"
+            with Store(path, existing=True) as writer:
+                writer.ingest(c)
+            return await super().list_sources()
+
+    with Store(path) as store:
+        store.ingest(c, consent=True)
+        remote = BusyCapture()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        result = await engine.run_once()
+        assert result["blocked"] == []
+        assert result["completed"] == 0
+        assert result["deferred"] == 1
+        assert result["status"]["sync_status"] == "pending"
+        assert remote.checks == 2
+        assert not remote.operations
+
+
 @pytest.mark.asyncio
 async def test_replace_waits_for_ready_and_unchanged_sync_is_noop(tmp_path):
     with Store(tmp_path / "db") as store:
@@ -1249,3 +1376,85 @@ def test_notebook_rebind_guard_cannot_overlap_first_sync(tmp_path):
         assert settings.get_setting("notebook_id") == "notebook-B"
         assert remote.sources == {}
         assert settings.connection.execute("SELECT COUNT(*) FROM source_map").fetchone()[0] == 0
+
+
+async def test_sync_activity_is_visible_across_readers_and_cleared_on_cancel(tmp_path):
+    import asyncio
+    import json
+    import os
+    from pathlib import Path
+
+    from ai_memory.sync_activity import read_sync_activity
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowRemote(Remote):
+        async def upload(self, path, title):
+            started.set()
+            await release.wait()
+            return await super().upload(path, title)
+
+    path = tmp_path / "db"
+    with Store(path) as store:
+        store.ingest(conversation(), consent=True)
+        task = asyncio.create_task(
+            SyncEngine(store, SegmentBuilder(store), SlowRemote(), tmp_path / "md").run_once()
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        state = read_sync_activity(path)
+        assert state is not None
+        assert state["phase"] == "upload"
+        assert state["segment_id"] == "SEG-001"
+        assert state["started_at"] <= state["updated_at"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert read_sync_activity(path) is None
+
+        # A stale record left by a crash never claims that a stopped worker runs.
+        record = {
+            "phase": "upload",
+            "segment_id": "SEG-001",
+            "started_at": 1,
+            "updated_at": 2,
+            "pid": os.getpid(),
+            "process_start": "no-such-process-generation",
+        }
+        Path(str(path) + ".sync-progress.json").write_text(json.dumps(record))
+        assert read_sync_activity(path) is None
+
+
+def test_sync_activity_reader_handles_other_process_death(tmp_path):
+    import subprocess
+    import sys
+
+    from ai_memory.sync_activity import read_sync_activity
+
+    path = tmp_path / "archive.sqlite"
+    source = """
+import sys,time
+from ai_memory.archive_lock import archive_lock
+from ai_memory.sync_activity import sync_activity
+with archive_lock(sys.argv[1]), sync_activity(sys.argv[1]) as publish:
+    publish({"phase":"upload", "segment_id":"SEG-101"})
+    print("ready", flush=True)
+    time.sleep(60)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", source, str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        progress = read_sync_activity(path)
+        assert progress and progress["phase"] == "upload"
+        assert progress["segment_id"] == "SEG-101"
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+        child.stdout.close()
+        child.stderr.close()
+    assert read_sync_activity(path) is None

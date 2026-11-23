@@ -8,7 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
-    python_paths = ["src", "tests", "scripts", "config", "plugins"]
+    python_paths = [
+        "src",
+        "tests",
+        "scripts",
+        "config",
+        "plugins",
+        "mem.py",
+        "mem_backend.py",
+        "mem_flow.py",
+    ]
     commands = [
         [sys.executable, "-m", "ruff", "check", *python_paths],
         [sys.executable, "-m", "ruff", "format", "--check", "--quiet", *python_paths],

@@ -358,6 +358,53 @@ async def test_foreign_or_absent_citation_withholds_entire_answer(tmp_path):
             assert "NotebookLM answer" not in str(result)
 
 
+async def test_terminal_chat_displays_uncited_notebooklm_answer(tmp_path):
+    from ai_memory.gateway import MemoryApplication
+
+    db = tmp_path / "db"
+    seed_archive(db)
+
+    class Remote(SimulatedNotebook):
+        async def chat(self, question, source_ids=None):
+            self.queries.append((question, source_ids))
+            return {"answer": "Hello from NotebookLM!", "references": []}
+
+    remote = Remote(references=[])
+    app = MemoryApplication(db, adapter=remote)
+    result = await app.chat("hello")
+    assert result["answer"] == "Hello from NotebookLM!"
+    assert result["sources"] == []
+    assert remote.queries == [("hello", ["owned-source"])]
+
+    memory = await app.call("memory_ask", {"question": "hello"})
+    assert memory["error"]["code"] == "unverified_sources"
+
+
+async def test_terminal_chat_rechecks_sources_and_rejects_foreign_citations(tmp_path):
+    from ai_memory.gateway import MemoryApplication
+    from ai_memory.store import Store
+
+    db = tmp_path / "db"
+    cid, _, _ = seed_archive(db)
+
+    class Remote(SimulatedNotebook):
+        async def chat(self, question, source_ids=None):
+            assert source_ids == ["owned-source"]
+            if question == "revoke":
+                with Store(db) as store:
+                    store.revoke_many([cid])
+                refs = []
+            else:
+                refs = [{"source_id": "unrelated-source"}]
+            return {"answer": "Private test content", "references": refs}
+
+    app = MemoryApplication(db, adapter=Remote())
+    for question in ("foreign", "revoke"):
+        result = await app.chat(question)
+        assert result["error"]["code"] == "unverified_sources"
+        assert "answer" not in result
+
+
 async def test_legacy_receipt_and_oversized_or_malformed_question_never_dispatch(tmp_path):
     from ai_memory.gateway import create_server
     from ai_memory.store import Store

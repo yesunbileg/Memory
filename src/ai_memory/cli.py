@@ -64,7 +64,12 @@ def parser():
         "republish", help="Authorize republishing a confirmed missing cloud source"
     )
     recover.add_argument("segment_id")
-    sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
+    sync = sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
+    sync.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Include every conversation already in this archive and its future continuations",
+    )
     cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
     cleanup.add_argument(
         "--delete",
@@ -123,7 +128,7 @@ async def _gateway_call(db_path, name, arguments):
     return await MemoryApplication(db_path).call(name, arguments)
 
 
-async def sync_archive(store):
+async def sync_archive(store, *, progress=None, all_chats=False):
     from .archive_lock import archive_lock
     from .notebook import NotebookLMAdapter
     from .sync import SyncEngine
@@ -136,10 +141,18 @@ async def sync_archive(store):
         storage = store.get_setting("storage_path")
         adapter = None
         try:
+            approved_count = 0
+            if all_chats:
+                with store.connection:
+                    approved_count = store.connection.execute(
+                        "UPDATE conversations SET consent=1 WHERE consent=0"
+                    ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
             result = await SyncEngine(
-                store, SegmentBuilder(store), adapter, store.workspace / "sync"
+                store, SegmentBuilder(store), adapter, store.workspace / "sync", progress=progress
             )._run_once_locked()
+            if all_chats:
+                result["newly_included_conversations"] = approved_count
             errors = _preflight_errors(result)
             store.set_setting("sync_preflight_errors", errors)
             result["status"]["sync_preflight_errors"] = errors
@@ -180,7 +193,7 @@ def _preflight_errors(result):
     return [{"reason": reason} for reason in sorted(reasons)]
 
 
-def execute(args):
+def execute(args, *, progress=None):
     if args.command == "restore":
         return restore_archive(args.db, args.backup)
     if args.command == "demo":
@@ -321,7 +334,7 @@ def execute(args):
 
             return republish(store, args.segment_id)
         if args.command == "sync":
-            return asyncio.run(sync_archive(store))
+            return asyncio.run(sync_archive(store, progress=progress, all_chats=args.all_chats))
         if args.command == "cleanup-legacy":
             return asyncio.run(cleanup_legacy_archive(store, args.delete))
         if args.command == "show":
@@ -329,10 +342,10 @@ def execute(args):
         return store.status()
 
 
-def main(argv=None):
+def main(argv=None, *, progress=None):
     args = parser().parse_args(argv)
     try:
-        result = execute(args)
+        result = execute(args, progress=progress) if progress else execute(args)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
@@ -373,7 +386,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
         return 1
     if result is not None:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=None if progress else 2))
         if (
             "error" in result
             or (args.command == "check" and not result.get("notebook", {}).get("connected"))

@@ -359,3 +359,105 @@ def test_existing_archive_commands_do_not_create_an_archive_on_a_typo(tmp_path, 
     assert result.returncode == 1
     assert json.loads(result.stdout)["error"]["code"] == "archive_not_found"
     assert not db.parent.exists()
+
+
+def test_all_chats_sync_explicitly_includes_all_archived_items(tmp_path, monkeypatch, capsys):
+    from test_store import conversation
+    from test_sync import Remote
+
+    from ai_memory.cli import main
+    from ai_memory.store import Store
+
+    remote = Remote()
+
+    class Notebook:
+        def __init__(self, notebook_id, storage_path):
+            assert notebook_id == "bound-notebook"
+
+        async def list_sources(self):
+            return await remote.list_sources()
+
+        async def get_source_text(self, source_id):
+            return await remote.get_source_text(source_id)
+
+        async def upload(self, path, title):
+            return await remote.upload(path, title)
+
+        async def wait_ready(self, source_id):
+            await remote.wait_ready(source_id)
+
+        async def delete(self, source_id):
+            await remote.delete(source_id)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("ai_memory.notebook.NotebookLMAdapter", Notebook)
+    db = tmp_path / "archive.sqlite"
+    with Store(db) as store:
+        first = conversation(external_id="first")
+        first["messages"][0]["text"] = "first body"
+        second = conversation(external_id="second")
+        second["messages"][0]["text"] = "second body password = 'SyntheticPass987654!'"
+        first_id = store.ingest(first, consent=True)
+        second_id = store.ingest(second)
+        store.set_setting("notebook_id", "bound-notebook")
+
+    # Default sync retains its existing behavior and leaves the second chat out.
+    assert main(["--db", str(db), "sync"]) == 0
+    assert json.loads(capsys.readouterr().out)["completed"] == 1
+    assert "first body" in next(iter(remote.sources.values()))["text"]
+    assert "second body" not in next(iter(remote.sources.values()))["text"]
+    with Store(db, existing=True) as store:
+        assert store.get_conversation(first_id)["consent"]
+        assert not store.get_conversation(second_id)["consent"]
+
+    assert main(["--db", str(db), "sync", "--all-chats"]) == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["status"]["sync_status"] == "up_to_date"
+    with Store(db, existing=True) as store:
+        assert store.get_conversation(first_id)["consent"]
+        assert store.get_conversation(second_id)["consent"]
+        assert "SyntheticPass987654!" in store.get_conversation(second_id)["messages"][0]["text"]
+    assert any("second body" in entry["text"] for entry in remote.sources.values())
+    assert all("SyntheticPass987654!" not in entry["text"] for entry in remote.sources.values())
+
+    # Repeat uses existing sources and grants nothing twice.
+    before = len(remote.operations)
+    assert main(["--db", str(db), "sync", "--all-chats"]) == 0
+    capsys.readouterr()
+    assert len(remote.operations) == before
+
+
+def test_all_chats_sync_does_not_change_archive_without_notebook_binding(tmp_path, capsys):
+    from test_store import conversation
+
+    from ai_memory.cli import main
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    with Store(db) as store:
+        chat = store.ingest(conversation())
+    assert main(["--db", str(db), "sync", "--all-chats"]) == 1
+    capsys.readouterr()
+    with Store(db, existing=True) as store:
+        assert not store.get_conversation(chat)["consent"]
+
+
+def test_all_chats_sync_does_not_change_archive_if_another_sync_holds_lock(tmp_path, capsys):
+    from test_store import conversation
+
+    from ai_memory.archive_lock import archive_lock
+    from ai_memory.cli import main
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    with Store(db) as store:
+        chat = store.ingest(conversation())
+        store.set_setting("notebook_id", "bound-notebook")
+
+    with archive_lock(db):
+        assert main(["--db", str(db), "sync", "--all-chats"]) == 1
+        capsys.readouterr()
+        with Store(db, existing=True) as store:
+            assert not store.get_conversation(chat)["consent"]

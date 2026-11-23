@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+launcher=$(realpath -- "$0")
+repo=$(dirname -- "$(dirname -- "$launcher")")
+exec uv run --script "$repo/mem.py" "$@"

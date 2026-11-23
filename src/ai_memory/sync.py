@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .archive_lock import archive_lock
@@ -13,6 +15,7 @@ from .private_io import write_private_text
 from .publication import observe_inventory
 from .segments import CapacityError, SegmentBuilder, SourceBudgetError
 from .store import Store, digest
+from .sync_activity import sync_activity
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +70,36 @@ def republish(store, segment_id):
 
 
 class SyncEngine:
-    def __init__(self, store: Store, builder: SegmentBuilder, adapter, output_dir: Path):
+    def __init__(
+        self,
+        store: Store,
+        builder: SegmentBuilder,
+        adapter,
+        output_dir: Path,
+        *,
+        progress: Callable[[dict[str, str]], None] | None = None,
+    ):
         self.store, self.builder, self.adapter = store, builder, adapter
         self.output_dir = Path(output_dir)
+        self.progress = progress
+        self._activity = None
+
+    def _emit_progress(self, phase: str, segment_id: str | None = None) -> None:
+        event = {"phase": phase}
+        if segment_id and re.fullmatch(r"SEG-[0-9]{3,}", segment_id):
+            event["segment_id"] = segment_id
+        if self._activity:
+            self._activity(event)
+        if self.progress:
+            try:
+                self.progress(event)
+            except Exception:
+                # Progress delivery is advisory. A closed consumer must not alter the queue.
+                self.progress = None
 
     def _prepare_snapshot(self, segment_id: str, revision: int) -> tuple[str, str, str]:
         """Validate the local render, then make its upload-only redacted snapshot."""
+        self._emit_progress("prepare", segment_id)
         segment = self.store.connection.execute(
             "SELECT revision,content_hash FROM segments WHERE id=?", (segment_id,)
         ).fetchone()
@@ -190,6 +217,7 @@ class SyncEngine:
         old_ids = json.loads(job["old_source_ids"])
         if job["new_source_id"]:
             # A persisted registration ID, not a filename, proves ownership of old content.
+            self._emit_progress("reconcile", job["segment_id"])
             remote = next(
                 (s for s in await self.adapter.list_sources() if s["id"] == job["new_source_id"]),
                 None,
@@ -256,6 +284,7 @@ class SyncEngine:
         ):
             return
         partial_id = job["new_source_id"]
+        self._emit_progress("reconcile", job["segment_id"])
         sources = await self.adapter.list_sources()
         partial = next((source for source in sources if source["id"] == partial_id), None)
         if partial and partial["title"] != job["title"]:
@@ -291,6 +320,7 @@ class SyncEngine:
         db = self.store.connection
         self._migrate_mapped_sources()
         with db:
+            db.execute("BEGIN IMMEDIATE")
             for row in db.execute("""SELECT s.* FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
                 WHERE s.state!='retired' AND s.content_hash!='' AND NOT EXISTS(SELECT 1 FROM sync_jobs j WHERE j.segment_id=s.id AND j.stage='missing') AND (sm.source_id IS NULL OR sm.revision!=s.revision) ORDER BY s.rowid""").fetchall():
                 existing = db.execute(
@@ -404,7 +434,20 @@ class SyncEngine:
             raise UploadUncertain("Could not prove exactly one upload; no retry or deletion")
         return matches[0]
 
-    async def _process(self, job):
+    def _pending_snapshot_changed(self, job_id: int) -> bool:
+        """An unsent job can be rebuilt after capture changes its local segment."""
+        return bool(
+            self.store.connection.execute(
+                """SELECT 1 FROM sync_jobs j JOIN segments s ON s.id=j.segment_id
+                   WHERE j.id=? AND j.new_source_id IS NULL
+                     AND j.stage IN ('pending','blocked','superseded')
+                     AND (j.stage='superseded' OR s.state='retired'
+                          OR s.revision!=j.revision OR s.content_hash='')""",
+                (job_id,),
+            ).fetchone()
+        )
+
+    async def _process(self, job) -> bool:
         db = self.store.connection
         job = dict(job)
         path = self.output_dir / job["title"]
@@ -422,11 +465,11 @@ class SyncEngine:
             with db:
                 db.execute("UPDATE sync_jobs SET stage='superseded' WHERE id=?", (job["id"],))
             path.unlink(missing_ok=True)
-            return
+            return False
         if job["stage"] in ("uploading", "processing", "uncertain"):
             await self._migrate_inflight_snapshot(job)
             if job["stage"] == "superseded":
-                return
+                return False
             path = self.output_dir / job["title"]
         await self._recover_terminal_upload_failure(job)
         if job["stage"] != "cleanup":
@@ -458,6 +501,7 @@ class SyncEngine:
                 if find_sensitive(text):
                     raise SensitiveData("Sensitive text detected; local archive retained")
                 if not job["new_source_id"]:
+                    self._emit_progress("reconcile", job["segment_id"])
                     sources = await self.adapter.list_sources()
                     excluded_ids = set(json.loads(job["old_source_ids"]))
                     old = list(
@@ -484,6 +528,8 @@ class SyncEngine:
                                     (source["id"],),
                                 ).fetchone()
                             ]
+                            if terminal_partials:
+                                self._emit_progress("cleanup", job["segment_id"])
                             for partial in terminal_partials:
                                 await self.adapter.delete(partial["id"])
                             if terminal_partials:
@@ -497,6 +543,9 @@ class SyncEngine:
                                 "Merge archive sources before growing into the spare slot"
                             )
                         with db:
+                            db.execute("BEGIN IMMEDIATE")
+                            if self._pending_snapshot_changed(job["id"]):
+                                raise SnapshotError("Pending segment changed before upload")
                             db.execute(
                                 "UPDATE sync_jobs SET stage='uploading',old_source_ids=?,prior_source_ids=?,failure_phase=NULL WHERE id=?",
                                 (
@@ -505,6 +554,7 @@ class SyncEngine:
                                     job["id"],
                                 ),
                             )
+                        self._emit_progress("upload", job["segment_id"])
                         try:
                             new_id = await self.adapter.upload(path, job["title"])
                         except Exception as exc:
@@ -548,6 +598,7 @@ class SyncEngine:
             if not self._owns(job["new_source_id"]):
                 raise SnapshotError("No ownership receipt for the registered source")
             if job["stage"] == "ready":
+                self._emit_progress("readiness", job["segment_id"])
                 inventory = await self.adapter.list_sources()
                 observed = next(
                     (source for source in inventory if source["id"] == job["new_source_id"]), None
@@ -563,6 +614,7 @@ class SyncEngine:
                         "UPDATE sync_jobs SET stage='processing',failure_phase='readiness' WHERE id=?",
                         (job["id"],),
                     )
+                self._emit_progress("readiness", job["segment_id"])
                 await self.adapter.wait_ready(job["new_source_id"])
                 with db:
                     db.execute(
@@ -580,7 +632,7 @@ class SyncEngine:
                         "UPDATE sync_jobs SET stage='superseded',error=NULL WHERE id=?",
                         (job["id"],),
                     )
-                    return
+                    return False
                 self.store.attest_source(job["new_source_id"], job["segment_id"], job["revision"])
                 db.execute(
                     "INSERT OR REPLACE INTO source_map(segment_id,source_id,revision) VALUES(?,?,?)",
@@ -589,6 +641,7 @@ class SyncEngine:
                 db.execute(
                     "UPDATE sync_jobs SET stage='cleanup',error=NULL WHERE id=?", (job["id"],)
                 )
+        self._emit_progress("cleanup", job["segment_id"])
         old_ids = json.loads(job["old_source_ids"])
         sources = {s["id"]: s for s in await self.adapter.list_sources()}
         replacement = sources.get(job["new_source_id"])
@@ -598,6 +651,7 @@ class SyncEngine:
                 "Replacement missing; predecessors retained until explicit republish"
             )
         if replacement.get("ready") is not True:
+            self._emit_progress("readiness", job["segment_id"])
             try:
                 await self.adapter.wait_ready(job["new_source_id"])
             except Exception as exc:
@@ -608,6 +662,7 @@ class SyncEngine:
                         {"segment_id": job["segment_id"], "source_id": job["new_source_id"]}
                     )
                 raise
+            self._emit_progress("cleanup", job["segment_id"])
         if old_ids:
             present = set(sources)
             for old_id in old_ids:
@@ -629,8 +684,9 @@ class SyncEngine:
                 (job["id"],),
             )
         path.unlink(missing_ok=True)
+        return True
 
-    async def _drain(self, result):
+    async def _drain_queue(self, result, changed, *, segment_ids=None):
         db = self.store.connection
         # Reconciliation/cleanup for retired parents always finishes before later uploads.
         jobs = db.execute("""SELECT * FROM sync_jobs j WHERE stage NOT IN ('done','superseded','missing') AND NOT EXISTS (SELECT 1 FROM sync_jobs hold WHERE hold.segment_id=j.segment_id AND hold.stage='missing')
@@ -640,15 +696,20 @@ class SyncEngine:
             job = db.execute("SELECT * FROM sync_jobs WHERE id=?", (job["id"],)).fetchone()
             if job is None or job["stage"] in ("done", "superseded"):
                 continue
-            if job["next_attempt"] > time.time():
+            if segment_ids is not None and job["segment_id"] not in segment_ids:
+                continue
+            if job["next_attempt"] > time.time() and not self._pending_snapshot_changed(job["id"]):
                 result["deferred"] += 1
                 continue
             try:
-                await self._process(job)
-                result["completed"] += 1
+                if await self._process(job):
+                    result["completed"] += 1
             except SpareSlotNeeded:
                 return "merge"
             except Exception as exc:
+                if isinstance(exc, SnapshotError) and self._pending_snapshot_changed(job["id"]):
+                    changed.add(job["segment_id"])
+                    continue
                 kind = failure_code(exc)
                 if kind == "processing_failed":
                     latest = db.execute(
@@ -665,6 +726,7 @@ class SyncEngine:
                         and latest["stage"] == "processing"
                     ):
                         try:
+                            self._emit_progress("cleanup", job["segment_id"])
                             present = {s["id"] for s in await self.adapter.list_sources()}
                             if failed in present:
                                 await self.adapter.delete(failed)
@@ -710,18 +772,30 @@ class SyncEngine:
             else "complete"
         )
 
-    async def run_once(self) -> dict:
-        """Run one sync cycle with exclusive archive/notebook-binding ownership."""
-        with archive_lock(self.store.path):
-            return await self._run_once_locked()
+    async def _drain(self, result):
+        changed: set[str] = set()
+        outcome = await self._drain_queue(result, changed)
+        if not changed:
+            return outcome
+        if outcome == "merge":
+            result["deferred"] += len(changed)
+            return outcome
 
-    async def _run_once_locked(self) -> dict:
-        """Run while the caller holds archive_lock(self.store.path).
+        # Capture can continue throughout the sync. Rebuild once and leave
+        # further edits pending so a busy conversation cannot stall the run.
+        self._build_segments(result)
+        try:
+            self._enqueue()
+        except SnapshotError:
+            result["blocked"].append({"reason": "SnapshotError"})
+            return "blocked"
+        still_changed: set[str] = set()
+        outcome = await self._drain_queue(result, still_changed, segment_ids=changed)
+        result["deferred"] += len(still_changed)
+        return outcome
 
-        CLI callers acquire the lock before reading settings or constructing the
-        adapter, then retain it across this await. Direct callers use run_once.
-        """
-        result = {"completed": 0, "deferred": 0, "blocked": []}
+    def _build_segments(self, result):
+        self._emit_progress("prepare")
         try:
             self.builder.build()
         except SourceBudgetError:
@@ -733,7 +807,29 @@ class SyncEngine:
             )
         else:
             result["blocked"].extend(getattr(self.builder, "blocked", []))
+
+    async def run_once(self) -> dict:
+        """Run one sync cycle with exclusive archive/notebook-binding ownership."""
+        with archive_lock(self.store.path):
+            return await self._run_once_locked()
+
+    async def _run_once_locked(self) -> dict:
+        """Run while the caller holds archive_lock(self.store.path).
+
+        CLI callers acquire the lock before reading settings or constructing the
+        adapter, then retain it across this await. Direct callers use run_once.
+        """
+        with sync_activity(self.store.path) as self._activity:
+            try:
+                return await self._run_with_activity()
+            finally:
+                self._activity = None
+
+    async def _run_with_activity(self) -> dict:
+        result = {"completed": 0, "deferred": 0, "blocked": []}
+        self._build_segments(result)
         try:
+            self._emit_progress("reconcile")
             await self._reconcile_mapped_sources()
             self._enqueue()
         except SnapshotError:
@@ -755,9 +851,11 @@ class SyncEngine:
                 and status["segments"] >= self.builder.max_active
             ):
                 try:
+                    self._emit_progress("prepare")
                     self.builder.merge_oldest(include_open=drained == "merge")
                     self._enqueue()
                     if await self._drain(result) == "complete":
+                        self._emit_progress("prepare")
                         self.builder.build()
                         self._enqueue()
                         if await self._drain(result) == "merge":

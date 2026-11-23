@@ -6,7 +6,7 @@ A lightweight archive for AI conversations, built from the [supplied architectur
 
 Codex / OpenCode / web chats → hstry text collectors → SQLite → Markdown segments → **NotebookLM** → MCP.
 
-SQLite stores original text and operational state. NotebookLM is the only AI memory engine. There is no local LLM, vector database, automatic summary, dashboard, or paid API dependency. notebooklm-py uses Google's unofficial API; availability and free-account limits depend on Google.
+SQLite stores original text and operational state. NotebookLM is the only AI memory engine. There is no local LLM, vector database, automatic summary, or paid API dependency. notebooklm-py uses Google's unofficial API; availability and free-account limits depend on Google.
 
 ## Install and run the local demo
 
@@ -27,6 +27,38 @@ cloud executor setup is separate and documented in [config/cloud-start.md](confi
 
 The demo imports **synthetic** Codex and OpenCode histories through the actual donor adapters. It creates `data/demo/conversations.sqlite` and `data/demo/segments/SEG-001.md`, prints conversation IDs and process resource measurements, and can be repeated without duplicate messages. A changed fixture, a symlink or non-demo archive contents are not overwritten; choose a new empty directory instead. No data is sent to Google. MCP smoke testing starts a real stdio server and calls `memory_status`; it does not invent a NotebookLM answer.
 
+## Terminal interface
+
+From the checkout, run `uv run mem.py`. To make `mem` available from any
+directory on Linux, link the launcher into your user bin directory.
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$(realpath scripts/mem)" ~/.local/bin/mem
+mem
+```
+
+The TUI uses `data/conversations.sqlite` in the checkout. Use `--db PATH` for a
+different archive. Press `Ctrl+P` for commands or open the **Урсгал** tab to see
+how capture, NotebookLM sync and questions fit together.
+
+For first-time setup, sign into NotebookLM in Brave, then use `/setup` to
+create a notebook or paste the link or ID of one you already use. To renew
+access, open `/connect` and choose **Нэвтрэх**. The form accepts a Brave profile
+and a Google email when several accounts share that profile. The connection
+screen shows the verified notebook, account and access when available.
+`/login Profile 1` is also available for direct login with that profile.
+
+The extension's **Sync now** saves selected web chats in the local archive.
+Run `/sync-all` in `mem` to sync every chat in that archive to the configured
+NotebookLM notebook. The command starts immediately and shows progress through
+upload, readiness and cleanup. From the CLI, use `ai-memory sync --all-chats`.
+Use `/auto on` to sync new and changed archived chats in the background while
+`mem` is open. The preference is saved per archive. `/auto` toggles it, and
+`/auto off` stops it. During an automatic sync, `/stop` also turns it off.
+Type a question and press Enter for NotebookLM's reply. Use `/chats` to browse
+the local archive.
+
 ## Import existing histories once
 
 ```bash
@@ -34,16 +66,13 @@ The demo imports **synthetic** Codex and OpenCode histories through the actual d
 .venv/bin/ai-memory collect codex ~/.codex/sessions
 .venv/bin/ai-memory collect opencode ~/.local/share/opencode
 .venv/bin/ai-memory status
-.venv/bin/ai-memory pending
 .venv/bin/ai-memory show CX-REPLACE_WITH_RETURNED_ID
 .venv/bin/ai-memory preview CX-REPLACE_WITH_RETURNED_ID
-.venv/bin/ai-memory approve CX-REPLACE_WITH_RETURNED_ID
-.venv/bin/ai-memory build
 ```
 
-The default archive is `data/conversations.sqlite`; use `--db PATH` **before** the subcommand to select another archive. Import prints the actual conversation IDs. Histories are imported locally without upload consent. `approve` grants consent for the specified conversation, including future continuations; `collect --approve-upload` grants it during import. Review the archived text before approving. Before upload, recognized API keys, password/token assignments, cookies, JWTs and private-key payloads are replaced with the same number of `*` characters. Surrounding text and line breaks are preserved. SQLite and local Markdown exports retain the originals; only cloud snapshots are masked. The upload gate blocks residual secrets and recognized quoted values whose boundaries cannot be determined. Exports and snapshots are written through private temporary files. Detection cannot identify every possible secret.
+The default archive is `data/conversations.sqlite`. Use `--db PATH` **before** the subcommand to select another archive. Import prints the conversation IDs, and `preview ID` shows the masked text. Before upload, recognized API keys, password/token assignments, cookies, JWTs and private-key payloads are replaced with the same number of `*` characters. Surrounding text and line breaks are preserved. SQLite and local Markdown exports retain the originals. The upload gate blocks residual secrets and recognized quoted values whose boundaries cannot be determined. Exports and snapshots use private temporary files. Detection cannot identify every possible secret.
 
-Use `revoke ID...` to stop future uploads. This does not request deletion of existing Google copies. See [consent, backup and restore](docs/consent-backup.md).
+The CLI also supports syncing a subset through its per-chat consent settings. Running `/sync-all` includes the entire local archive. See [consent, backup and restore](docs/consent-backup.md).
 
 Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. Direct Codex directory reads reconcile overlapping snapshots and can fall back to individual files if batch serialization overflows. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. A complete Codex user message containing one reserved internal goal wrapper is excluded; mixed or quoted wrappers retain their visible text. Missing timestamps and model names remain unknown.
 
@@ -116,7 +145,7 @@ After the archive acknowledges a ChatGPT or Claude chat, later runs can skip its
 
 **Stop sync** cancels the current sync and any remaining batches. Chats already saved stay in the local archive. The regular automatic schedule remains in effect unless you pause it in Settings.
 
-To send an archived conversation to NotebookLM, separately review it, approve it and run `ai-memory sync`. This is different from the popup’s **Sync now**. Private provider interfaces can change. Offline verification uses synthetic data, not personal accounts. See the [Mongolian setup guide](docs/extension-setup.mn.md).
+Run `/sync-all` in `mem` to send archived chats to NotebookLM. The popup’s **Sync now** saves selected web chats to the local archive. Private provider interfaces can change. Offline verification uses synthetic data. See the [Mongolian setup guide](docs/extension-setup.mn.md).
 
 ## Reliability and scope
 

@@ -260,6 +260,272 @@ async def test_query_uses_sources_and_historical_context_prompt():
     await adapter.close()
 
 
+async def test_terminal_chat_uses_verbatim_prompt_and_explicit_sources():
+    from ai_memory.notebook import NotebookLMAdapter
+
+    sdk = SimulatedSDK()
+    adapter = NotebookLMAdapter("notebook-1", client_factory=lambda path: sdk)
+    try:
+        result = await adapter.chat("hello", source_ids=["source-1"])
+        assert result["answer"] == "A decision from the source. [1]"
+        assert sdk.questions == [("notebook-1", "hello", ["source-1"])]
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("access", [True, False])
+def test_terminal_brave_login_saves_only_a_verified_session(tmp_path, monkeypatch, access):
+    from types import SimpleNamespace
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    credential = tmp_path / "session.json"
+    credential.write_text("old session")
+    with Store(db) as store:
+        store.set_setting("notebook_id", "bound-notebook")
+        store.set_setting("storage_path", str(credential))
+        store.set_setting("sync_preflight_errors", [{"reason": "auth_required"}])
+
+    staged = []
+
+    def run(command, **kwargs):
+        assert command[2:5] == ["notebooklm", "login", "--browser-cookies"]
+        assert command[5] == "brave::Profile 1"
+        path = Path(command[-1])
+        assert path != credential
+        assert Path(kwargs["env"]["NOTEBOOKLM_HOME"]) == path.parent
+        path.write_text("fresh session")
+        staged.append(path)
+        return SimpleNamespace(returncode=0)
+
+    async def get(notebook_id):
+        assert notebook_id == "bound-notebook"
+        return SimpleNamespace(id=notebook_id, title="Test notebook", role=None)
+
+    async def sources(notebook_id):
+        assert notebook_id == "bound-notebook"
+        if not access:
+            from notebooklm.exceptions import AuthError
+
+            raise AuthError("this raw SDK detail must stay private")
+        return [SimpleNamespace(id="source", is_ready=True)]
+
+    async def account():
+        return "signed-in@example.test"
+
+    @asynccontextmanager
+    async def verified(storage_path):
+        assert storage_path == staged[0]
+        yield SimpleNamespace(
+            notebooks=SimpleNamespace(get=get),
+            sources=SimpleNamespace(list=sources),
+            get_account_email=account,
+        )
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(notebook, "_stored_client", verified)
+    if access:
+        result = notebook.login_from_brave(db, "Profile 1")
+        assert result["notebook"]["connected"] is True
+        assert result["notebook"]["ready_sources"] == 1
+        assert result["notebook"]["title"] == "Test notebook"
+        assert result["notebook"]["account"] == "signed-in@example.test"
+        assert result["notebook"]["can_write"] is None
+        assert result["notebook"]["checked_at"].endswith("+00:00")
+        assert credential.read_text() == "fresh session"
+        assert credential.stat().st_mode & 0o777 == 0o600
+        with Store(db, existing=True) as archive:
+            assert archive.get_setting("sync_preflight_errors") == []
+            assert archive.get_setting("notebook_identity") == {
+                key: result["notebook"][key]
+                for key in ("id", "title", "account", "role", "can_write", "checked_at")
+            }
+    else:
+        with pytest.raises(notebook.NotebookLMAuthError):
+            notebook.login_from_brave(db, "Profile 1")
+        assert credential.read_text() == "old session"
+        with Store(db, existing=True) as archive:
+            assert archive.get_setting("sync_preflight_errors") == [{"reason": "auth_required"}]
+    assert not staged[0].exists()
+
+
+def test_brave_notebook_setup_attaches_to_validated_id_and_initializes_archive(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from notebooklm.types import SharePermission
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "brand-new" / "archive.sqlite"
+    calls = []
+
+    def run(command, **kwargs):
+        assert command[5:8] == ["brave::Work", "--account", "owner@example.test"]
+        Path(command[-1]).write_text("verified session")
+        return SimpleNamespace(returncode=0)
+
+    async def get(notebook_id):
+        calls.append(("get", notebook_id))
+        return SimpleNamespace(id=notebook_id, title="Work", role=SharePermission.EDITOR)
+
+    async def sources(notebook_id):
+        calls.append(("list", notebook_id))
+        return []
+
+    async def account():
+        return "owner@example.test"
+
+    @asynccontextmanager
+    async def verified(storage_path):
+        assert storage_path.read_text() == "verified session"
+        yield SimpleNamespace(
+            notebooks=SimpleNamespace(get=get),
+            sources=SimpleNamespace(list=sources),
+            get_account_email=account,
+        )
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(notebook, "_stored_client", verified)
+    assert not db.exists()
+    result = notebook.setup_notebook_from_brave(
+        db,
+        "attach",
+        "https://notebooklm.google.com/notebook/synthetic-id?authuser=1",
+        "Work",
+        "owner@example.test",
+    )["notebook"]
+    assert set(calls) == {("get", "synthetic-id"), ("list", "synthetic-id")}
+    assert result["id"] == "synthetic-id"
+    assert result["title"] == "Work"
+    assert result["role"] == "editor"
+    assert result["can_write"] is True
+    assert notebook.check_notebook_connection(db)["notebook"]["title"] == "Work"
+    with Store(db, existing=True) as archive:
+        assert archive.get_setting("notebook_id") == "synthetic-id"
+        assert archive.get_setting("notebook_identity")["account"] == "owner@example.test"
+        auth_path = Path(archive.get_setting("storage_path"))
+        assert auth_path.parent == archive.workspace
+        assert auth_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_brave_notebook_setup_guards_invalid_url_and_existing_binding(tmp_path, monkeypatch):
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+
+    def forbidden_run(*args, **kwargs):
+        pytest.fail("Invalid or already-bound setup must not import browser credentials")
+
+    monkeypatch.setattr("subprocess.run", forbidden_run)
+    with pytest.raises(notebook.NotebookLMError) as invalid:
+        notebook.setup_notebook_from_brave(db, "attach", "https://example.test/notebook/id")
+    assert invalid.value.code == "invalid_notebook"
+    assert not db.exists()
+    with Store(db) as archive:
+        archive.set_setting("notebook_id", "original")
+    with pytest.raises(notebook.NotebookLMError) as bound:
+        notebook.setup_notebook_from_brave(db, "attach", "different")
+    assert bound.value.code == "already_configured"
+
+
+def test_brave_notebook_create_refuses_second_attempt_after_lost_response(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from notebooklm.exceptions import NetworkError
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    creates = []
+
+    def run(command, **kwargs):
+        Path(command[-1]).write_text("temporary session")
+        return SimpleNamespace(returncode=0)
+
+    async def create(title):
+        creates.append(title)
+        raise NetworkError("response lost")
+
+    async def account():
+        return None
+
+    @asynccontextmanager
+    async def verified(storage_path):
+        yield SimpleNamespace(notebooks=SimpleNamespace(create=create), get_account_email=account)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(notebook, "_stored_client", verified)
+    for _ in range(2):
+        with pytest.raises(notebook.NotebookLMError) as caught:
+            notebook.setup_notebook_from_brave(db, "create", "My Notebook")
+        assert caught.value.code == "notebook_create_unconfirmed"
+    assert creates == ["My Notebook"]
+    with Store(db, existing=True) as archive:
+        assert archive.get_setting("notebook_id") is None
+        assert archive.get_setting("storage_path") is None
+        assert archive.get_setting("notebook_identity") is None
+
+
+def test_brave_notebook_create_binds_only_the_returned_id_after_verification(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from notebooklm.types import SharePermission
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "new.sqlite"
+    visits = []
+
+    def run(command, **kwargs):
+        Path(command[-1]).write_text("verified session")
+        return SimpleNamespace(returncode=0)
+
+    async def create(title):
+        visits.append(("create", title))
+        return SimpleNamespace(id="new-notebook-id")
+
+    async def get(notebook_id):
+        visits.append(("get", notebook_id))
+        return SimpleNamespace(id=notebook_id, title="My Notebook", role=SharePermission.OWNER)
+
+    async def sources(notebook_id):
+        visits.append(("list", notebook_id))
+        return []
+
+    async def account():
+        return None
+
+    @asynccontextmanager
+    async def verified(storage_path):
+        yield SimpleNamespace(
+            notebooks=SimpleNamespace(create=create, get=get),
+            sources=SimpleNamespace(list=sources),
+            get_account_email=account,
+        )
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(notebook, "_stored_client", verified)
+    result = notebook.setup_notebook_from_brave(db, "create", "My Notebook")["notebook"]
+    assert result["account"] is None
+    assert result["role"] == "owner"
+    assert visits == [
+        ("create", "My Notebook"),
+        ("list", "new-notebook-id"),
+        ("get", "new-notebook-id"),
+    ]
+    with Store(db, existing=True) as archive:
+        assert archive.get_setting("notebook_id") == result["id"] == "new-notebook-id"
+        assert archive.get_setting("notebook_create_pending") is None
+
+
 async def test_empty_query_or_explicit_empty_sources_never_queries_google():
     from ai_memory.notebook import NotebookLMAdapter
 
@@ -467,3 +733,36 @@ async def test_real_sdk_file_upload_query_and_delete_with_simulated_http(tmp_pat
         assert await adapter.list_sources() == []
     finally:
         await adapter.close()
+
+
+def test_successful_check_clears_only_resolved_preflight_auth_error(tmp_path, monkeypatch):
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    with Store(db) as archive:
+        archive.set_setting("notebook_id", "synthetic-notebook")
+        archive.set_setting(
+            "sync_preflight_errors",
+            [{"reason": "auth_required"}, {"reason": "network_error"}],
+        )
+
+    async def inspect(*args, **kwargs):
+        return (
+            {
+                "id": "synthetic-notebook",
+                "title": "Verified",
+                "account": None,
+                "role": None,
+                "can_write": None,
+                "checked_at": "2026-01-01T00:00:00+00:00",
+                "configured": True,
+                "connected": True,
+            },
+            [],
+        )
+
+    monkeypatch.setattr(notebook, "_inspect_notebook", inspect)
+    assert notebook.check_notebook_connection(db)["notebook"]["connected"]
+    with Store(db, existing=True) as archive:
+        assert archive.get_setting("sync_preflight_errors") == [{"reason": "network_error"}]

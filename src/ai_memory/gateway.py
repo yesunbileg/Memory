@@ -182,6 +182,20 @@ class MemoryApplication:
         return {**status, "notebook": notebook, "next_actions": actions}
 
     async def ask(self, question):
+        return await self._retrieve(question)
+
+    async def chat(self, question):
+        """Interactive NotebookLM chat for the terminal client."""
+        if not valid_question(question):
+            return _error(
+                "invalid_question", f"Provide a question of 1 to {MAX_QUESTION_LENGTH} characters."
+            )
+        try:
+            return await self._retrieve(question, interactive=True)
+        except FileNotFoundError:
+            return _error("archive_missing", "The configured archive does not exist.")
+
+    async def _retrieve(self, question, *, interactive=False):
         with Store(self.db_path, existing=True) as store:
             sync_status = store.status()["sync_status"]
 
@@ -204,22 +218,29 @@ class MemoryApplication:
                             "no_synced_sources",
                             "No verified remote sources. Inspect memory_status.",
                         )
-                    result = await remote.ask(question, source_ids=list(frozen))
+                    query = remote.chat if interactive else remote.ask
+                    result = await query(question, source_ids=list(frozen))
+                    answer = result.get("answer")
                     references = result.get("references")
                     verified_scope = _still_allowed(frozen, allowed_sources(store))
                     if (
-                        not isinstance(result.get("answer"), str)
+                        not isinstance(answer, str)
                         or not isinstance(references, list)
-                        or not references
+                        or (
+                            not references
+                            and (not interactive or verified_scope.keys() != frozen.keys())
+                        )
                         or not all(_valid_reference(ref, verified_scope) for ref in references)
                     ):
                         return failed(
                             "unverified_sources",
                             "The answer could not be verified against the selected revisions and was withheld.",
                         )
+                    if interactive and not answer.strip():
+                        return failed("empty_answer", "NotebookLM returned an empty reply.")
                     sources = _reference_sources(store, references, verified_scope)
                     return {
-                        "answer": result["answer"],
+                        "answer": answer,
                         "sources": sources,
                         "sync_status": sync_status,
                     }
