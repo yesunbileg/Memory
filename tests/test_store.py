@@ -40,7 +40,7 @@ def test_exact_text_dedup_revision_and_account_isolation(tmp_path):
         assert store.status()["messages"] == 1
         archived = store.get_conversation(key)
         assert archived["messages"][0]["text"] == c["messages"][0]["text"]
-        assert archived["consent"] is False
+        assert archived["consent"] is True
         assert archived["revision"] == 1
         changed = copy.deepcopy(c)
         changed["messages"][0]["text"] += "edited"
@@ -49,6 +49,29 @@ def test_exact_text_dedup_revision_and_account_isolation(tmp_path):
         store.ingest(conversation(account="other"))
         assert store.status()["conversations"] == 2
         assert store.status()["messages"] == 2
+
+
+def test_default_publication_migrates_staged_chats_once_and_keeps_revocations(tmp_path):
+    from ai_memory.segments import SegmentBuilder
+
+    path = tmp_path / "archive.sqlite"
+    with Store(path) as store:
+        held = store.ingest(conversation(external_id="revoked"))
+        SegmentBuilder(store).build()
+        store.revoke_many([held])
+        staged = store.ingest(conversation(external_id="legacy-staged"), consent=False)
+        with store.connection:
+            store.connection.execute("DELETE FROM settings WHERE key='default_publication_v3'")
+
+    with Store(path, existing=True) as store:
+        assert store.get_conversation(staged)["consent"] is True
+        assert store.get_conversation(held)["consent"] is False
+        store.ingest(conversation(external_id="revoked", title="Changed after revocation"))
+        assert store.get_conversation(held)["consent"] is False
+        explicit = store.ingest(conversation(external_id="new-paused"), consent=False)
+
+    with Store(path, existing=True) as store:
+        assert store.get_conversation(explicit)["consent"] is False
 
 
 def test_partial_incremental_snapshot_never_deletes_archive(tmp_path):

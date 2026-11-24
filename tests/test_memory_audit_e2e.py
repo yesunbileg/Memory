@@ -314,7 +314,7 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
     await verify_mcp_scope(finished_archive, remote_path, source_id)
 
 
-def test_mongolian_cli_capture_and_approval_account_isolation(tmp_path):
+def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_path):
     db = tmp_path / "memory.sqlite"
     rollout = tmp_path / "rollout-mongolian.jsonl"
     write_rollout(rollout)
@@ -329,10 +329,6 @@ def test_mongolian_cli_capture_and_approval_account_isolation(tmp_path):
     assert rows_by_account(db)["alpha"] == alpha
     assert_original_text(alpha)
 
-    failure = cli(db, "approve", alpha["id"], "CX-DOES-NOT-EXIST", ok=False)
-    assert "error" in failure
-    assert rows_by_account(db)["alpha"]["consent"] is False
-    cli(db, "approve", alpha["id"], alpha["id"])
     assert rows_by_account(db)["alpha"]["consent"] is True
 
     cli(db, "collect", "codex", rollout, "--account", "beta")
@@ -343,7 +339,7 @@ def test_mongolian_cli_capture_and_approval_account_isolation(tmp_path):
     assert_original_text(beta)
     assert beta["id"] != alpha["id"]
     assert {m["id"] for m in beta["messages"]}.isdisjoint(m["id"] for m in alpha["messages"])
-    assert beta["consent"] is False
+    assert beta["consent"] is True
 
     write_rollout(rollout, text=EDITED, changed_on=2)
     cli(db, "collect", "codex", rollout, "--account", "alpha")

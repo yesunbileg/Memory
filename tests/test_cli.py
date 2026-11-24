@@ -107,7 +107,7 @@ def test_demo_refuses_to_overwrite_existing_user_directory(tmp_path):
     assert (tmp_path / "notes.txt").read_text() == "user data"
 
 
-def test_cli_collect_checkpoints_skip_unchanged_and_approve_explicitly(tmp_path):
+def test_cli_collect_checkpoints_skip_unchanged_and_build_by_default(tmp_path):
     from ai_memory.demo import prepare_inputs
 
     codex, _ = prepare_inputs(tmp_path / "inputs")
@@ -119,10 +119,6 @@ def test_cli_collect_checkpoints_skip_unchanged_and_approve_explicitly(tmp_path)
     key = result["conversation_ids"][0]
     unchanged = run_cli("--db", db, "collect", "codex", codex)
     assert json.loads(unchanged.stdout)["unchanged"] is True
-    build = run_cli("--db", db, "build")
-    assert json.loads(build.stdout)["segments"] == []
-    approved = run_cli("--db", db, "approve", key)
-    assert approved.returncode == 0
     build = run_cli("--db", db, "build")
     assert json.loads(build.stdout)["segments"]
     shown = run_cli("--db", db, "show", key)
@@ -400,7 +396,7 @@ def test_all_chats_sync_explicitly_includes_all_archived_items(tmp_path, monkeyp
         second = conversation(external_id="second")
         second["messages"][0]["text"] = "second body password = 'SyntheticPass987654!'"
         first_id = store.ingest(first, consent=True)
-        second_id = store.ingest(second)
+        second_id = store.ingest(second, consent=False)
         store.set_setting("notebook_id", "bound-notebook")
 
     # Default sync retains its existing behavior and leaves the second chat out.
@@ -437,14 +433,16 @@ def test_all_chats_sync_does_not_change_archive_without_notebook_binding(tmp_pat
 
     db = tmp_path / "archive.sqlite"
     with Store(db) as store:
-        chat = store.ingest(conversation())
+        chat = store.ingest(conversation(), consent=False)
     assert main(["--db", str(db), "sync", "--all-chats"]) == 1
     capsys.readouterr()
     with Store(db, existing=True) as store:
         assert not store.get_conversation(chat)["consent"]
 
 
-def test_automatic_sync_leaves_work_for_the_next_cycle_without_failing(tmp_path, monkeypatch, capsys):
+def test_automatic_sync_leaves_work_for_the_next_cycle_without_failing(
+    tmp_path, monkeypatch, capsys
+):
     from ai_memory.cli import main
     from ai_memory.store import Store
 
@@ -472,7 +470,7 @@ def test_all_chats_sync_does_not_change_archive_if_another_sync_holds_lock(tmp_p
 
     db = tmp_path / "archive.sqlite"
     with Store(db) as store:
-        chat = store.ingest(conversation())
+        chat = store.ingest(conversation(), consent=False)
         store.set_setting("notebook_id", "bound-notebook")
 
     with archive_lock(db):

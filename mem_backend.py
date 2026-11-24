@@ -178,7 +178,7 @@ class Backend:
                 )
             instance = view.get_setting("archive_instance_id")
             notebook_id = view.get_setting("notebook_id")
-            auto_sync = view.get_setting("tui_auto_sync") is True
+            auto_sync = bool(notebook_id) and view.get_setting("tui_auto_sync", True) is True
             auto_sync_due = view.auto_sync_due()
             identity = view.get_setting("notebook_identity")
             if not isinstance(identity, dict) or identity.get("id") != notebook_id:

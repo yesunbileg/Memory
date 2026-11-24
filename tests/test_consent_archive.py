@@ -29,7 +29,8 @@ def test_atomic_approval_preview_revocation_and_private_fields(tmp_path, capsys)
                 source_url="https://example.invalid/private",
                 external_id="private-native",
                 messages=[dict(conversation()["messages"][0], text=secret_text)],
-            )
+            ),
+            consent=False,
         )
         b = store.ingest(conversation(account="separate"), consent=True)
     cli(path, capsys, "approve", a, "missing", code=1)
@@ -265,7 +266,7 @@ def test_cli_provider_error_uses_only_bounded_codes_and_messages(monkeypatch, ca
 def test_unmaskable_derived_title_never_blocks_safely_masked_message(tmp_path):
     from ai_memory.privacy import find_sensitive
 
-    title = "Сайн байна уу 🙂 ... password = '"
+    title = "Сайн байна уу 🙂 ... password = 'synthetic-title-value"
     packet = conversation(title=title)
     packet["messages"][0]["text"] = "Сайн байна уу 🙂\r\npassword = 'fixture-value'\r  "
     with Store(tmp_path / "archive.db") as store:
@@ -274,10 +275,38 @@ def test_unmaskable_derived_title_never_blocks_safely_masked_message(tmp_path):
         sid = builder.build()[0]["id"]
         outward = builder.render_outbound(sid)
         assert not find_sensitive(outward)
-        assert "title:" not in outward
+        assert "title: " in outward
+        assert "synthetic-title-value" not in outward
         assert "password = '*************'" in outward
         assert store.get_conversation(cid)["title"] == title
         assert store.get_conversation(cid)["messages"][0]["text"] == packet["messages"][0]["text"]
+
+
+def test_outbound_masking_failure_is_limited_to_one_message(tmp_path, monkeypatch):
+    from ai_memory import segments
+
+    broken = "DB_PASSWORD=synthetic-only"
+    other = "A separate message with useful context."
+    redact = segments.redact_sensitive
+
+    def fail_one_field(value):
+        if value == broken:
+            raise ValueError("synthetic matcher failure")
+        return redact(value)
+
+    monkeypatch.setattr(segments, "redact_sensitive", fail_one_field)
+    with Store(tmp_path / "archive.db") as store:
+        first = conversation(external_id="broken-mask")
+        first["messages"][0]["text"] = broken
+        second = conversation(external_id="other-message")
+        second["messages"][0]["text"] = other
+        first_id = store.ingest(first, consent=True)
+        store.ingest(second, consent=True)
+        builder = SegmentBuilder(store)
+        outbound = builder.render_outbound(builder.build()[0]["id"])
+        assert "\n***\n" in outbound and other in outbound
+        assert broken not in outbound
+        assert store.get_conversation(first_id)["messages"][0]["text"] == broken
 
 
 def test_malformed_cli_arguments_do_not_echo_values(capsys):

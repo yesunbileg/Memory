@@ -20,10 +20,6 @@ from .sync_activity import sync_activity
 logger = logging.getLogger(__name__)
 
 
-class SensitiveData(RuntimeError):
-    pass
-
-
 class SourceQuota(RuntimeError):
     pass
 
@@ -496,10 +492,8 @@ class SyncEngine:
                     )
                     if text != expected_text or job["title"] != expected_title:
                         raise SnapshotError("Pending snapshot differs from its validated revision")
-                if redact_sensitive(text) != text:
-                    raise SnapshotError("Pending snapshot is not redacted")
-                if find_sensitive(text):
-                    raise SensitiveData("Sensitive text detected; local archive retained")
+                if redact_sensitive(text) != text or find_sensitive(text):
+                    raise SnapshotError("Pending snapshot failed its masking check")
                 if not job["new_source_id"]:
                     self._emit_progress("reconcile", job["segment_id"])
                     sources = await self.adapter.list_sources()
@@ -750,8 +744,6 @@ class SyncEngine:
                         """UPDATE sync_jobs SET attempts=attempts+1,next_attempt=?,error=? WHERE id=?""",
                         (next_attempt, kind, job["id"]),
                     )
-                    if isinstance(exc, SensitiveData):
-                        db.execute("UPDATE sync_jobs SET stage='blocked' WHERE id=?", (job["id"],))
                 failure = {
                     "segment_id": job["segment_id"],
                     "reason": kind,
@@ -772,7 +764,7 @@ class SyncEngine:
         return (
             "blocked"
             if any(
-                f.get("reason") not in {"UploadUncertain", "CapacityError", "SensitiveData"}
+                f.get("reason") not in {"UploadUncertain", "CapacityError"}
                 for f in result["blocked"]
             )
             else "complete"

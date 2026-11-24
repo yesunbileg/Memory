@@ -41,7 +41,8 @@ def parser():
     collect.add_argument(
         "--approve-upload",
         action="store_true",
-        help="Explicitly approve imported text for Google upload",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     approve = sub.add_parser(
         "approve",
@@ -141,7 +142,7 @@ async def _run_automatic_sync(engine):
     try:
         while not worker.done():
             await asyncio.wait({worker}, timeout=1)
-            if not worker.done() and engine.store.get_setting("tui_auto_sync") is not True:
+            if not worker.done() and engine.store.get_setting("tui_auto_sync", True) is not True:
                 return None
         return worker.result()
     finally:
@@ -162,6 +163,9 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
             due = store.auto_sync_due()
             if due is None or due > time.time():
                 return {"automatic": "idle"}
+            from .auto_publish import STARTED_AT
+
+            store.set_setting(STARTED_AT, time.time())
         notebook_id = store.get_setting("notebook_id")
         if not notebook_id:
             raise PublicInputError("Set a notebook ID with init --notebook-id before syncing")
@@ -169,7 +173,7 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
         adapter = None
         try:
             approved_count = 0
-            if all_chats or automatic:
+            if all_chats:
                 with store.connection:
                     approved_count = store.connection.execute(
                         "UPDATE conversations SET consent=1 WHERE consent=0"
@@ -183,7 +187,7 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
             )
             if result is None:
                 return {"automatic": "stopped"}
-            if all_chats or automatic:
+            if all_chats:
                 result["newly_included_conversations"] = approved_count
             errors = _preflight_errors(result)
             store.set_setting("sync_preflight_errors", errors)
@@ -238,12 +242,14 @@ def execute(args, *, progress=None):
         asyncio.run(stdio_main(args.db))
         return None
     if args.command == "hook":
+        from .auto_publish import kick_sync
         from .hooks import capture_event
 
         with Store(args.db, existing=True) as store:
             capture_event(
                 store, args.platform, args.account, getattr(args, "source", None), sys.stdin.buffer
             )
+            kick_sync(store)
         return None
     if args.command == "connect" and args.extension_id:
         from .native import register
@@ -337,7 +343,13 @@ def execute(args, *, progress=None):
                 store.set_setting("storage_path", str(args.storage.expanduser().resolve()))
             return store.status()
         if args.command == "collect":
-            return collect_into(store, args.platform, args.path, args.account, args.approve_upload)
+            from .auto_publish import kick_sync
+
+            result = collect_into(
+                store, args.platform, args.path, args.account, args.approve_upload
+            )
+            kick_sync(store)
+            return result
         if args.command == "approve":
             return {
                 "approved": store.approve_many(args.conversation_ids),

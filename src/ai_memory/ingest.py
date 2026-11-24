@@ -1,7 +1,7 @@
 """Atomic browser ingestion and the legacy loopback HTTP receiver.
 
 Public health, authenticated connection checks, and hstry ``POST /ingest`` are exposed.
-Capture archives locally with upload consent disabled; cloud sync is separate.
+Capture archives locally; publication runs after the packet commits.
 Receipts count accepted conversation records, partitioned into created, updated
 (actual stored revision change), and unchanged replay.
 """
@@ -115,7 +115,7 @@ def save_packet(store: Store, packet: dict) -> dict:
                     conversation["external_id"],
                 ),
             ).fetchone()
-            key = store.ingest(conversation, consent=False, reconcile_order=True)
+            key = store.ingest(conversation, reconcile_order=True)
             if previous is None:
                 created += 1
             else:

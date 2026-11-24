@@ -101,7 +101,7 @@ def archived(database):
         return [store.get_conversation(cid) for cid in ids]
 
 
-def test_authenticated_ingest_preserves_raw_text_visibility_and_no_consent(running_server):
+def test_authenticated_ingest_preserves_raw_text_and_enables_publication(running_server):
     server, database = running_server
     assert server.server_address[0] == "127.0.0.1"
     status, headers, body = request(server, headers={"Origin": ORIGIN})
@@ -111,7 +111,7 @@ def test_authenticated_ingest_preserves_raw_text_visibility_and_no_consent(runni
     conversation = archived(database)[0]
     assert conversation["platform"] == "chatgpt"
     assert conversation["account"] == "synthetic-account"
-    assert conversation["consent"] is False
+    assert conversation["consent"] is True
     assert conversation["created_at"] is None
     assert [(m["role"], m["kind"], m["text"]) for m in conversation["messages"]] == [
         ("user", "text", RAW),
@@ -277,7 +277,7 @@ def test_real_extension_providers_roundtrip_to_archive(running_server):
             m["native_id"] and not m["native_id"].startswith("record:")
             for m in conversation["messages"]
         )
-        assert conversation["consent"] is False
+        assert conversation["consent"] is True
 
 
 def test_visible_summary_changes_keep_the_native_final_text_identity(running_server):
@@ -532,7 +532,7 @@ process.stdout.write(JSON.stringify(receipts));
     assert all(receipt["unchanged"] == 1 and receipt["updated"] == 0 for receipt in receipts[1])
     conversation = archived(database)[0]
     assert conversation["account"] == "native-account"
-    assert conversation["consent"] is False
+    assert conversation["consent"] is True
     assert [message["native_id"] for message in conversation["messages"]] == [
         "native-0",
         "native-1",

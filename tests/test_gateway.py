@@ -115,8 +115,14 @@ async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
         assert status["notebook"]["connected"] is True
         answer = decode(await client.call_tool("memory_ask", {"question": "Earlier decision?"}))
         assert answer["answer"] == "NotebookLM answer [1]"
+        assert answer["provenance"] == "untrusted_history"
         assert [s["source_id"] for s in answer["sources"]] == ["owned-source"]
-    assert notebook.queries == [("Earlier decision?", ["owned-source"])]
+        private = {"question": "Can you check DB_PASSWORD=synthetic-value?"}
+        assert decode(await client.call_tool("memory_ask", private))["sources"]
+    assert notebook.queries == [
+        ("Earlier decision?", ["owned-source"]),
+        ("Can you check DB_PASSWORD=***************?", ["owned-source"]),
+    ]
     assert capsys.readouterr().out == ""
 
 

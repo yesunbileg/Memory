@@ -70,7 +70,7 @@ def test_corrupt_opencode_session_is_isolated_and_retried_after_repair(
         assert first["failed_files"] == 1
         assert store.status()["conversations"] == 1
         assert store.status()["messages"] == 1
-        assert store.status()["unapproved_conversations"] == 1
+        assert store.status()["unapproved_conversations"] == 0
         assert "Healthy visible text" not in json.dumps(first)
         retry = collect_into(store, "opencode", source)
         assert retry["imported_conversations"] == 0

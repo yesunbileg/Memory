@@ -76,7 +76,7 @@ def test_registered_host_checks_origin_and_archive_before_any_write(tmp_path):
     assert request(packet)["unchanged"] == 1
     with Store(db) as store:
         assert store.connection.execute("select text from messages").fetchone()[0] == " Сайн 🐾\r\n"
-        assert store.connection.execute("select consent from conversations").fetchone()[0] == 0
+        assert store.connection.execute("select consent from conversations").fetchone()[0] == 1
     # The second write fails *after* the first write in the same packet.
     with Store(db) as store:
         store.connection.execute("""CREATE TRIGGER deny_fixture BEFORE INSERT ON conversations

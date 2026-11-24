@@ -52,6 +52,8 @@ async def test_auto_sync_detects_new_chats_edits_and_retry_deadlines(tmp_path, m
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook-test")
         backend = Backend(store.path)
+        assert backend.snapshot()["auto_sync"] is True
+        backend.set_auto_sync(False)
         assert backend.snapshot()["auto_sync"] is False
         backend.set_auto_sync(True)
         assert Backend(store.path).snapshot()["auto_sync"] is True
@@ -117,6 +119,35 @@ async def test_auto_sync_respects_external_stop_and_exclusive_archive_lock(tmp_p
                 job.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await job
+
+
+async def test_auto_sync_replaces_old_masking_policy_even_with_no_chat_changes(
+    tmp_path, monkeypatch
+):
+    from ai_memory.privacy import MASKING_POLICY
+
+    class Notebook(Remote):
+        async def close(self):
+            pass
+
+    remote = Notebook()
+    monkeypatch.setattr("ai_memory.notebook.NotebookLMAdapter", lambda *_: remote)
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook-test")
+        store.ingest(conversation(), consent=True)
+        await sync_archive(store)
+        old = next(iter(remote.sources))
+        Backend(store.path).set_auto_sync(True)
+        assert store.auto_sync_due() is None
+
+        with store.connection:
+            store.connection.execute(
+                "UPDATE source_receipts SET masking_policy=?", (MASKING_POLICY - 1,)
+            )
+        assert store.auto_sync_due() == 0
+        assert (await sync_archive(store, automatic=True))["completed"] == 1
+        assert len(remote.sources) == 1 and old not in remote.sources
+        assert store.auto_sync_due() is None
 
 
 def test_auto_sync_waits_for_manual_recovery_of_a_missing_source(tmp_path):

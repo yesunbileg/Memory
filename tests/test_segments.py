@@ -25,7 +25,7 @@ def test_build_does_not_expand_whole_conversation_for_metadata_or_rescan_idle_op
 
 def test_only_approved_messages_and_exact_markdown_are_packaged(tmp_path):
     with Store(tmp_path / "db") as store:
-        key = store.ingest(conversation())
+        key = store.ingest(conversation(), consent=False)
         builder = SegmentBuilder(store)
         assert builder.build() == []
         store.approve(key)

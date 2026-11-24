@@ -74,6 +74,24 @@ def initialize(store, original_schema):
                 )
 
 
+def enable_default_publication(db):
+    """Migrate the old upload queue once, including archives restored from backup."""
+    marker = "default_publication_v3"
+    if db.execute("SELECT 1 FROM settings WHERE key=?", (marker,)).fetchone():
+        return
+    with db:
+        inserted = db.execute("INSERT OR IGNORE INTO settings VALUES(?, 'true')", (marker,))
+        if inserted.rowcount:
+            # Retained segment membership records a prior explicit revocation.
+            db.execute("""
+                UPDATE conversations SET consent=1 WHERE consent=0 AND NOT EXISTS (
+                    SELECT 1 FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
+                    JOIN retained_segments rs ON rs.segment_id=sm.segment_id
+                    WHERE m.conversation_id=conversations.id
+                )
+                """)
+
+
 def receipt_marker(store, segment_id, revision):
     key = bytes.fromhex(store.get_setting("receipt_key"))
     message = f"ai-memory-outbound\n{MASKING_POLICY}\n{segment_id}\n{revision}".encode()

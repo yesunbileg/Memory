@@ -183,7 +183,12 @@ def _handle(args, stream):
     with Store(args.db) as store:
         if store.get_setting("archive_instance_id") != args.archive_id:
             return {"error": "archive_changed"}
-        return save_packet(store, packet)
+        result = save_packet(store, packet)
+        if result["created"] or result["updated"]:
+            from .auto_publish import kick_sync
+
+            kick_sync(store)
+        return result
 
 
 def main():

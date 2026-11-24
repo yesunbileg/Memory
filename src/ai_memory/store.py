@@ -39,7 +39,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
  id TEXT PRIMARY KEY, external_id TEXT NOT NULL, platform TEXT NOT NULL,
  account TEXT NOT NULL, title TEXT, project TEXT, models TEXT NOT NULL,
- created_at TEXT, updated_at TEXT, source_url TEXT, consent INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT, updated_at TEXT, source_url TEXT, consent INTEGER NOT NULL DEFAULT 1,
  revision INTEGER NOT NULL DEFAULT 1, UNIQUE(platform,account,external_id)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -115,6 +115,7 @@ class Store:
         self.connection.execute("PRAGMA journal_mode=WAL")
         try:
             revisions.initialize(self, SCHEMA)
+            revisions.enable_default_publication(self.connection)
         except BaseException:
             self.close()
             raise
@@ -301,7 +302,7 @@ class Store:
     def ingest(
         self,
         conversation: dict,
-        consent: bool = False,
+        consent: bool | None = None,
         *,
         reconcile_order: bool = False,
         codex_snapshot: bool = False,
@@ -433,8 +434,17 @@ class Store:
                 created_at,updated_at,source_url,models,consent) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title,project=excluded.project,
                 created_at=excluded.created_at,updated_at=excluded.updated_at,source_url=excluded.source_url,
-                models=excluded.models,consent=MAX(conversations.consent,excluded.consent)""",
-                (key, external, platform, account, *fields, metadata[-1], int(consent)),
+                models=excluded.models,consent=MAX(conversations.consent,?)""",
+                (
+                    key,
+                    external,
+                    platform,
+                    account,
+                    *fields,
+                    metadata[-1],
+                    int(consent is not False),
+                    int(consent is True),
+                ),
             )
             for m in messages:
                 mid = digest([key, m["native_id"]])
@@ -583,12 +593,16 @@ class Store:
 
     def auto_sync_due(self) -> float | None:
         """Return immediate work or the earliest retry for an opted-in archive."""
-        if self.get_setting("tui_auto_sync") is not True or not self.get_setting("notebook_id"):
+        from .privacy import MASKING_POLICY
+
+        if self.get_setting("tui_auto_sync", True) is not True or not self.get_setting(
+            "notebook_id"
+        ):
             return None
         db = self.connection
         if db.execute("""
             SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
-            WHERE c.consent=0 OR NOT EXISTS (
+            WHERE c.consent=1 AND NOT EXISTS (
                 SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
                 WHERE sm.message_id=m.id AND s.state!='retired')
             LIMIT 1
@@ -605,6 +619,23 @@ class Store:
                         WHERE j.segment_id=s.id AND j.revision=s.revision)))
             LIMIT 1
         """).fetchone():
+            return 0
+        if (
+            db.execute("PRAGMA user_version").fetchone()[0] >= 2
+            and db.execute(
+                """
+            SELECT 1 FROM segments s JOIN source_map sm
+                ON sm.segment_id=s.id AND sm.revision=s.revision
+            WHERE s.state!='retired'
+                AND NOT EXISTS (SELECT 1 FROM sync_jobs j
+                    WHERE j.segment_id=s.id AND j.stage='missing')
+                AND NOT EXISTS (SELECT 1 FROM source_receipts r
+                    WHERE r.source_id=sm.source_id AND r.masking_policy=?)
+            LIMIT 1
+            """,
+                (MASKING_POLICY,),
+            ).fetchone()
+        ):
             return 0
         return db.execute("""
             SELECT MIN(j.next_attempt) FROM sync_jobs j

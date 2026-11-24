@@ -129,7 +129,7 @@ def collect_into(
     platform: str,
     path: Path,
     account: str = "local",
-    consent: bool = False,
+    consent: bool | None = None,
 ) -> dict:
     from .collectors import codex_rollout_files, codex_thread_metadata, collect, selected_source
 

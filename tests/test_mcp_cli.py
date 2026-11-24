@@ -27,6 +27,7 @@ async def test_official_mcp_client_uses_actual_cli_entrypoint(tmp_path):
             assert ask.inputSchema["required"] == ["question"]
             assert set(ask.outputSchema["properties"]) == {
                 "answer",
+                "provenance",
                 "error",
                 "sources",
                 "sync_status",

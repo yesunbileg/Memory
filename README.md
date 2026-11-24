@@ -50,19 +50,17 @@ screen shows the verified notebook, account and access when available.
 `/login Profile 1` is also available for direct login with that profile.
 
 The extension's **Sync now** saves selected web chats in the local archive.
-Run `/sync-all` in `mem` to sync every chat in that archive to the configured
-NotebookLM notebook. The command starts immediately and shows progress through
-upload, readiness and cleanup. From the CLI, use `ai-memory sync --all-chats`.
-Use `/auto on` to sync new and changed archived chats. The preference is saved per
-archive. `/auto` toggles it. `/auto off` stops it, and `/stop` also turns it off
-during an automatic sync.
+Once a notebook is connected, new captures are automatically queued for NotebookLM.
+Browser imports and local hooks wake a publisher even when `mem` is closed.
+The publisher batches nearby changes and masks recognized credentials before upload.
+`mem` shows upload progress, readiness and cleanup. Use `ai-memory sync` for a
+manual run. `/auto off` pauses automatic publication for this archive.
 Type a question and press Enter for NotebookLM's reply. Use `/chats` to browse
 the local archive.
 
-On Linux with systemd, install the user timer from this checkout to keep syncing
-the default archive with `mem` closed. It checks once a minute while the user
-session is active. Keep the Brave extension and local capture enabled for browser
-chats. Without the timer, automatic sync runs while `mem` is open.
+The optional Linux user timer checks the default archive once a minute while the
+user session is active. It also retries pending work when no capture events arrive.
+Brave and the extension must still be running to discover new browser chats.
 
 ```bash
 mkdir -p ~/.config/systemd/user

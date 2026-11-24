@@ -31,6 +31,24 @@ def message_heading(row) -> str:
     return f"### {row['conversation_id']} · {row['sequence']:04d} · {row['role'].title()}{kind} · {row['timestamp'] or 'Unknown'}"
 
 
+def mask_for_upload(text: str) -> str:
+    """Contain a masking failure to the current field or message."""
+    try:
+        masked = redact_sensitive(text)
+        if not find_sensitive(masked):
+            return masked
+        masked = "".join(
+            "".join(ch if ch in "\r\n" else "*" for ch in line) if find_sensitive(line) else line
+            for line in masked.splitlines(keepends=True)
+        )
+        if not find_sensitive(masked):
+            return masked
+    except Exception:
+        # A detection failure must never send the original text.
+        pass
+    return "***"
+
+
 class SegmentBuilder:
     def __init__(self, store: Store, target_words=150_000, max_words=450_000, max_active=49):
         if not 0 < target_words <= max_words or not 2 <= max_active <= 49:
@@ -56,7 +74,7 @@ class SegmentBuilder:
 
     def render_outbound(self, segment_id: str) -> str:
         """Serialize only reviewed cloud fields; local exports retain full originals."""
-        return redact_sensitive(self._render(segment_id, outbound=True))
+        return self._render(segment_id, outbound=True)
 
     def _render(self, segment_id: str, *, outbound: bool) -> str:
         db = self.store.connection
@@ -144,17 +162,17 @@ class SegmentBuilder:
                         continue
                     name = "conversation_id" if field == "id" else field
                     value = c[field]
-                    if outbound and field == "title" and isinstance(value, str):
-                        # Adapters may derive a clipped title from a message, cutting
-                        # through a credential. The required visible body still passes
-                        # the full gate; optional metadata with unknowable bounds stays local.
-                        value = redact_sensitive(value)
-                        if find_sensitive(value) or find_sensitive(yaml_value(value)):
-                            continue
+                    if outbound and isinstance(value, str):
+                        value = mask_for_upload(value)
+                    elif outbound and field == "models" and isinstance(value, list):
+                        value = [mask_for_upload(model) for model in value]
                     lines.append(f"{name}: {yaml_value(value)}")
                 lines.extend(["```", ""])
                 previous = m["conversation_id"]
-            lines.extend([message_heading(m), "", m["text"], "", "---", ""])
+            heading, text = message_heading(m), m["text"]
+            if outbound:
+                heading, text = mask_for_upload(heading), mask_for_upload(text)
+            lines.extend([heading, "", text, "", "---", ""])
         return "\n".join(lines)
 
     def _refresh(self, segment_id: str) -> bool:

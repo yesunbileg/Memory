@@ -1,0 +1,18 @@
+{
+  "benign": [
+    "maximum_token = 500",
+    "API_KEY_LENGTH = 32",
+    "password_hash = 'synthetic-hash'",
+    "The secret ingredient is salt.",
+    "Our decision: use SQLite, no local LLM.",
+    "https://example.test/path?query=value",
+    "The password is required.",
+    "class Password: pass",
+    "if auth_token: refresh()",
+    "config.password = get_password()",
+    "secret = get_secret()",
+    "-----BEGIN PUBLIC KEY-----\nZmFrZQ==\n-----END PUBLIC KEY-----",
+    "checksum = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'",
+    "fingerprint: 'a1b2c3d4e5f60718293a4b5c6d7e8f90'"
+  ]
+}

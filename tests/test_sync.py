@@ -293,7 +293,7 @@ async def test_real_49_source_overflow_uses_only_one_spare_slot(tmp_path):
 @pytest.mark.asyncio
 async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation())
+        store.ingest(conversation(), consent=False)
         remote = Remote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
