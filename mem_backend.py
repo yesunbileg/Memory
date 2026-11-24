@@ -8,8 +8,10 @@ import os
 import re
 import signal
 import sqlite3
+import subprocess
 import sys
 from contextlib import closing, contextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -27,7 +29,14 @@ _BROWSER_FOLDERS = {
     "Chromium": "chromium",
 }
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_TIMEOUTS = {"ask": 420, "check": 90, "login": 135, "setup": 165, "sync": 1800, "sync-all": 1800}
+_SYNC_OPERATIONS = {"sync", "sync-all", "auto-sync"}
+_TIMEOUTS = {
+    "ask": 420,
+    "check": 90,
+    "login": 135,
+    "setup": 165,
+    **dict.fromkeys(_SYNC_OPERATIONS, 1800),
+}
 
 
 class BackendError(RuntimeError):
@@ -36,6 +45,18 @@ class BackendError(RuntimeError):
     def __init__(self, message: str, *, code: str = "operation_failed") -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class Citation:
+    label: str
+    source_id: str
+    revision: int
+    chat_id: str = ""
+    message_id: str = ""
+    number: int = 0
+    stale: bool = False
+    passage: str = ""
 
 
 def display_text(value: str) -> str:
@@ -123,19 +144,16 @@ class Backend:
         return view
 
     def snapshot(self) -> dict:
-        from ai_memory.publication import allowed_sources
+        from ai_memory.publication import allowed_sources, current_segments
         from ai_memory.sync_activity import read_sync_activity
 
         with self._archive() as (conn, version):
             view = self._view(conn)
             sync_activity = read_sync_activity(self.db)
             if version == 2:
-                status = view.status()
-                current = {
-                    row["segment_id"]
-                    for row in allowed_sources(view).values()
-                    if row["content_hash"] and row["source_revision"] == row["revision"]
-                }
+                sources = allowed_sources(view)
+                status = view.status(sources=sources)
+                current = current_segments(sources)
             else:
                 status = {
                     "notebook_configured": bool(view.get_setting("notebook_id")),
@@ -152,15 +170,16 @@ class Backend:
             status["conversations"] = len(chats)
             status["messages"] = sum(chat["message_count"] for chat in chats)
             status["unapproved_conversations"] = sum(not chat["approved"] for chat in chats)
+            if version == 1:
+                status["ready_conversations"] = 0
+                status["pending_conversations"] = sum(chat["message_count"] > 0 for chat in chats)
+                status["sync_status"] = (
+                    "pending" if status["pending_conversations"] else "no_sources"
+                )
             instance = view.get_setting("archive_instance_id")
             notebook_id = view.get_setting("notebook_id")
             auto_sync = view.get_setting("tui_auto_sync") is True
-            auto_sync_due = None
-            if auto_sync and notebook_id:
-                if any(chat["message_count"] and not chat["approved"] for chat in chats):
-                    auto_sync_due = 0
-                elif version == 2:
-                    auto_sync_due = self._auto_sync_due(conn, status)
+            auto_sync_due = view.auto_sync_due()
             identity = view.get_setting("notebook_identity")
             if not isinstance(identity, dict) or identity.get("id") != notebook_id:
                 identity = {}
@@ -180,35 +199,20 @@ class Backend:
             conn.execute("SELECT id FROM conversations LIMIT 0")
             self._view(conn).set_setting("tui_auto_sync", enabled)
 
-    @staticmethod
-    def _auto_sync_due(conn, status: dict) -> float | None:
-        """Return immediate work or the earliest saved retry, excluding manual holds."""
-        if status["unassigned_messages"]:
-            return 0
-        if (
-            status["pending_segments"]
-            and conn.execute("""
-            SELECT 1 FROM segments s
-            LEFT JOIN source_map sm ON sm.segment_id=s.id
-            WHERE s.state!='retired'
-                AND NOT EXISTS (SELECT 1 FROM sync_jobs j
-                    WHERE j.segment_id=s.id AND j.stage='missing')
-                AND (s.content_hash='' OR (
-                    (sm.source_id IS NULL OR sm.revision!=s.revision)
-                    AND NOT EXISTS (SELECT 1 FROM sync_jobs j
-                        WHERE j.segment_id=s.id AND j.revision=s.revision)))
-            LIMIT 1
-            """).fetchone()
-        ):
-            return 0
-        if status["pending_jobs"]:
-            return conn.execute("""
-                SELECT MIN(j.next_attempt) FROM sync_jobs j
-                WHERE j.stage NOT IN ('done','superseded','missing')
-                AND NOT EXISTS (SELECT 1 FROM sync_jobs hold
-                    WHERE hold.segment_id=j.segment_id AND hold.stage='missing')
-                """).fetchone()[0]
-        return None
+    def background_sync_enabled(self) -> bool:
+        launcher = Path.home() / ".local/bin/mem"
+        if self.db != (self.repo / "data/conversations.sqlite").resolve():
+            return False
+        if launcher.resolve() != (self.repo / "scripts/mem").resolve():
+            return False
+        with suppress(OSError, subprocess.TimeoutExpired):
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", "ai-memory-sync.timer"],
+                capture_output=True,
+                timeout=1,
+            )
+            return result.returncode == 0
+        return False
 
     @staticmethod
     def _chats(conn, current: set[str], active_segment: str | None = None) -> list[dict]:
@@ -294,26 +298,52 @@ class Backend:
         with self._archive() as (conn, _):
             if not conn.execute("SELECT 1 FROM conversations WHERE id=?", (cid,)).fetchone():
                 raise BackendError("Чат олдсонгүй. Архиваа шинэчилнэ үү.", code="chat_missing")
-            return [
-                ("Та" if row["role"] == "user" else "AI", display_text(row["text"]))
-                for row in conn.execute(
-                    "SELECT role,text FROM messages WHERE conversation_id=? ORDER BY sequence",
-                    (cid,),
-                )
-            ]
+            return self._messages(conn, cid)
 
     @staticmethod
-    def _citation(conn, message_id: str, conversation: str) -> tuple[str, str, int] | None:
+    def _messages(conn, cid: str) -> list[tuple[str, str]]:
+        return [
+            ("Та" if row["role"] == "user" else "AI", display_text(row["text"]))
+            for row in conn.execute(
+                "SELECT role,text FROM messages WHERE conversation_id=? ORDER BY sequence", (cid,)
+            )
+        ]
+
+    @staticmethod
+    def _current_citation(mapping, revision: int) -> bool:
+        return bool(
+            mapping
+            and mapping["content_hash"]
+            and mapping["source_revision"] == mapping["revision"] == revision
+        )
+
+    def cited_messages(self, citation: Citation) -> tuple[list[tuple[str, str]], int]:
+        from ai_memory.publication import allowed_sources
+
+        with self._archive() as (conn, _):
+            mapping = allowed_sources(self._view(conn)).get(citation.source_id)
+            if self._current_citation(mapping, citation.revision):
+                target = self._citation(
+                    conn, citation.message_id, citation.chat_id, mapping["segment_id"]
+                )
+                if target:
+                    return self._messages(conn, citation.chat_id), target[1]
+        raise BackendError(
+            "Эх мессеж өөрчлөгдсөн байна. Асуултаа дахин асууна уу.", code="stale_citation"
+        )
+
+    @staticmethod
+    def _citation(conn, message_id: str, conversation: str, segment: str) -> tuple[str, int] | None:
         row = conn.execute(
             """SELECT c.title, (SELECT count(*) FROM messages preceding
                WHERE preceding.conversation_id=m.conversation_id AND preceding.sequence<=m.sequence)
                AS display_index FROM messages m JOIN conversations c ON c.id=m.conversation_id
-               WHERE m.id=? AND c.id=?""",
-            (message_id, conversation),
+               JOIN segment_messages sm ON sm.message_id=m.id
+               WHERE m.id=? AND c.id=? AND sm.segment_id=?""",
+            (message_id, conversation, segment),
         ).fetchone()
         if row:
             return (
-                conversation,
                 _single_line(row["title"] or "") or conversation,
                 row["display_index"],
             )
@@ -420,25 +450,43 @@ class Backend:
                 }
         return result
 
-    def _cloud_citations(self, sources: list[dict]) -> list[tuple[str, str, int]]:
+    def _cloud_citations(self, sources: list[dict]) -> list[Citation]:
+        from ai_memory.publication import allowed_sources
+
+        if not sources:
+            return []
         result = []
         with self._archive() as (conn, _):
+            eligible = allowed_sources(self._view(conn))
             for source in sources:
                 cid = source.get("conversation_id")
-                segment = source.get("segment_id")
-                label = f"{_single_line(segment)} · r{source['revision']}" if segment else ""
+                segment, revision, sid = (
+                    source["segment_id"],
+                    source["revision"],
+                    source["source_id"],
+                )
+                stale = source.get("stale") or not self._current_citation(
+                    eligible.get(sid), revision
+                )
                 resolved = [
-                    cite
+                    Citation(target[0], sid, revision, cid, mid, target[1])
                     for mid in source.get("message_ids", [])
-                    if cid
-                    if (cite := self._citation(conn, mid, cid)) is not None
+                    if cid and not stale
+                    if (target := self._citation(conn, mid, cid, segment)) is not None
                 ]
-                if not resolved and segment:
-                    resolved = [("seg:" + segment, label, 0)]
-                for cite in resolved:
-                    if cite not in result:
-                        result.append(cite)
-        return result
+                result.extend(
+                    resolved
+                    or [
+                        Citation(
+                            f"{_single_line(segment)} · r{revision}",
+                            sid,
+                            revision,
+                            stale=bool(stale),
+                            passage=display_text(source.get("cited_text") or ""),
+                        )
+                    ]
+                )
+        return list(dict.fromkeys(result))
 
     async def call(self, operation: str, question: str | dict = "", *, on_progress=None) -> dict:
         if operation not in _TIMEOUTS:
@@ -491,7 +539,7 @@ class Backend:
             ) from None
         try:
             async with asyncio.timeout(_TIMEOUTS[operation]):
-                if operation in {"sync", "sync-all"}:
+                if operation in _SYNC_OPERATIONS:
                     output = await self._sync_output(proc, on_progress)
                 else:
                     output, _ = await proc.communicate(payload)
@@ -558,10 +606,12 @@ def _worker(repo: str, db: str, operation: str) -> int:
     if operation not in _TIMEOUTS:
         return 2
     args = ["--db", db, operation]
-    if operation in {"sync", "sync-all"}:
+    if operation in _SYNC_OPERATIONS:
         args[-1] = "sync"
         if operation == "sync-all":
             args.append("--all-chats")
+        elif operation == "auto-sync":
+            args.append("--automatic")
 
         def emit(event):
             print(json.dumps({"progress": event}, ensure_ascii=False), flush=True)

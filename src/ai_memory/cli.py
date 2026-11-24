@@ -6,9 +6,12 @@ import errno
 import json
 import os
 import sys
+import time
+from contextlib import suppress
 from pathlib import Path
 
 from .archive_files import backup_archive, export_segments, restore_archive
+from .archive_lock import ArchiveBusyError
 from .diagnostics import SAFE_FAILURES, PublicInputError, failure_code, provider_failure
 from .importer import collect_into
 from .segments import SegmentBuilder
@@ -65,10 +68,14 @@ def parser():
     )
     recover.add_argument("segment_id")
     sync = sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
-    sync.add_argument(
+    mode = sync.add_mutually_exclusive_group()
+    mode.add_argument(
         "--all-chats",
         action="store_true",
         help="Include every conversation already in this archive and its future continuations",
+    )
+    mode.add_argument(
+        "--automatic", action="store_true", help="Sync due work only when /auto on is enabled"
     )
     cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
     cleanup.add_argument(
@@ -128,13 +135,33 @@ async def _gateway_call(db_path, name, arguments):
     return await MemoryApplication(db_path).call(name, arguments)
 
 
-async def sync_archive(store, *, progress=None, all_chats=False):
+async def _run_automatic_sync(engine):
+    """Observe /auto off even when it comes from another process."""
+    worker = asyncio.create_task(engine._run_once_locked(automatic=True))
+    try:
+        while not worker.done():
+            await asyncio.wait({worker}, timeout=1)
+            if not worker.done() and engine.store.get_setting("tui_auto_sync") is not True:
+                return None
+        return worker.result()
+    finally:
+        if not worker.done():
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+
+
+async def sync_archive(store, *, progress=None, all_chats=False, automatic=False):
     from .archive_lock import archive_lock
     from .notebook import NotebookLMAdapter
     from .sync import SyncEngine
 
     # Hold the same lock as notebook rebinding before reading its settings.
     with archive_lock(store.path):
+        if automatic:
+            due = store.auto_sync_due()
+            if due is None or due > time.time():
+                return {"automatic": "idle"}
         notebook_id = store.get_setting("notebook_id")
         if not notebook_id:
             raise PublicInputError("Set a notebook ID with init --notebook-id before syncing")
@@ -142,16 +169,21 @@ async def sync_archive(store, *, progress=None, all_chats=False):
         adapter = None
         try:
             approved_count = 0
-            if all_chats:
+            if all_chats or automatic:
                 with store.connection:
                     approved_count = store.connection.execute(
                         "UPDATE conversations SET consent=1 WHERE consent=0"
                     ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
-            result = await SyncEngine(
+            engine = SyncEngine(
                 store, SegmentBuilder(store), adapter, store.workspace / "sync", progress=progress
-            )._run_once_locked()
-            if all_chats:
+            )
+            result = (
+                await _run_automatic_sync(engine) if automatic else await engine._run_once_locked()
+            )
+            if result is None:
+                return {"automatic": "stopped"}
+            if all_chats or automatic:
                 result["newly_included_conversations"] = approved_count
             errors = _preflight_errors(result)
             store.set_setting("sync_preflight_errors", errors)
@@ -294,6 +326,8 @@ def execute(args, *, progress=None):
     try:
         archive = Store(args.db, existing=args.command not in {"init", "collect"})
     except FileNotFoundError:
+        if args.command == "sync" and args.automatic:
+            return {"automatic": "idle"}
         return {"error": {"code": "archive_not_found", "message": "Archive does not exist."}}
     with archive as store:
         if args.command == "init":
@@ -334,7 +368,16 @@ def execute(args, *, progress=None):
 
             return republish(store, args.segment_id)
         if args.command == "sync":
-            return asyncio.run(sync_archive(store, progress=progress, all_chats=args.all_chats))
+            try:
+                return asyncio.run(
+                    sync_archive(
+                        store, progress=progress, all_chats=args.all_chats, automatic=args.automatic
+                    )
+                )
+            except ArchiveBusyError:
+                if args.automatic:
+                    return {"automatic": "busy"}
+                raise
         if args.command == "cleanup-legacy":
             return asyncio.run(cleanup_legacy_archive(store, args.delete))
         if args.command == "show":
@@ -386,14 +429,37 @@ def main(argv=None, *, progress=None):
         print(json.dumps(result, ensure_ascii=False))
         return 1
     if result is not None:
+        if (
+            args.command == "sync"
+            and args.automatic
+            and not progress
+            and result.get("automatic") in {"idle", "busy"}
+        ):
+            return 0
         print(json.dumps(result, ensure_ascii=False, indent=None if progress else 2))
+        status = result.get("status", {})
         if (
             "error" in result
             or (args.command == "check" and not result.get("notebook", {}).get("connected"))
             or result.get("blocked")
             or result.get("failed_files")
-            or result.get("status", {}).get("sync_status") == "pending"
-            and args.command == "sync"
+            or (
+                args.command == "sync"
+                and not args.automatic
+                and status.get("sync_status") == "pending"
+                and (
+                    args.all_chats
+                    or any(
+                        status.get(key)
+                        for key in (
+                            "pending_approved_conversations",
+                            "pending_segments",
+                            "unassigned_messages",
+                            "pending_jobs",
+                        )
+                    )
+                )
+            )
         ):
             return 1
     return 0

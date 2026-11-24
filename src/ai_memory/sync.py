@@ -663,6 +663,12 @@ class SyncEngine:
                     )
                 raise
             self._emit_progress("cleanup", job["segment_id"])
+        with db:
+            db.execute(
+                """UPDATE source_receipts SET remote_state='ready',verified_at=?
+                   WHERE source_id=? AND segment_id=? AND revision=? AND remote_state!='ready'""",
+                (time.time(), job["new_source_id"], job["segment_id"], job["revision"]),
+            )
         if old_ids:
             present = set(sources)
             for old_id in old_ids:
@@ -813,13 +819,13 @@ class SyncEngine:
         with archive_lock(self.store.path):
             return await self._run_once_locked()
 
-    async def _run_once_locked(self) -> dict:
+    async def _run_once_locked(self, *, automatic=False) -> dict:
         """Run while the caller holds archive_lock(self.store.path).
 
         CLI callers acquire the lock before reading settings or constructing the
         adapter, then retain it across this await. Direct callers use run_once.
         """
-        with sync_activity(self.store.path) as self._activity:
+        with sync_activity(self.store.path, automatic=automatic) as self._activity:
             try:
                 return await self._run_with_activity()
             finally:

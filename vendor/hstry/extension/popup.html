@@ -106,6 +106,16 @@
           </span>
         </button>
         <p id="mode-status" class="muted" role="status">Checking the current tab…</p>
+        <div id="bulk-controls" class="bulk-controls" aria-label="Chat selection" hidden>
+          <p id="bulk-account" class="muted"></p>
+          <button id="bulk-select" type="button">Select all chats</button>
+          <button id="bulk-clear" type="button">Clear selection</button>
+          <label id="bulk-workspace-field" class="field inline" hidden
+            >Workspace<select id="bulk-workspace"></select
+          ></label>
+          <p id="bulk-status" class="feedback bulk-status" role="status"></p>
+          <button id="bulk-enable" type="button" hidden>Enable provider</button>
+        </div>
       </section>
     </main>
     <script src="popup.js" type="module"></script>

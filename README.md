@@ -53,11 +53,23 @@ The extension's **Sync now** saves selected web chats in the local archive.
 Run `/sync-all` in `mem` to sync every chat in that archive to the configured
 NotebookLM notebook. The command starts immediately and shows progress through
 upload, readiness and cleanup. From the CLI, use `ai-memory sync --all-chats`.
-Use `/auto on` to sync new and changed archived chats in the background while
-`mem` is open. The preference is saved per archive. `/auto` toggles it, and
-`/auto off` stops it. During an automatic sync, `/stop` also turns it off.
+Use `/auto on` to sync new and changed archived chats. The preference is saved per
+archive. `/auto` toggles it. `/auto off` stops it, and `/stop` also turns it off
+during an automatic sync.
 Type a question and press Enter for NotebookLM's reply. Use `/chats` to browse
 the local archive.
+
+On Linux with systemd, install the user timer from this checkout to keep syncing
+the default archive with `mem` closed. It checks once a minute while the user
+session is active. Keep the Brave extension and local capture enabled for browser
+chats. Without the timer, automatic sync runs while `mem` is open.
+
+```bash
+mkdir -p ~/.config/systemd/user
+install -m 644 config/ai-memory-sync.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ai-memory-sync.timer
+```
 
 ## Import existing histories once
 
@@ -133,6 +145,7 @@ Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the 
 
 | What you do | What happens |
 | --- | --- |
+| Click **Select all chats** in the popup | Selects the current eligible chats in the active account's workspace, including chats outside the visible sidebar. Choose a workspace if several are available. **Clear selection** removes the workspace's saved choices. |
 | Check a project in the sidebar | Saves the project ID immediately. At sync, its eligible chats are included, even when the project was collapsed or a chat was not visible. Gemini offers chats only. |
 | Check the **Recents** heading on ChatGPT | Includes all ordinary Recent chats in that account on each sync, including newly added ones. Pinned, project, GPT, locked and archived chats are excluded from this group. Turning it off keeps individual selections. |
 | Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |

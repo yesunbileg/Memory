@@ -581,14 +581,60 @@ class Store:
                     (key, json.dumps(value)),
                 )
 
-    def status(self) -> dict:
-        from .publication import publication_status
+    def auto_sync_due(self) -> float | None:
+        """Return immediate work or the earliest retry for an opted-in archive."""
+        if self.get_setting("tui_auto_sync") is not True or not self.get_setting("notebook_id"):
+            return None
+        db = self.connection
+        if db.execute("""
+            SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE c.consent=0 OR NOT EXISTS (
+                SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
+                WHERE sm.message_id=m.id AND s.state!='retired')
+            LIMIT 1
+        """).fetchone():
+            return 0
+        if db.execute("""
+            SELECT 1 FROM segments s LEFT JOIN source_map sm ON sm.segment_id=s.id
+            WHERE s.state!='retired'
+                AND NOT EXISTS (SELECT 1 FROM sync_jobs j
+                    WHERE j.segment_id=s.id AND j.stage='missing')
+                AND (s.content_hash='' OR (
+                    (sm.source_id IS NULL OR sm.revision!=s.revision)
+                    AND NOT EXISTS (SELECT 1 FROM sync_jobs j
+                        WHERE j.segment_id=s.id AND j.revision=s.revision)))
+            LIMIT 1
+        """).fetchone():
+            return 0
+        return db.execute("""
+            SELECT MIN(j.next_attempt) FROM sync_jobs j
+            WHERE j.stage NOT IN ('done','superseded','missing')
+            AND NOT EXISTS (SELECT 1 FROM sync_jobs hold
+                WHERE hold.segment_id=j.segment_id AND hold.stage='missing')
+        """).fetchone()[0]
+
+    def status(self, *, sources=None) -> dict:
+        from .publication import allowed_sources, current_segments, publication_status
 
         db = self.connection
 
         def count(query):
             return db.execute(query).fetchone()[0]
 
+        sources = allowed_sources(self) if sources is None else sources
+        current = current_segments(sources)
+        marks = ",".join("?" for _ in current) or "NULL"
+        syncable, ready, approved_waiting = db.execute(
+            f"""SELECT count(*), COALESCE(sum(covered),0),
+                    COALESCE(sum(consent=1 AND covered=0),0) FROM (
+                SELECT c.consent, MIN(EXISTS(SELECT 1 FROM segment_messages sm
+                    WHERE sm.message_id=m.id AND sm.segment_id IN ({marks}))) AS covered
+                FROM messages m JOIN conversations c ON c.id=m.conversation_id
+                GROUP BY c.id
+            )""",
+            tuple(sorted(current)),
+        ).fetchone()
+        waiting = syncable - ready
         pending = count("""SELECT COUNT(*) FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
             WHERE s.state!='retired' AND (sm.source_id IS NULL OR sm.revision!=s.revision OR s.content_hash='')""")
         unassigned = count("""SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
@@ -623,13 +669,22 @@ class Store:
             "unapproved_conversations": count("SELECT COUNT(*) FROM conversations WHERE consent=0"),
             "segments": count("SELECT COUNT(*) FROM segments WHERE state!='retired'"),
             "sources": count("SELECT COUNT(*) FROM source_map"),
-            "last_verified_remote": publication_status(self),
+            "last_verified_remote": publication_status(self, sources=sources),
+            "ready_conversations": ready,
+            "pending_conversations": waiting,
+            "pending_approved_conversations": approved_waiting,
             "pending_segments": pending,
             "unassigned_messages": unassigned,
             "pending_jobs": cleanup,
             "sync_errors": sync_errors,
             "sync_preflight_errors": sync_preflight_errors,
             "import_failures": import_failures,
-            "sync_status": "pending" if pending or unassigned or cleanup else "up_to_date",
+            "sync_status": (
+                "pending"
+                if pending or waiting or cleanup
+                else "up_to_date"
+                if sources
+                else "no_sources"
+            ),
             "notebook_configured": bool(self.get_setting("notebook_id")),
         }

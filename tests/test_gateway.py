@@ -42,7 +42,7 @@ def decode(result):
     return payload
 
 
-def seed_archive(db_path, *, map_source=True):
+def seed_archive(db_path, *, map_source=True, decision="Memory."):
     from ai_memory.segments import SegmentBuilder
     from ai_memory.store import Store
 
@@ -72,7 +72,7 @@ def seed_archive(db_path, *, map_source=True):
                         "sequence": 2,
                         "role": "assistant",
                         "kind": "text",
-                        "text": "Memory.",
+                        "text": decision,
                         "timestamp": "2026-11-10T10:01:00Z",
                     },
                 ],
@@ -333,8 +333,28 @@ async def test_edited_archive_does_not_attribute_old_cloud_passage_to_current_me
     ) as client:
         answer = decode(await client.call_tool("memory_ask", {"question": "Earlier project?"}))
     assert answer["sources"][0]["segment_id"] == segment_id
+    assert answer["sources"][0]["stale"] is True
     assert "message_ids" not in answer["sources"][0]
     assert "conversation_id" not in answer["sources"][0]
+
+
+async def test_mongolian_terminal_question_links_exact_passage_to_original_message(tmp_path):
+    from ai_memory.gateway import MemoryApplication
+
+    db = tmp_path / "memory.sqlite"
+    decision = "Шинэ эх сурвалж бэлэн, баталгаатай болсны дараа хуучныг устгана."
+    cid, _, messages = seed_archive(db, decision=decision)
+    notebook = SimulatedNotebook([{"source_id": "owned-source", "cited_text": decision}])
+    notebook.chat = notebook.ask
+    question = "Хуучин эх сурвалжийг хэзээ устгахаар шийдсэн бэ?"
+    result = await MemoryApplication(db, adapter=notebook).chat(question)
+    assert notebook.queries == [(question, ["owned-source"])]
+    citation = result["sources"][0]
+    assert (citation["conversation_id"], citation["message_ids"], citation["stale"]) == (
+        cid,
+        [messages[1]],
+        False,
+    )
 
 
 async def test_foreign_or_absent_citation_withholds_entire_answer(tmp_path):

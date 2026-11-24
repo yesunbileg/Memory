@@ -46,6 +46,7 @@ let mem = {},
   calls,
   catalog,
   principals,
+  bulkTab,
   refuse = false;
 const area = (get) => ({
   get: async (k) => ({ [k]: structuredClone(get()[k]) }),
@@ -71,6 +72,7 @@ globalThis.chrome = {
     },
   },
   storage: { local: area(() => mem), session: area(() => session) },
+  tabs: { get: async () => bulkTab },
   alarms: {
     onAlarm: { addListener: (fn) => (alarm = fn) },
     get: async () => null,
@@ -95,6 +97,7 @@ beforeEach(() => {
   refuse = false;
   catalog = { entries: [group()] };
   principals = [owner];
+  bulkTab = { id: 1, active: true, url: 'https://claude.ai/new' };
   chrome.runtime.sendNativeMessage = noNative;
   for (const id of ['chatgpt', 'claude']) {
     PROVIDERS[id].listCatalog = async () => {
@@ -106,6 +109,66 @@ beforeEach(() => {
       return [...principals];
     };
   }
+});
+
+const bulk = (action, choice = {}, sender = popup) =>
+  send(
+    {
+      type: 'changeBulkSelection',
+      tabId: 1,
+      provider: 'claude',
+      url: 'https://claude.ai/new',
+      action,
+      ...choice,
+    },
+    sender,
+  );
+
+test('popup selects every verified current chat and clears only its own workspace', async () => {
+  mem.providerSyncScopes = { claude: scope(entry(other, [], [different])) };
+  catalog.entries[0].conversations.push({ ...catalog.entries[0].conversations[0] });
+  const selected = await bulk('select');
+  assert.equal(selected.ok, true);
+  assert.equal(selected.count, 3);
+  assert.deepEqual(
+    mem.providerSyncScopes.claude,
+    scope(entry(owner, [], [child, ordinary, unseen]), entry(other, [], [different])),
+  );
+  assert.equal((await bulk('clear')).count, 0);
+  assert.deepEqual(mem.providerSyncScopes.claude, scope(entry(other, [], [different])));
+  assert.equal(calls.native, 0);
+});
+
+test('bulk selection asks for a workspace and rejects account changes, incomplete lists and page callers', async () => {
+  assert.equal((await bulk('select', {}, from())).ok, false);
+  bulkTab.url = 'https://claude.ai/recents';
+  assert.equal((await bulk('select')).code, 'principal_changed');
+  bulkTab.url = 'https://claude.ai/new';
+  catalog.incomplete = true;
+  assert.equal((await bulk('select')).ok, false);
+  assert.equal(mem.providerSyncScopes, undefined);
+  catalog.incomplete = false;
+  catalog.entries.push({ ...group(other), title: 'Second workspace' });
+  principals = [owner, other];
+  const choice = await bulk('select');
+  assert.deepEqual(
+    choice.choices.map((c) => c.title),
+    ['PRIVATE workspace title', 'Second workspace'],
+  );
+  assert.equal(mem.providerSyncScopes, undefined);
+  assert.equal((await bulk('select', { token: choice.token, index: 1 })).count, 3);
+  assert.equal((await bulk('select', { token: choice.token, index: 1 })).code, 'catalog_expired');
+  assert.deepEqual(
+    mem.providerSyncScopes.claude,
+    scope(entry(other, [], [child, ordinary, unseen])),
+  );
+  const clearing = await bulk('clear');
+  principals = [owner];
+  assert.equal(
+    (await bulk('clear', { token: clearing.token, index: 1 })).code,
+    'principal_changed',
+  );
+  assert.equal(mem.providerSyncScopes.claude.entries.length, 1);
 });
 test('ChatGPT Recents is saved as a group and leaves individual picks intact when turned off', async () => {
   const sender = from(1, 'document-one', 'https://chatgpt.com/');

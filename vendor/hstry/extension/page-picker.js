@@ -651,6 +651,10 @@
     };
   }
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
+    if (m?.type === 'REFRESH_PAGE_SELECTION' && workerSender(sender)) {
+      if (active) schedule(active, true);
+      return;
+    }
     if (m?.type === 'FETCH_PROVIDER_TAB') {
       if (!workerSender(sender)) return;
       providerTabResponse(m).then(reply, () => reply(null));

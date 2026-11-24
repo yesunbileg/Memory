@@ -323,7 +323,9 @@ async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_pat
             ).fetchone()[0]
             == 1
         )
-        assert store.status()["sync_status"] == "up_to_date"
+        status = store.status()
+        assert status["sync_status"] == "pending"
+        assert status["ready_conversations"] == status["pending_conversations"] == 1
         assert remote.operations[0][0] == "upload"
         snapshot = next((tmp_path / "md").glob("*.md"), None)
         assert snapshot is None  # completed sync removes its immutable local snapshot
@@ -1210,6 +1212,7 @@ async def test_unready_current_mapping_uses_queue_backoff_and_can_recover(tmp_pa
         result = await engine.run_once()
         assert not result["blocked"]
         assert result["status"]["sync_status"] == "up_to_date"
+        assert result["status"]["last_verified_remote"]["eligible_sources"] == 1
         assert len(remote.sources) == 1
         if code == "processing_failed":
             assert source_id not in remote.sources

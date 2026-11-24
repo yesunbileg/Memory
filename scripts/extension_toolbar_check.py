@@ -40,7 +40,7 @@ CLAUDE_MEMBER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 GEMINI = "abcdef123456abcd"
 
 
-def register(folder, profile, extension_id, env):
+def register(folder, profile, extension_id, env, browser):
     result = subprocess.run(
         [
             sys.executable,
@@ -52,7 +52,7 @@ def register(folder, profile, extension_id, env):
             "--extension-id",
             extension_id,
             "--browser",
-            "chromium",
+            browser,
             "--browser-user-data-dir",
             str(profile),
         ],
@@ -408,6 +408,18 @@ async def exercise(context, worker, driver, archive_id, db):
         await site.goto(SITES[provider])
         await expect(site.locator(BOX)).to_have_count(0)
         await toolbar.open(site)
+        if provider == "claude":
+            await site.locator("aside").evaluate("el=>el.hidden=true")
+            await toolbar.click("#bulk-select")
+            await wait_for(
+                lambda: toolbar.ui("()=>q('#bulk-status').textContent==='3 chats selected.'"),
+                "the toolbar did not select all chats in the closed Claude sidebar",
+            )
+            await expect_scope(worker, provider, chats=[CLAUDE, CLAUDE_MEMBER, RECENT_ONLY])
+            await no_capture(worker, db)
+            await toolbar.click("#bulk-clear")
+            await expect_scope(worker, provider)
+            await site.locator("aside").evaluate("el=>el.hidden=false")
         await toolbar.toggle(True)
         individual = box(site, item)
         await expect(individual).to_be_visible()
@@ -514,8 +526,10 @@ async def exercise(context, worker, driver, archive_id, db):
 async def verify(executable):
     with tempfile.TemporaryDirectory(prefix="ai-memory-toolbar-") as directory:
         folder = Path(directory)
-        profile = folder / "config/chromium"
-        env = {**os.environ, "XDG_CONFIG_HOME": str(folder / "config")}
+        config = folder / "config"
+        browser = "brave" if executable.name.startswith("brave") else "chromium"
+        profile = config / ("BraveSoftware/Brave-Browser" if browser == "brave" else "chromium")
+        env = {**os.environ, "XDG_CONFIG_HOME": str(config)}
         extension = folder / "extension"
         archive = folder / "release.zip"
         build_extension(EXTENSION, archive)
@@ -538,7 +552,7 @@ async def verify(executable):
                     if context.service_workers
                     else await context.wait_for_event("serviceworker")
                 )
-                archive_id = register(folder, profile, worker.url.split("/")[2], env)
+                archive_id = register(folder, profile, worker.url.split("/")[2], env, browser)
                 await exercise(
                     context, worker, context.pages[0], archive_id, folder / "fixture.sqlite"
                 )

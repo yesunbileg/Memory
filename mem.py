@@ -26,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Input, Static
 
-from mem_backend import Backend, BackendError
+from mem_backend import Backend, BackendError, Citation
 from mem_flow import FlowCanvas
 
 VERSION = "1.0.0"
@@ -73,17 +73,16 @@ def tx(s: str, k=TEXT, bold: bool = False) -> Text:
     return Text(s, style=("bold " if bold else "") + rgb(k))
 
 
+def message_markdown(text: str) -> Markdown:
+    return Markdown(text, style=rgb(TEXT), hyperlinks=False)
+
+
 def lr(left: Text, right: Text, w: int) -> Text:
     return Text.assemble(left, " " * max(1, w - left.cell_len - right.cell_len), right)
 
 
 def clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[: max(1, n - 1)] + "…"
-
-
-def gbar(p: float, w: int, k=BLUE) -> Text:
-    n = round(max(0.0, min(1.0, p)) * w)
-    return Text.assemble(("━" * n, rgb(k)), ("─" * (w - n), rgb(BORDER_DIM)), no_wrap=True)
 
 
 def when_label(ts: float) -> tuple[str, str]:
@@ -229,7 +228,7 @@ COMMANDS = [
     Cmd(
         "auto",
         "Автомат sync",
-        "mem нээлттэй үед архивын өөрчлөлтийг илгээнэ · /auto on|off",
+        "Архивын өөрчлөлтийг илгээнэ · /auto on|off",
         "Sync",
     ),
     Cmd("stop", "Ажил зогсоох", "Идэвхтэй sync, шалгалт эсвэл асуултыг зогсоох", "Sync"),
@@ -1160,10 +1159,13 @@ class Tab(Static):
 # ───────────────── session-ийн блокууд ─────────────────
 class UserBlock(Static):
     def __init__(
-        self, text: str, color=BLUE, cited: bool = False, label: Text | None = None
+        self, body: RenderableType, color=BLUE, cited: bool = False, label: Text | None = None
     ) -> None:
-        body = Text.assemble(*([label, "\n"] if label else []), (text, rgb(TEXT)))
-        super().__init__(body, classes="ublock" + (" cited" if cited else ""))
+        if isinstance(body, str):
+            body = tx(body)
+        super().__init__(
+            Group(label, body) if label else body, classes="ublock" + (" cited" if cited else "")
+        )
         if not cited:
             self.styles.border_left = ("heavy", hx(color))
 
@@ -1174,23 +1176,22 @@ class AiBlock(Static):
 
 
 class SourceRow(Static):
-    def __init__(self, chat_id: str, label: str, msg: int, ok: bool) -> None:
-        prefix = f"↳ #{msg:04d} · " if ok else "↳ Эх · "
+    def __init__(self, citation: Citation) -> None:
+        ok = bool(citation.message_id or citation.passage)
+        prefix = f"↳ #{citation.number:04d} · " if citation.message_id else "↳ Ишлэл · "
         t = Text.assemble(
             (prefix, rgb(GREEN if ok else MUTED)),
-            (label, rgb(TEXT if ok else MUTED)),
+            (citation.label, rgb(TEXT if ok else MUTED)),
+            (" · хуучин хувилбар", rgb(YELLOW)) if citation.stale else "",
             no_wrap=True,
             overflow="ellipsis",
         )
         super().__init__(t, classes="srow" + ("" if ok else " dim"))
-        self.chat_id, self.msg, self.ok = chat_id, msg, ok
+        self.citation = citation
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
-        if self.ok:
-            self.app.open_chat(self.chat_id, self.msg)
-        else:
-            self.app.toast("Энэ ишлэл тодорхой нэг мессежтэй холбогдоогүй.", "warning")
+        self.app.open_citation(self.citation)
 
 
 class Panel(Static):
@@ -1518,9 +1519,10 @@ class Mem(App):
         self.archive_stamp = None
         self.archive_lock = asyncio.Lock()
         self.auto_sync = False
+        self.background_sync = self.backend.background_sync_enabled()
         self.auto_sync_due: float | None = None
         self.auto_retry_after = 0.0
-        self.reader_key: tuple[str, int, int] | None = None
+        self.reader_key: tuple[str, int, Citation | None] | None = None
         self.ask_workers: dict[str, Any] = {}
         self.job_worker = None
         self.sessions: dict[str, Sess] = {}
@@ -1528,7 +1530,7 @@ class Mem(App):
         self.sel: dict[str, str] = {}
         self.pfilter = "all"
         self.cite_id: str | None = None
-        self.cite_no = 0
+        self.citation: Citation | None = None
         self.viewed: dict[str, float] = {}
         self.route, self.prev_route = "home", "home"
         self.cur_sid: str | None = None
@@ -1636,6 +1638,7 @@ class Mem(App):
     def poll_auto_sync(self) -> None:
         if (
             not self.auto_sync
+            or self.background_sync
             or self.auto_sync_due is None
             or self.auto_sync_due > time.time()
             or time.monotonic() < self.auto_retry_after
@@ -1670,10 +1673,6 @@ class Mem(App):
             "failed": sum(c.nb == "failed" for c in cs),
             "done": sum(c.fully_synced for c in cs),
         }
-
-    @property
-    def source_usage(self) -> int:
-        return self.archive_status.get("sources", 0)
 
     def note(self, kind: str, msg: str) -> None:
         self.events.insert(0, (kind, time.time(), msg))
@@ -1914,16 +1913,16 @@ class Mem(App):
     def cur_sess(self) -> Sess | None:
         return self.sessions.get(self.cur_sid or "")
 
-    def session_citations(self) -> list[tuple[str, str, int]]:
+    def session_citations(self) -> list[Citation]:
         session = self.cur_sess() if self.route == "session" else None
         if not session:
             return []
         return list(
             dict.fromkeys(
-                (cid, title, number)
+                citation
                 for message in reversed(session.msgs)
-                for cid, title, number in message.get("sources", ())
-                if number and self.chat(cid)
+                for citation in message.get("sources", ())
+                if citation.message_id or citation.passage
             )
         )
 
@@ -2078,10 +2077,10 @@ class Mem(App):
             t.append("Эх сурвалж\n" if s.kind == "ask" else "Чат\n", style="bold " + rgb(TEXT))
             if s.kind == "ask":
                 srcs = [x for m in s.msgs if m["role"] == "ai" for x in m.get("sources", [])]
-                for cid, label, no in srcs[-6:]:
-                    ok = bool(no and self.chat(cid))
+                for citation in srcs[-6:]:
+                    ok = bool(citation.message_id)
                     t.append("  " + ("✔ " if ok else "○ "), style=rgb(GREEN if ok else MUTED))
-                    t.append(clip(label, 30) + "\n", style=rgb(TEXT if ok else MUTED))
+                    t.append(clip(citation.label, 30) + "\n", style=rgb(TEXT if ok else MUTED))
                 if not srcs:
                     t.append("  одоохондоо алга\n", style=rgb(MUTED))
             else:
@@ -2102,8 +2101,6 @@ class Mem(App):
         self.q("#sidebar", Static).update(t)
 
     def refresh_dash(self) -> None:
-        st = self.stats()
-        w = max(24, (self.q("#d-recv").size.width or 40) - 6)
         conn, conn_color = self.connection_label()
         notebook, nb_color = self.notebook_label()
         self.q("#d-head", Static).update(tx("Архивын төлөв", TEXT, True))
@@ -2121,11 +2118,18 @@ class Mem(App):
             remote_label = f"Сүүлд шалгахад Google-д нийт {remote_count} эх"
         else:
             remote_label = "Google-ийн нийт эхийг /check-ээр шалгана"
+        eligible = self.archive_status.get("last_verified_remote", {}).get("eligible_sources")
+        if eligible is None:
+            source_label = "Эх сурвалжийн төлөв тодорхойгүй"
+        elif eligible:
+            source_label = f"Ашиглах эх сурвалж · {eligible}"
+        else:
+            source_label = "Ашиглах эх сурвалж алга"
         nb = Text("\n").join(
             [
                 tx("NotebookLM", TEXT, True),
                 tx(notebook, nb_color),
-                tx(f"AI Memory-ийн бүртгэлтэй эх · {self.source_usage}", TEXT),
+                tx(source_label, YELLOW if eligible == 0 else TEXT),
                 tx(remote_label, MUTED),
                 *([tx(sync_phase_text(self.sync_activity), BLUE)] if self.sync_activity else []),
                 tx(
@@ -2138,20 +2142,20 @@ class Mem(App):
                 ),
             ]
         )
-        bw = max(8, w - 22)
-
-        def bar(label, n, k):
-            p = n / st["total"] if st["total"] else 0
-            return Text.assemble(
-                (label.ljust(14), rgb(MUTED)), gbar(p, bw, k), (f" {n:>2}", "bold " + rgb(TEXT))
-            )
-
+        auto = "асаалттай" if self.auto_sync else "унтраалттай"
+        when = "mem хаалттай үед ч ажиллана" if self.background_sync else "mem нээлттэй үед"
+        saved = self.archive_status.get("conversations", 0)
+        ready = self.archive_status.get("ready_conversations", 0)
+        pending = self.archive_status.get("pending_conversations", 0)
+        empty = saved - ready - pending
         flow = Text("\n").join(
             [
-                tx("Sync · сонгосон provider", TEXT, True),
-                Text(""),
-                bar("Локалд", st["local"], CYAN),
-                bar("Шинэ хувилбарт", st["done"], BLUE),
+                tx("Синкийн төлөв", TEXT, True),
+                tx(f"Хадгалсан чат · {saved}", CYAN),
+                tx(f"NotebookLM-д бэлэн · {ready}", GREEN),
+                tx(f"Хүлээгдэж буй чат · {pending}", YELLOW),
+                *([tx(f"Мессежгүй чат · {empty}", MUTED)] if empty > 0 else []),
+                tx(f"Автомат синк {auto} · {when}", MUTED),
             ]
         )
         col = {"OK": GREEN, "INFO": CYAN, "WARN": ORANGE, "ERR": RED, "NEW": PURPLE}
@@ -2193,7 +2197,12 @@ class Mem(App):
         if code := msg.get("error_code"):
             footer.append(f" · {code}", style=rgb(RED))
             return Text.assemble(tx(msg["text"]), "\n\n", footer)
-        return Group(Markdown(msg["text"], style=rgb(TEXT), hyperlinks=False), Text(), footer)
+        warnings = []
+        if msg.get("uncited"):
+            warnings.append(tx("Эх сурвалжгүй хариулт", YELLOW, True))
+        elif any(source.stale for source in msg.get("sources", ())):
+            warnings.append(tx("Хуучин хувилбарын эх сурвалж ашигласан", YELLOW, True))
+        return Group(*warnings, message_markdown(msg["text"]), Text(), footer)
 
     def render_session(self) -> None:
         s = self.cur_sess()
@@ -2208,8 +2217,8 @@ class Mem(App):
             else:
                 ws.append(AiBlock(self.ai_text(m)))
                 if not m.get("pending"):
-                    for cid, label, no in m.get("sources", []):
-                        ws.append(SourceRow(cid, label, no, bool(no and self.chat(cid))))
+                    for citation in m.get("sources", []):
+                        ws.append(SourceRow(citation))
         box.mount(*ws)
         prompt = self.q("#p-sess", Prompt)
         prompt.refresh_meta()
@@ -2225,23 +2234,18 @@ class Mem(App):
             ws.append(Static(tx("Энэ чатад хадгалсан мессеж алга.", MUTED)))
         for i, (who, text) in enumerate(c.messages or (), 1):
             is_cited = cite == i
+            body = message_markdown(text)
             tag = Text.assemble(
                 (f"#{i:04d}", rgb(MUTED)),
                 ("  ИШЛЭЛ", "bold " + rgb(PEACH)) if is_cited else ("", ""),
             )
             if who == "Та":
-                w: Any = UserBlock(text, BLUE, is_cited, label=tag)
+                w: Any = UserBlock(body, BLUE, is_cited, label=tag)
             else:
-                w = AiBlock(
-                    Text.assemble(
-                        (text, rgb(TEXT)),
-                        "\n\n",
-                        ("▣  ", rgb(PROV.get(c.ai, BLUE))),
-                        (f"{c.ai} · ", rgb(MUTED)),
-                        tag,
-                    ),
-                    is_cited,
+                footer = Text.assemble(
+                    ("▣  ", rgb(PROV.get(c.ai, BLUE))), (f"{c.ai} · ", rgb(MUTED)), tag
                 )
+                w = AiBlock(Group(body, Text(), footer), is_cited)
             if is_cited:
                 cited_w = w
             ws.append(w)
@@ -2315,7 +2319,7 @@ class Mem(App):
             )
             box.mount(Static(tx(choose, MUTED)))
             return
-        cite = self.cite_no if self.cite_id == c.id else 0
+        cite = self.citation if self.cite_id == c.id else None
         key = (c.id, c.revision, cite)
         if not dialog and (self.size.width < 100 or self.reader_key == key):
             return
@@ -2325,9 +2329,12 @@ class Mem(App):
             box.mount(Static(tx("Чат уншиж байна…", MUTED)))
         self.run_worker(self.read_chat(c, key, dialog), group="reader", exclusive=True)
 
-    async def read_chat(self, c: Chat, key: tuple[str, int, int], dialog: bool) -> None:
+    async def read_chat(self, c: Chat, key: tuple[str, int, Citation | None], dialog: bool) -> None:
         try:
-            messages = await asyncio.to_thread(self.backend.messages, c.id)
+            if citation := key[2]:
+                messages, number = await asyncio.to_thread(self.backend.cited_messages, citation)
+            else:
+                messages, number = await asyncio.to_thread(self.backend.messages, c.id), 0
         except BackendError as error:
             if self.reader_key == key and self.route == "prov":
                 self.reader_key = None
@@ -2342,10 +2349,10 @@ class Mem(App):
         if dialog:
             self.reader_key = None
             if not isinstance(self.screen, ModalScreen):
-                self.dialog(ChatDialog(loaded, key[2]))
+                self.dialog(ChatDialog(loaded, number))
             return
         box = self.q("#pmsgs", VerticalScroll)
-        ws, cited = self.chat_widgets(loaded, key[2])
+        ws, cited = self.chat_widgets(loaded, number)
         await box.remove_children()
         if self.reader_key == key and self.route == "prov":
             await box.mount(*ws)
@@ -2443,11 +2450,16 @@ class Mem(App):
                 if error.get("code") == "auth_required":
                     body = "NotebookLM-ийн нэвтрэлт дууссан. /login ажиллуул."
                     self.notebook_status = {"configured": True, "connected": False, "error": error}
+                elif error.get("code") == "no_synced_sources":
+                    body = "NotebookLM-д ашиглах баталгаажсан эх сурвалж алга. Синкийн төлөвийг шалгана уу."
+                elif error.get("code") == "unverified_sources":
+                    body = "Эх сурвалжийг баталгаажуулж чадсангүй."
                 msg["error_code"] = error.get("code")
                 kind = "ERR"
             else:
                 body = result.get("answer") or "NotebookLM хоосон хариу өглөө."
-                citations = result.get("citations", result.get("sources", []))
+                citations = result.get("citations", [])
+                msg["uncited"] = not result.get("sources")
         except BackendError as error:
             body = str(error)
             msg["error_code"] = error.code
@@ -2509,9 +2521,28 @@ class Mem(App):
 
     def source_options(self) -> list[Opt]:
         return [
-            Opt((cid, number), title, footer=f"#{number:04d}")
-            for cid, title, number in self.session_citations()
+            Opt(
+                citation,
+                citation.label,
+                footer=(
+                    f"#{citation.number:04d}"
+                    if citation.message_id
+                    else "хуучин ишлэл"
+                    if citation.stale
+                    else "ишилсэн хэсэг"
+                ),
+            )
+            for citation in self.session_citations()
         ]
+
+    def open_citation(self, citation: Citation) -> None:
+        if citation.message_id:
+            self.open_chat(citation.chat_id, citation)
+        elif citation.passage:
+            title = "Хуучин эхээс ишилсэн хэсэг" if citation.stale else "Эхээс ишилсэн хэсэг"
+            self.dialog(DialogInfo(title, lambda _: tx(citation.passage)))
+        else:
+            self.toast("Энэ ишлэл тодорхой нэг мессежтэй холбогдоогүй.", "warning")
 
     def cmd_sources(self, args: str = "") -> None:
         if not self.source_options():
@@ -2520,8 +2551,8 @@ class Mem(App):
 
         def done(result: Any) -> None:
             if result and result[0] == "pick":
-                cid, number = result[1]
-                self.call_after_refresh(lambda: self.open_chat(cid, number))
+                citation = result[1]
+                self.call_after_refresh(lambda: self.open_citation(citation))
 
         self.dialog(DialogSelect("Мессежийн ишлэлүүд", self.source_options), done)
 
@@ -2596,7 +2627,7 @@ class Mem(App):
             done,
         )
 
-    def open_chat(self, cid: str, cite: int = 0) -> None:
+    def open_chat(self, cid: str, cite: Citation | None = None) -> None:
         c = self.chat(cid)
         if not c:
             self.toast("Чат энэ архивт олдсонгүй", "warning")
@@ -2605,7 +2636,7 @@ class Mem(App):
         self.cur_prov = c.ai
         self.sel[c.ai] = cid
         self.pfilter = "all"
-        self.cite_id, self.cite_no = (cid, cite) if cite else (None, 0)
+        self.cite_id, self.citation = (cid, cite) if cite else (None, None)
         self.viewed[cid] = time.time()
         self.go("prov")
         if self.size.width < 100:
@@ -2851,6 +2882,7 @@ class Mem(App):
             self.toast(str(error), "error")
             return
         self.auto_sync = enabled
+        self.background_sync = await asyncio.to_thread(self.backend.background_sync_enabled)
         self.auto_retry_after = 0.0
         if (
             not enabled
@@ -2861,7 +2893,11 @@ class Mem(App):
         ):
             self.job.status = "stopping" if self.job.steps else "cancelled"
             self.job_worker.cancel()
-        self.toast("Auto sync асаалттай · mem нээлттэй үед" if enabled else "Auto sync унтраалаа")
+        if enabled:
+            when = "mem хаалттай үед ч" if self.background_sync else "mem нээлттэй үед"
+            self.toast(f"Auto sync асаалттай · {when} ажиллана")
+        else:
+            self.toast("Auto sync унтраалаа")
         await self.refresh_archive(force=True)
 
     def start_job(self, kind: str, args: str | dict[str, str] = "") -> None:
@@ -2901,6 +2937,9 @@ class Mem(App):
             else:
                 self.job.status = "stopping"
             self.job_worker.cancel()
+            return
+        if self.sync_activity.get("automatic"):
+            self.cmd_auto("off")
             return
         if self.ask_workers:
             sid = (
@@ -2965,7 +3004,13 @@ class Mem(App):
             elif kind in {"login", "setup"}:
                 result = await self.backend.call(kind, args)
             else:
-                result = await self.backend.call("sync-all", on_progress=show_phase)
+                operation = "auto-sync" if job.automatic else "sync-all"
+                result = await self.backend.call(operation, on_progress=show_phase)
+                if result.get("automatic") in {"idle", "busy", "stopped"}:
+                    remote_step.state = "skip"
+                    job.status = "cancelled"
+                    await self.refresh_archive(force=True)
+                    return
             if kind in {"check", "login", "setup"}:
                 self.update_notebook_status(result)
                 if kind in {"login", "setup"} and self.notebook_status.get("connected"):

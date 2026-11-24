@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "125",
   "name": "AI Memory",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Choose chats and projects on their own website, then sync your selections to your local archive.",
   "permissions": ["alarms", "storage", "nativeMessaging"],
   "host_permissions": [

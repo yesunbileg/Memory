@@ -29,7 +29,15 @@ def allowed_sources(store):
     }
 
 
-def publication_status(store):
+def current_segments(sources):
+    return {
+        row["segment_id"]
+        for row in sources.values()
+        if row["content_hash"] and row["source_revision"] == row["revision"]
+    }
+
+
+def publication_status(store, *, sources=None):
     inventory = [
         dict(row)
         for row in store.connection.execute("""
@@ -37,7 +45,10 @@ def publication_status(store):
         THEN 'missing' ELSE COALESCE(r.remote_state,'unverified') END AS state,r.verified_at
         FROM source_map m LEFT JOIN source_receipts r USING(source_id) ORDER BY m.segment_id""")
     ]
-    return {"managed_sources": inventory, "eligible_sources": len(allowed_sources(store))}
+    return {
+        "managed_sources": inventory,
+        "eligible_sources": len(allowed_sources(store) if sources is None else sources),
+    }
 
 
 async def cleanup_legacy_sources(store, adapter, approved_ids):

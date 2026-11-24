@@ -102,29 +102,15 @@ export const readPageScope = async (provider) => (await currentSettings(provider
 
 // Local storage has no read-modify-write transaction. Serialize these short ID edits across all tabs/providers.
 let writes = Promise.resolve();
-export function setPageItem(provider, principalId, kind, id, checked, sameId, verify) {
+function writePageScope(provider, principalId, edit, verify) {
   const work = writes
     .catch(() => {})
     .then(async () => {
       const { scope, providerSyncScopes, legacy } = await currentSettings(provider);
       const entries = new Map(scope.entries.map((e) => [e.principalId, e]));
       const old = entries.get(principalId) ?? { principalId, projectIds: [], conversationIds: [] };
-      const next = { ...old };
-      if (kind === 'recents') {
-        if (provider !== 'chatgpt' || id !== 'recents') fail('selection_invalid');
-        if (checked) next.includeRecents = true;
-        else delete next.includeRecents;
-      } else {
-        const key = kind === 'project' ? 'projectIds' : 'conversationIds';
-        next[key] = old[key].filter((v) => !sameId(v, id));
-        if (checked) next[key].push(id);
-      }
-      if (kind === 'conversation' && old.legacyConversationIds) {
-        const untouched = old.legacyConversationIds.filter((v) => !sameId(v, id));
-        if (untouched.length) next.legacyConversationIds = untouched;
-        else delete next.legacyConversationIds;
-      }
-      if (hasScopeItems(next)) entries.set(principalId, next);
+      const next = edit(old);
+      if (next && hasScopeItems(next)) entries.set(principalId, next);
       else entries.delete(principalId);
       const saved = normalize({ entries: [...entries.values()] }, provider);
       await verify();
@@ -141,4 +127,46 @@ export function setPageItem(provider, principalId, kind, id, checked, sameId, ve
     });
   writes = work;
   return work;
+}
+
+export function setPageItem(provider, principalId, kind, id, checked, sameId, verify) {
+  return writePageScope(
+    provider,
+    principalId,
+    (old) => {
+      const next = { ...old };
+      if (kind === 'recents') {
+        if (provider !== 'chatgpt' || id !== 'recents') fail('selection_invalid');
+        if (checked) next.includeRecents = true;
+        else delete next.includeRecents;
+      } else {
+        const key = kind === 'project' ? 'projectIds' : 'conversationIds';
+        next[key] = old[key].filter((v) => !sameId(v, id));
+        if (checked) next[key].push(id);
+      }
+      if (kind === 'conversation' && old.legacyConversationIds) {
+        const untouched = old.legacyConversationIds.filter((v) => !sameId(v, id));
+        if (untouched.length) next.legacyConversationIds = untouched;
+        else delete next.legacyConversationIds;
+      }
+      return next;
+    },
+    verify,
+  );
+}
+
+export function setBulkPageItems(provider, principalId, items, canonical, verify) {
+  return writePageScope(
+    provider,
+    principalId,
+    (old) => {
+      if (items === null) return null;
+      const selected = new Set(items.map(canonical));
+      const keep = (ids) => ids.filter((id) => !selected.has(canonical(id)));
+      const next = { ...old, conversationIds: [...keep(old.conversationIds), ...items] };
+      if (next.legacyConversationIds) next.legacyConversationIds = keep(next.legacyConversationIds);
+      return next;
+    },
+    verify,
+  );
 }

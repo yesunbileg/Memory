@@ -1,7 +1,7 @@
 // Only the extension's top-frame content script can request this broker. The website UI
 // gets back state for its own visible rows, not the catalog, titles, accounts or messages.
 import './page-picker-routes.js';
-import { readPageScope, setPageItem, validOwner } from './popup-scope.js';
+import { readPageScope, setBulkPageItems, setPageItem, validOwner } from './popup-scope.js';
 
 const LIMIT = 10000,
   TTL = 15 * 60 * 1000;
@@ -20,6 +20,7 @@ const only = (o, fields) =>
   Object.keys(o).every((k) => fields.includes(k));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const proofKey = (id) => 'pagePicker_' + id;
+const bulkKey = (id) => 'popupBulk_' + id;
 const queues = new Map();
 
 function normalizedId(provider, kind, id) {
@@ -91,7 +92,7 @@ function validate(message, provider) {
     fail('selection_invalid');
 }
 
-async function makeProof(ctx, adapter) {
+async function makeProof(ctx, adapter, titles = false) {
   const raw = await adapter.listCatalog(ctx);
   if (!Array.isArray(raw?.entries) || !raw.entries.length || raw.entries.length > 128)
     fail('catalog_unavailable');
@@ -136,7 +137,8 @@ async function makeProof(ctx, adapter) {
         );
       }
     }
-    entries.push({ owner: e.principalId, projects, conversations });
+    const title = titles && typeof e.title === 'string' ? e.title.trim().slice(0, 120) : '';
+    entries.push({ owner: e.principalId, ...(title ? { title } : {}), projects, conversations });
   }
   // An incomplete organization inventory cannot disambiguate identical row IDs between organizations.
   if (incomplete && entries.length > 1) fail('ambiguous_selection');
@@ -285,25 +287,113 @@ async function handle(message, ctx, adapter) {
   return { ok: true, token: proof.token, items, incomplete: proof.incomplete };
 }
 
+async function inTabOrder(tabId, task) {
+  const work = (queues.get(tabId) ?? Promise.resolve()).catch(() => {}).then(task);
+  queues.set(tabId, work);
+  try {
+    return await work;
+  } finally {
+    if (queues.get(tabId) === work) queues.delete(tabId);
+  }
+}
+
 export async function pageSelection(message, sender, providers) {
   const ctx = pageSender(sender);
   validate(message, ctx.provider);
   // A close/reopen must not be overtaken by a stale in-flight catalog or checkbox write from the same tab.
-  const work = (queues.get(ctx.tabId) ?? Promise.resolve())
-    .catch(() => {})
-    .then(() => handle(message, ctx, providers[ctx.provider]));
-  queues.set(ctx.tabId, work);
-  try {
-    return await work;
-  } finally {
-    if (queues.get(ctx.tabId) === work) queues.delete(ctx.tabId);
+  return inTabOrder(ctx.tabId, () => handle(message, ctx, providers[ctx.provider]));
+}
+
+async function activeBulkTab(tabId, provider) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const route = globalThis.aiMemoryPageRoutes.pageContext(tab?.url);
+  if (!tab?.active || tab.discarded || route?.provider !== provider) fail('selection_invalid');
+  return { ...route, tabId, url: tab.url };
+}
+
+export async function bulkPageSelection(message, providers) {
+  const { tabId, provider, action, token, index, url } = message;
+  if (
+    !only(message, ['type', 'tabId', 'provider', 'action', 'token', 'index', 'url']) ||
+    !Number.isInteger(tabId) ||
+    tabId < 0 ||
+    typeof url !== 'string' ||
+    !own(providers, provider) ||
+    !['select', 'clear'].includes(action) ||
+    own(message, 'token') !== own(message, 'index') ||
+    (token !== undefined &&
+      (typeof token !== 'string' || !tokenPattern.test(token) || !Number.isInteger(index)))
+  )
+    fail('selection_invalid');
+  return inTabOrder(tabId, () => changeBulkItems(message, providers[provider]));
+}
+
+async function changeBulkItems({ tabId, provider, action, token, index, url }, adapter) {
+  const ctx = await activeBulkTab(tabId, provider);
+  if (ctx.url !== url) fail('principal_changed');
+  const storeKey = bulkKey(tabId);
+  const verifyTarget = async (proof) => {
+    await verify(ctx, adapter, proof);
+    if ((await activeBulkTab(tabId, provider)).url !== ctx.url) fail('principal_changed');
+  };
+  let proof, entry;
+  if (token !== undefined) {
+    proof = (await chrome.storage.session.get(storeKey).catch(storageError))[storeKey];
+    if (
+      proof?.token !== token ||
+      proof.url !== ctx.url ||
+      proof.action !== action ||
+      proof.expires <= Date.now()
+    )
+      fail('catalog_expired');
+    entry = proof.entries[index];
+    if (!entry) fail('selection_invalid');
+  } else {
+    // Clear for a single verified workspace does not need to enumerate its history.
+    const ids = action === 'clear' ? await adapter.principalIds(ctx) : null;
+    proof =
+      ids?.length === 1 && validOwner(ids[0])
+        ? { entries: [{ owner: ids[0], title: '' }], expires: Date.now() + TTL }
+        : await makeProof(ctx, adapter, true);
+    if (action === 'select' && proof.incomplete) fail('catalog_unavailable');
+    if (proof.entries.length > 1) {
+      await verifyTarget(proof);
+      await chrome.storage.session
+        .set({ [storeKey]: { ...proof, url: ctx.url, action } })
+        .catch(storageError);
+      return {
+        ok: true,
+        token: proof.token,
+        choices: proof.entries.map((row, index) => ({
+          index,
+          title: row.title || `Workspace ${index + 1}`,
+        })),
+      };
+    }
+    entry = proof.entries[0];
   }
+  const canonical = (id) => normalizedId(provider, 'conversation', id);
+  const items =
+    action === 'clear'
+      ? null
+      : [...new Map(entry.conversations.map(([id]) => [canonical(id), id])).values()];
+  await setBulkPageItems(provider, entry.owner, items, canonical, () => verifyTarget(proof));
+  if (token !== undefined) await chrome.storage.session.remove(storeKey).catch(() => {});
+  chrome.tabs
+    .sendMessage?.(tabId, { type: 'REFRESH_PAGE_SELECTION' }, { frameId: 0 })
+    .catch(() => {});
+  return { ok: true, count: items?.length ?? 0, title: entry.title || '' };
 }
 
 export function forgetPageTab(tabId) {
   const work = (queues.get(tabId) ?? Promise.resolve())
     .catch(() => {})
-    .then(() => chrome.storage.session.remove(proofKey(tabId)));
+    .then(() =>
+      Promise.all([
+        chrome.storage.session.remove(proofKey(tabId)),
+        chrome.storage.session.remove(bulkKey(tabId)),
+      ]),
+    );
   queues.set(tabId, work);
   work
     .catch(() => {})

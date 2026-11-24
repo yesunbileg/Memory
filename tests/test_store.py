@@ -191,11 +191,14 @@ def test_edit_marks_existing_source_stale_before_builder_runs(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         store.ingest(c, consent=True)
-        s = SegmentBuilder(store).build()[0]
+        builder = SegmentBuilder(store)
+        s = builder.build()[0]
         with store.connection:
             store.connection.execute(
                 "INSERT INTO source_map VALUES(?,?,?)", (s["id"], "source", s["revision"])
             )
+            store.save_outbound(s["id"], s["revision"], builder.render_outbound(s["id"]))
+            store.attest_source("source", s["id"], s["revision"])
         assert store.status()["sync_status"] == "up_to_date"
         c["messages"][0]["text"] = "edited before next build"
         store.ingest(c)

@@ -6,6 +6,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class ArchiveBusyError(RuntimeError):
+    pass
+
+
 @contextmanager
 def archive_lock(path: Path | str):
     """Hold the existing sync lock nonblockingly until the operation finishes.
@@ -21,7 +25,7 @@ def archive_lock(path: Path | str):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Another archive operation or sync worker is active") from exc
+            raise ArchiveBusyError("Another archive operation or sync worker is active") from exc
         try:
             yield
         finally:

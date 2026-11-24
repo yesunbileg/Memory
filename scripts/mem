@@ -3,4 +3,7 @@ set -eu
 
 launcher=$(realpath -- "$0")
 repo=$(dirname -- "$(dirname -- "$launcher")")
+if [ "${1:-}" = --background-sync ]; then
+    exec "$repo/.venv/bin/ai-memory" --db "$repo/data/conversations.sqlite" sync --automatic
+fi
 exec uv run --script "$repo/mem.py" "$@"

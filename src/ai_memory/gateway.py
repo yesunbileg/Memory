@@ -19,6 +19,7 @@ from .notebook import (
     _private_sdk_logging,
     valid_question,
 )
+from .privacy import redact_sensitive, snapshot_sha256
 from .publication import allowed_sources, observe_inventory
 from .segments import message_heading
 from .store import Store
@@ -34,7 +35,7 @@ def _error(code: str, message: str) -> dict:
     return {"error": {"code": code, "message": message}}
 
 
-def _citable_headings(store: Store, segment_id: str) -> dict[str, tuple[int, str, str]]:
+def _citation_index(store: Store, segment_id: str):
     """Index unambiguous message headings in the segment's original citation order."""
     messages = store.connection.execute(
         """SELECT m.id,m.conversation_id,m.sequence,m.role,m.kind,m.timestamp,m.text
@@ -52,13 +53,29 @@ def _citable_headings(store: Store, segment_id: str) -> dict[str, tuple[int, str
         for line in message["text"].splitlines():
             if line.startswith("### "):
                 headings.pop(line, None)
-    return headings
+    return headings, messages
+
+
+def _exact_passage(passage, index, snapshot):
+    headings, messages = index
+    quote = " ".join(passage.split())
+    if len(quote) < 24 or len(quote.split()) < 4 or snapshot.count(quote) != 1:
+        return None
+    for message in messages:
+        heading = message_heading(message)
+        if heading not in headings:
+            continue
+        body = " ".join(redact_sensitive(message["text"]).split())
+        if quote in body and f" {' '.join(heading.split())} {body} --- " in snapshot:
+            return headings[heading]
+    return None
 
 
 def _reference_sources(store: Store, references: list[dict], frozen=None) -> list[dict]:
     """Map passages to IDs only when their exact archive heading is verified."""
     result = []
     indexes = {}
+    snapshots = {}
     frozen = allowed_sources(store) if frozen is None else frozen
     for reference in references:
         source = {
@@ -69,10 +86,13 @@ def _reference_sources(store: Store, references: list[dict], frozen=None) -> lis
         mapping = frozen.get(source["source_id"])
         if not mapping:
             continue
-        source.update(segment_id=mapping["segment_id"], revision=mapping["source_revision"])
+        stale = not mapping["content_hash"] or mapping["source_revision"] != mapping["revision"]
+        source.update(
+            segment_id=mapping["segment_id"], revision=mapping["source_revision"], stale=stale
+        )
         # A stale source still gives historical evidence, but its local messages
         # may have changed since upload. Keep source-level attribution only.
-        if not mapping["content_hash"] or mapping["source_revision"] != mapping["revision"]:
+        if stale:
             result.append(source)
             continue
         passage = reference.get("cited_text")
@@ -81,12 +101,31 @@ def _reference_sources(store: Store, references: list[dict], frozen=None) -> lis
         segment_id = mapping["segment_id"]
         if lines:
             if segment_id not in indexes:
-                indexes[segment_id] = _citable_headings(store, segment_id)
-            headings = indexes[segment_id]
+                indexes[segment_id] = _citation_index(store, segment_id)
+            headings, _ = indexes[segment_id]
             for _, conversation_id, message_id in sorted(
                 headings[line] for line in lines if line in headings
             ):
                 verified.setdefault(conversation_id, []).append(message_id)
+            if (
+                not verified
+                and len(passage) >= 24
+                and not any(line.startswith("### ") for line in lines)
+            ):
+                if segment_id not in snapshots:
+                    raw = store.connection.execute(
+                        "SELECT snapshot FROM outbound_revisions WHERE segment_id=? AND revision=?",
+                        (segment_id, mapping["source_revision"]),
+                    ).fetchone()
+                    snapshots[segment_id] = (
+                        " " + " ".join(raw[0].decode("utf-8").split()) + " "
+                        if raw and snapshot_sha256(raw[0]) == mapping["sha256"]
+                        else ""
+                    )
+                match = _exact_passage(passage, indexes[segment_id], snapshots[segment_id])
+                if match:
+                    _, conversation_id, message_id = match
+                    verified[conversation_id] = [message_id]
         if verified:
             for conversation_id, message_ids in verified.items():
                 result.append(
@@ -197,12 +236,12 @@ class MemoryApplication:
 
     async def _retrieve(self, question, *, interactive=False):
         with Store(self.db_path, existing=True) as store:
-            sync_status = store.status()["sync_status"]
+            frozen = allowed_sources(store)
+            sync_status = store.status(sources=frozen)["sync_status"]
 
             def failed(code, message):
                 return {**_error(code, message), "sync_status": sync_status}
 
-            frozen = allowed_sources(store)
             async with self.notebook(store) as remote:
                 if not remote:
                     return failed("not_configured", "Configure a notebook with ai-memory init.")
@@ -212,7 +251,9 @@ class MemoryApplication:
                     )
                 try:
                     observe_inventory(store, await remote.list_sources())
-                    frozen = _still_allowed(frozen, allowed_sources(store))
+                    eligible = allowed_sources(store)
+                    frozen = _still_allowed(frozen, eligible)
+                    sync_status = store.status(sources=eligible)["sync_status"]
                     if not frozen:
                         return failed(
                             "no_synced_sources",
@@ -222,7 +263,9 @@ class MemoryApplication:
                     result = await query(question, source_ids=list(frozen))
                     answer = result.get("answer")
                     references = result.get("references")
-                    verified_scope = _still_allowed(frozen, allowed_sources(store))
+                    eligible = allowed_sources(store)
+                    verified_scope = _still_allowed(frozen, eligible)
+                    sync_status = store.status(sources=eligible)["sync_status"]
                     if (
                         not isinstance(answer, str)
                         or not isinstance(references, list)
@@ -295,6 +338,7 @@ SOURCE = _object(
         "source_id": STR,
         "segment_id": STR,
         "revision": INT,
+        "stale": {"type": "boolean"},
         "cited_text": {"type": ["string", "null"]},
         "citation_number": {"type": ["integer", "null"]},
         "conversation_id": STR,
@@ -315,6 +359,8 @@ STATUS_OUT = _object(
     {
         "notebook": {"type": "object"},
         "conversations": INT,
+        "ready_conversations": INT,
+        "pending_conversations": INT,
         "messages": INT,
         "sync_status": STR,
         "pending_jobs": INT,

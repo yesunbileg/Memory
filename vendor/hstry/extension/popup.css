@@ -293,6 +293,34 @@ code {
   border-top: 1px solid var(--line);
   font-size: 14px;
 }
+.bulk-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 12px;
+}
+.bulk-controls button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.bulk-controls .field.inline {
+  gap: 5px;
+  font-size: 12px;
+  min-width: 0;
+}
+#bulk-workspace {
+  max-width: 190px;
+  min-height: 28px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.bulk-status,
+#bulk-account {
+  flex-basis: 100%;
+  margin: 0;
+}
 @media (forced-colors: active) {
   .switch-track,
   .switch-track::after {

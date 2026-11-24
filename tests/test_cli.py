@@ -444,6 +444,25 @@ def test_all_chats_sync_does_not_change_archive_without_notebook_binding(tmp_pat
         assert not store.get_conversation(chat)["consent"]
 
 
+def test_automatic_sync_leaves_work_for_the_next_cycle_without_failing(tmp_path, monkeypatch, capsys):
+    from ai_memory.cli import main
+    from ai_memory.store import Store
+
+    async def sync(store, *, progress, all_chats, automatic):
+        assert automatic and not all_chats
+        return {
+            "completed": 1,
+            "status": {"sync_status": "pending", "unassigned_messages": 1},
+        }
+
+    monkeypatch.setattr("ai_memory.cli.sync_archive", sync)
+    db = tmp_path / "archive.sqlite"
+    with Store(db):
+        pass
+    assert main(["--db", str(db), "sync", "--automatic"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"]["sync_status"] == "pending"
+
+
 def test_all_chats_sync_does_not_change_archive_if_another_sync_holds_lock(tmp_path, capsys):
     from test_store import conversation
 

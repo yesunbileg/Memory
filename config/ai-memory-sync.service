@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync due AI Memory archive changes to NotebookLM
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mem --background-sync
+TimeoutStartSec=30min
+KillSignal=SIGINT
+UMask=0077

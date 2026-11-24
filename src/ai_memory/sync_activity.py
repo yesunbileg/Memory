@@ -73,6 +73,8 @@ def read_sync_activity(db_path):
         ):
             return None
         result = {"phase": phase, "started_at": started, "updated_at": updated}
+        if data.get("automatic") is True:
+            result["automatic"] = True
         if segment is not None:
             result["segment_id"] = segment
         return result
@@ -81,7 +83,7 @@ def read_sync_activity(db_path):
 
 
 @contextmanager
-def sync_activity(db_path):
+def sync_activity(db_path, *, automatic=False):
     """Publish advisory phase updates while the caller holds the archive lock."""
     path = _path(db_path)
     pid = os.getpid()
@@ -97,6 +99,7 @@ def sync_activity(db_path):
             "process_start": process_start,
             "started_at": started,
             "updated_at": time.time(),
+            "automatic": automatic,
         }
         try:
             write_private_text(path, json.dumps(payload))

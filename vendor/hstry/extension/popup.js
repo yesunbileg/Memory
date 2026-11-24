@@ -11,6 +11,7 @@ import {
 } from './ui.js';
 import { parseConnectionFile, connectionPresentation } from './connection-file.js';
 import { nonempty, scopeFor } from './popup-scope.js';
+import './page-picker-routes.js';
 
 const el = (id) => document.getElementById(id);
 const providers = Object.keys(PROVIDERS);
@@ -104,7 +105,7 @@ function summary() {
     ? 'Connect your archive in Settings to sync.'
     : providers.some((p) => nonempty(scopes[p]))
       ? 'Enable the selected provider in Settings to sync.'
-      : 'Check a chat or project on its website to sync it.';
+      : 'Select all chats below or use the sidebar checkboxes.';
   const bar = el('sync-progress');
   bar.hidden = !progress && !syncPending;
   if (progress?.max) {
@@ -117,6 +118,7 @@ function summary() {
     progress?.text ||
     captureOutcome(runs, settings.providers, syncSince) ||
     notice;
+  renderBulk();
 }
 async function readStorage() {
   const ticket = ++storageTicket;
@@ -269,6 +271,11 @@ async function pair(read) {
 // on popup open never starts discovery, enables a provider or changes a saved item.
 let modePage = null,
   modeBusy = false;
+let bulkPage = null,
+  bulkBusy = false,
+  bulkChoice = null,
+  bulkResult = null,
+  bulkNotice = '';
 async function activePage() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!Number.isInteger(tab?.id) || tab.id < 0 || !tab.url) return null;
@@ -276,8 +283,123 @@ async function activePage() {
   const provider = providers.find(
     (p) => url.protocol === 'https:' && url.host === PROVIDERS[p].site,
   );
-  return provider ? { tabId: tab.id, provider } : null;
+  return provider ? { tabId: tab.id, provider, url: tab.url } : null;
 }
+
+const sameTab = (a, b) => a?.tabId === b?.tabId && a?.url === b?.url;
+function setBulkPage(page) {
+  const next = globalThis.aiMemoryPageRoutes.pageContext(page?.url) ? page : null;
+  if (!sameTab(next, bulkPage)) {
+    bulkChoice = null;
+    bulkResult = null;
+    bulkNotice = '';
+  }
+  bulkPage = next;
+  renderBulk();
+}
+
+function renderBulk() {
+  el('bulk-controls').hidden = !bulkPage;
+  if (!bulkPage) return;
+  const { provider } = bulkPage;
+  const title = bulkResult?.title;
+  el('bulk-account').textContent =
+    title && title !== names[provider] ? `${names[provider]} · ${title}` : names[provider];
+  const workspace = el('bulk-workspace');
+  el('bulk-workspace-field').hidden = !bulkChoice;
+  workspace.disabled = bulkBusy;
+  el('bulk-select').disabled = bulkBusy || (bulkChoice?.action === 'select' && !workspace.value);
+  el('bulk-clear').disabled = bulkBusy || (bulkChoice?.action === 'clear' && !workspace.value);
+  el('bulk-status').textContent = bulkNotice;
+  el('bulk-enable').hidden = !bulkResult?.count || settings.providers[provider];
+  el('bulk-enable').disabled = bulkBusy;
+  el('bulk-enable').textContent = `Enable ${names[provider]} sync`;
+}
+
+async function changeBulk(action) {
+  if (!bulkPage || bulkBusy) return;
+  const page = bulkPage;
+  const { tabId, provider } = page;
+  const workspace = el('bulk-workspace');
+  const choice =
+    bulkChoice?.action === action && workspace.value
+      ? { token: bulkChoice.token, index: Number(workspace.value) }
+      : {};
+  bulkBusy = true;
+  bulkChoice = null;
+  bulkNotice = action === 'select' ? 'Checking available chats…' : 'Checking the workspace…';
+  renderBulk();
+  try {
+    const current = await activePage();
+    if (!sameTab(page, current)) return setBulkPage(current);
+    const reply = await send({
+      type: 'changeBulkSelection',
+      tabId,
+      provider,
+      url: page.url,
+      action,
+      ...choice,
+    });
+    const latest = await activePage();
+    if (!sameTab(page, latest)) return setBulkPage(latest);
+    if (!reply?.ok) {
+      bulkNotice = reply?.error || 'Could not update the selection. Try again.';
+    } else if (Array.isArray(reply.choices)) {
+      bulkChoice = { token: reply.token, action };
+      const placeholder = create('option', '', 'Choose a workspace');
+      placeholder.value = '';
+      workspace.replaceChildren(
+        placeholder,
+        ...reply.choices.map(({ title, index }) => {
+          const option = create('option', '', title);
+          option.value = String(index);
+          return option;
+        }),
+      );
+      workspace.value = '';
+      bulkNotice =
+        action === 'select'
+          ? 'Choose a workspace, then select all chats.'
+          : 'Choose a workspace, then clear its selection.';
+    } else {
+      bulkResult = reply;
+      bulkNotice =
+        action === 'clear'
+          ? 'Selection cleared.'
+          : `${reply.count} ${reply.count === 1 ? 'chat' : 'chats'} selected.`;
+      await readStorage();
+    }
+  } catch {
+    bulkNotice = 'Could not update the selection. Reopen AI Memory and retry.';
+  } finally {
+    bulkBusy = false;
+    renderBulk();
+  }
+}
+
+el('bulk-select').addEventListener('click', () => changeBulk('select'));
+el('bulk-clear').addEventListener('click', () => changeBulk('clear'));
+el('bulk-workspace').addEventListener('change', renderBulk);
+el('bulk-enable').addEventListener('click', async () => {
+  if (!bulkPage || bulkBusy) return;
+  const page = bulkPage;
+  bulkBusy = true;
+  renderBulk();
+  try {
+    const current = await activePage();
+    if (!sameTab(page, current)) return setBulkPage(current);
+    const ok = await writeSettings((prev) => ({
+      ...prev,
+      providers: { ...prev.providers, [page.provider]: true },
+    }));
+    if (!ok) throw Error();
+  } catch {
+    bulkNotice = 'Could not enable sync. Try again.';
+  } finally {
+    bulkBusy = false;
+    renderBulk();
+  }
+});
 
 async function updateListMode(toggle = false) {
   if (modeBusy || (toggle && !modePage)) return;
@@ -341,6 +463,7 @@ async function updateListMode(toggle = false) {
   el('mode-site').textContent = page ? names[page.provider] : 'Current tab';
   el('mode-status').textContent = hint;
   modeBusy = false;
+  setBulkPage(page);
 }
 el('list-mode').addEventListener('click', () => updateListMode(true));
 

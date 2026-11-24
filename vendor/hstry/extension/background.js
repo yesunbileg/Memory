@@ -1,7 +1,7 @@
 // Poll selected AI conversations and save them to the local AI Memory receiver.
 
 import { scopeFor, nonempty } from './popup-scope.js';
-import { pageSelection, forgetPageTab } from './page-selection.js';
+import { bulkPageSelection, pageSelection, forgetPageTab } from './page-selection.js';
 import { NotLoggedInError, RateLimitedError } from './lib/common.js';
 import { PROVIDERS } from './providers/index.js';
 import { normalizeSettings, updateLocalSettings } from './ui.js';
@@ -780,6 +780,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       error: 'Open the extension popup to perform this action.',
     });
     return false;
+  }
+  if (message?.type === 'changeBulkSelection') {
+    bulkPageSelection(message, PROVIDERS).then(sendResponse, (err) => {
+      const code = Object.hasOwn(pageErrors, err?.code) ? err.code : 'catalog_unavailable';
+      sendResponse({ ok: false, code, error: pageErrors[code] });
+    });
+    return true;
   }
   // Hold the channel only through the bounded local authentication check.
   // Once a run starts, report progress through storage instead of waiting for

@@ -102,7 +102,7 @@ async function popup({
   return { get, data, calls, queries, messages, fixture, changed };
 }
 
-test('opening the popup is passive; its only selection control changes list mode on the active page', async () => {
+test('opening the popup is passive and list mode changes only on the active page', async () => {
   const { get, data, calls, queries, messages } = await popup();
   const toggle = get('list-mode');
   assert.ok(toggle, 'the toolbar exposes a list mode control');
@@ -132,6 +132,57 @@ test('opening the popup is passive; its only selection control changes list mode
     'toggling must not fetch a catalog or sync',
   );
   assert.deepEqual(data, {}, 'mode is not a persistent setting or a saved item');
+});
+
+test('selecting all chats works with list mode off and reports the saved count', async () => {
+  const { get, calls, messages } = await popup({
+    tab: { id: 23, url: 'https://claude.ai/new' },
+    workerReply: (m) =>
+      m.type === 'changeBulkSelection' ? { ok: true, title: 'Personal', count: 42 } : { ok: false },
+  });
+  assert.equal(get('bulk-controls').hidden, false);
+  assert.equal(get('list-mode').getAttribute('aria-pressed'), 'false');
+  await get('bulk-select').fire('click');
+  assert.deepEqual(calls.at(-1), {
+    type: 'changeBulkSelection',
+    tabId: 23,
+    provider: 'claude',
+    url: 'https://claude.ai/new',
+    action: 'select',
+  });
+  assert.equal(get('bulk-account').textContent, 'Claude · Personal');
+  assert.equal(get('bulk-status').textContent, '42 chats selected.');
+  assert.equal(get('bulk-enable').hidden, false);
+  assert.equal(messages.length, 1);
+  assert.ok(!calls.some((m) => m.type === 'syncNow'));
+});
+
+test('multiple workspaces require an explicit choice before bulk selection', async () => {
+  const { get, calls } = await popup({
+    tab: { id: 24, url: 'https://claude.ai/new' },
+    workerReply: (m) =>
+      m.type !== 'changeBulkSelection'
+        ? { ok: false }
+        : m.token
+          ? { ok: true, title: 'Team', count: 8 }
+          : {
+              ok: true,
+              token: 'fixture-token',
+              choices: [
+                { title: 'Personal', index: 0 },
+                { title: 'Team', index: 1 },
+              ],
+            },
+  });
+  await get('bulk-select').fire('click');
+  assert.equal(get('bulk-workspace-field').hidden, false);
+  assert.equal(get('bulk-select').disabled, true);
+  get('bulk-workspace').value = '1';
+  get('bulk-workspace').fire('change');
+  await get('bulk-select').fire('click');
+  assert.equal(calls.at(-1).token, 'fixture-token');
+  assert.equal(calls.at(-1).index, 1);
+  assert.equal(get('bulk-status').textContent, '8 chats selected.');
 });
 
 test('reopening shows the document’s actual mode; switching active tabs never toggles the other page by accident', async () => {
