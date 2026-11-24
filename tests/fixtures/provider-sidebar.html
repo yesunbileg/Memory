@@ -53,9 +53,22 @@
     window.replaceSelectedRow = () => document.querySelector('#individual')
       .replaceWith(row('individual', standalone, 'Renamed standalone chat'));
   } else if (location.hostname === 'claude.ai') {
+    const nav = document.querySelector('aside > nav');
+    const drawer = document.createElement('div');
+    drawer.id = 'frame-peek-popover';
+    drawer.dataset.testid = 'sidebar';
+    drawer.setAttribute('role', 'dialog');
+    drawer.setAttribute('aria-label', 'Sidebar');
+    drawer.setAttribute('aria-modal', 'true');
+    nav.before(drawer);
+    drawer.append(nav);
     collapsed('Claude', '/project/77777777-7777-4777-8777-777777777777');
     historyRows.append(row('individual', '/chat/44444444-4444-4444-8444-444444444444', 'Claude chat'),
       row('spare', '/chat/' + spare, 'Other chat'));
+    const unrelatedDialog = document.createElement('div');
+    unrelatedDialog.setAttribute('role', 'dialog');
+    unrelatedDialog.append(row('dialog-chat', '/chat/44444444-4444-4444-8444-444444444444', 'Search result'));
+    drawer.append(unrelatedDialog);
   } else if (location.hostname === 'gemini.google.com') {
     historyRows.append(row('individual', '/u/0/app/abcdef123456abcd', 'Gemini chat'),
       row('spare', '/u/0/app/ffffffffffffffff', 'Other chat'));

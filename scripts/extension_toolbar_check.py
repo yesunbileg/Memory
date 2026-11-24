@@ -425,6 +425,7 @@ async def exercise(context, worker, driver, archive_id, db):
         await expect(individual).to_be_visible()
         projects = [CLAUDE_PROJECT] if provider == "claude" else []
         if projects:
+            await expect(site.locator("#dialog-chat " + BOX)).to_have_count(0)
             await click_row(box(site, CLAUDE_PROJECT, "project"))
             await expect_scope(worker, provider, projects)
             await expect(site.locator("#project ul a")).to_have_count(0)

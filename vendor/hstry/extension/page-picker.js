@@ -10,8 +10,13 @@
   const group =
     'section,details,[role="group"],[role="treeitem"],[data-sidebar-section],[data-section]';
   const modal = 'dialog[open],[role="dialog"],[aria-modal="true"]';
-  const outside =
-    'main,article,[role="main"],[data-message-author-role],user-query,model-response,form,header,footer,dialog,[role="dialog"],[role="menu"],[contenteditable="true"]';
+  const outsideContent =
+    'main,article,[role="main"],[data-message-author-role],user-query,model-response,form,header,footer,dialog,[role="menu"],[contenteditable="true"]';
+  const claudeCompactSidebar =
+    'aside > #frame-peek-popover[data-testid="sidebar"][aria-modal="true"]';
+  const outside = outsideContent + ',[role="dialog"]';
+  // Claude uses a modal dialog for its navigation drawer in a narrow window.
+  const claudeOutside = outsideContent + ',[role="dialog"]:not(' + claudeCompactSidebar + ')';
   const hidden = '[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]';
   const privacyAttrs = ['data-locked', 'data-is-locked', 'data-archived', 'data-is-archived'];
   const marked = privacyAttrs
@@ -76,7 +81,7 @@
     const r = el.getBoundingClientRect();
     return r.height > 0 && r.width > 0 && r.right > 0 && r.left < window.innerWidth;
   }
-  function label(el) {
+  function label(el, excluded) {
     const id = el.getAttribute('aria-labelledby');
     return (
       el.getAttribute('aria-label') ||
@@ -85,7 +90,7 @@
           .split(/\s+/)
           .map((i) => {
             const node = document.getElementById(i);
-            return node && !node.closest(outside) ? node.textContent : '';
+            return node && !node.closest(excluded) ? node.textContent : '';
           })
           .join(' ')) ||
       el.getAttribute('title') ||
@@ -128,17 +133,18 @@
       areas = new Map();
     const selector = selectors[s.provider],
       current = routes.rowFromHref(href, href);
+    const excluded = s.provider === 'claude' ? claudeOutside : outside;
     // Query navigation candidates, not messages or titles in the conversation.
     // Excluding main/article here also keeps streamed message links out of scans.
     const query =
-      ':is(' + selector + ',' + heads + '):not(:is(' + outside + '),:is(' + outside + ') *)';
+      ':is(' + selector + ',' + heads + '):not(:is(' + excluded + '),:is(' + excluded + ') *)';
     for (const el of document.querySelectorAll(query)) {
       if (!visible(el) || !geometrySidebar(el)) continue;
       let item;
       if (!el.matches(selector)) {
         const root = el.closest(nav);
         if (!root) continue;
-        const name = label(el);
+        const name = label(el, excluded);
         const locked = privateLabel.test(name);
         const closed = el.getAttribute('aria-expanded') === 'false';
         if (s.provider === 'chatgpt' && recentsHeading.test(name)) {
@@ -201,6 +207,7 @@
     return c;
   }
   function paint(s) {
+    const excluded = s.provider === 'claude' ? claudeOutside : outside;
     for (const [row, c] of s.controls) {
       const i = s.rows.get(row);
       if (
@@ -222,7 +229,8 @@
       c.box.checked = state.checked;
       c.box.indeterminate = !!state.inherited && !state.checked;
       c.box.setAttribute('aria-busy', String(s.pending.has(k)));
-      const title = label(row) || (i.kind === 'project' ? 'Untitled project' : 'Untitled chat');
+      const title =
+        label(row, excluded) || (i.kind === 'project' ? 'Untitled project' : 'Untitled chat');
       const ident =
         i.kind === 'recents'
           ? 'All Recent chats'
