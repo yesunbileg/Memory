@@ -121,6 +121,10 @@ Use the same `NOTEBOOKLM_HOME` for login, sync, MCP and the demo. If your archiv
 
 Create a new empty notebook specifically for the test and copy its ID. The live demo requires an empty local output directory, generates its own fixture, checks the selected notebook is empty, then syncs its Markdown and asks a source-filtered question. It never discovers a notebook by name or adopts an existing archive. It retains the demo notebook so you can inspect it. Errors exit nonzero. A successful request still needs answer-quality review; offline tests cannot establish Google's retrieval quality.
 
+## Experimental incremental Google Docs sync
+
+An optional path can publish approved Memory segments through Google Docs and send later text edits instead of re-uploading each full Markdown segment. The first migration is still a full upload. This uses the signed-in Docs editor's **private, undocumented web save endpoint**, not the official Google Docs REST API, and may break when Google changes its editor. It is not enabled by default. Review the [Mongolian setup, byte-count scope and recovery limitations](docs/google-docs-incremental-sync.mn.md) before enabling it.
+
 ## MCP with Codex and OpenCode
 
 Codex uses **one local plugin** for its Stop hook and the memory MCP server. Nothing is published to a plugin directory. Follow the [local installation instructions](docs/local-hooks.md) on the computer where Codex runs. OpenCode uses its own session-idle integration and [MCP configuration](docs/agent-instructions.md). Both capture only the session that fired the event, into the initialized archive. They do not upload or approve anything. Use the explicit import commands above for older sessions.

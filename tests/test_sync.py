@@ -1300,6 +1300,7 @@ def test_snapshot_is_private_before_fsync_in_existing_public_directory(tmp_path,
 
     output = tmp_path / "public"
     output.mkdir(mode=0o755)
+    output.chmod(0o755)  # Fixture must be public even with a restrictive caller umask.
     observed_modes = []
     real_fsync = os.fsync
 
@@ -1394,26 +1395,41 @@ async def test_sync_activity_is_visible_across_readers_and_cleared_on_cancel(tmp
 
     class SlowRemote(Remote):
         async def upload(self, path, title):
+            source_id = await super().upload(path, title)
             started.set()
             await release.wait()
-            return await super().upload(path, title)
+            return source_id
+
+        async def get_source_text(self, source_id):
+            raise AssertionError("A stopped sync should resume using the recorded provider ID")
 
     path = tmp_path / "db"
     with Store(path) as store:
         store.ingest(conversation(), consent=True)
-        task = asyncio.create_task(
-            SyncEngine(store, SegmentBuilder(store), SlowRemote(), tmp_path / "md").run_once()
-        )
-        await asyncio.wait_for(started.wait(), 5)
-        state = read_sync_activity(path)
-        assert state is not None
-        assert state["phase"] == "upload"
-        assert state["segment_id"] == "SEG-001"
-        assert state["started_at"] <= state["updated_at"]
-        task.cancel()
+        remote = SlowRemote()
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        task = asyncio.create_task(engine.run_once())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            state = read_sync_activity(path)
+            assert state is not None
+            assert state["phase"] == "upload"
+            assert state["segment_id"] == "SEG-001"
+            assert state["started_at"] <= state["updated_at"]
+            task.cancel()
+            await asyncio.sleep(0)
+            assert read_sync_activity(path) == state
+        finally:
+            release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, 5)
         assert read_sync_activity(path) is None
+        job = store.connection.execute("SELECT stage,new_source_id FROM sync_jobs").fetchone()
+        assert tuple(job) == ("registered", next(iter(remote.sources)))
+        assert [op[0] for op in remote.operations] == ["upload"]
+        assert (await engine.run_once())["completed"] == 1
+        assert [op[0] for op in remote.operations] == ["upload", "ready"]
+        assert store.status()["sync_status"] == "up_to_date"
 
         # A stale record left by a crash never claims that a stopped worker runs.
         record = {

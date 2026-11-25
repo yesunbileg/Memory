@@ -106,29 +106,51 @@ class FlowCanvas(ModalScreen[str]):
         total = self.counts.get("total", 0)
         done = self.counts.get("done", 0)
         syncable = self.counts.get("syncable", 0)
+        published = f"{done:,}/{syncable:,} чат нийтлэгдсэн"
+        if "docs_total" in self.counts:
+            indexed = self.counts.get("docs_indexed", 0)
+            published += f"\n{indexed:,}/{self.counts['docs_total']:,} Docs индексжсэн"
         return {
             "archive": f"{total:,} чат",
-            "sync": f"{self.notebook_label}\n{done:,}/{syncable:,} чат шинэчлэгдсэн",
+            "sync": f"{self.notebook_label}\n{published}",
         }
+
+    def sync_copy(self) -> tuple[str, str, str]:
+        if "docs_total" in self.counts:
+            return (
+                "Веб + локал → SQLite → Google Docs → NotebookLM → Асуух",
+                "Docs → NotebookLM",
+                "/sync-all Docs-д анх бүтнээр нь бичнэ. Дараа нь нэмсэн, зассан, устгасан "
+                "хэсгийг илгээнэ. NotebookLM холбосон Docs-ийг шинэчилнэ.",
+            )
+        return (
+            "Веб + локал → SQLite → NotebookLM → Асуух",
+            "NotebookLM sync",
+            "/sync-all өөрчлөгдсөн Markdown хэсгүүдийг NotebookLM-д бүтнээр нь байршуулна.",
+        )
 
     def update_status(self, counts: dict, notebook_label: str) -> None:
         if (counts, notebook_label) == (self.counts, self.notebook_label):
             return
+        changed_mode = ("docs_total" in counts) != ("docs_total" in self.counts)
         self.counts, self.notebook_label = counts, notebook_label
+        if changed_mode:
+            overview, title, description = self.sync_copy()
+            self.query_one("#flow-overview", Static).update(overview)
+            self.query_one(".sync .flow-card-title", Label).update(title)
+            self.query_one(".sync .flow-card-copy", Static).update(description)
         for kind, status in self.status_labels().items():
             for widget in self.query(f".{kind} .flow-card-status").results(Static):
                 widget.update(status)
 
     def compose(self) -> ComposeResult:
         labels = self.status_labels()
+        overview, sync_title, sync_description = self.sync_copy()
         with Vertical(id="flow-panel"):
             with Horizontal(id="flow-header"):
                 yield Label("Ажлын урсгал", id="flow-title")
                 yield Button("Esc", id="flow-close", compact=True, tooltip="Урсгалаас буцах")
-            yield Static(
-                "Веб + локал → Архив → NotebookLM → Асуух",
-                id="flow-overview",
-            )
+            yield Static(overview, id="flow-overview")
             with VerticalScroll(id="flow-scroll"):
                 with Horizontal(id="flow-map"):
                     with Vertical(id="flow-inputs"):
@@ -153,8 +175,8 @@ class FlowCanvas(ModalScreen[str]):
                     )
                     yield Static("→", classes="flow-map-edge flow-forward")
                     yield FlowCard(
-                        "NotebookLM sync",
-                        "/sync-all архивын бүх чатын өөрчлөлтийг илгээнэ.",
+                        sync_title,
+                        sync_description,
                         kind="sync",
                         status=labels["sync"],
                         action=("sync-all", "/sync-all"),

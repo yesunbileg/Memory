@@ -41,6 +41,39 @@ async def test_status_counts_current_chats_and_does_not_treat_empty_as_current(t
         assert status["pending_conversations"] == 2
 
 
+async def test_shared_source_refresh_only_counts_changed_chats(tmp_path):
+    from ai_memory.segments import SegmentBuilder
+    from ai_memory.sync import SyncEngine
+
+    with Store(tmp_path / "archive.sqlite") as store:
+        first = conversation()
+        edited = store.ingest(first, consent=True)
+        unchanged = store.ingest(conversation(external_id="unchanged"), consent=True)
+        builder = SegmentBuilder(store)
+        engine = SyncEngine(store, builder, Remote(), tmp_path / "md")
+        assert (await engine.run_once())["completed"] == 1
+
+        first["messages"][0]["text"] = "Updated message"
+        store.ingest(first)
+        new = store.ingest(conversation(external_id="new"), consent=True)
+        backend = Backend(store.path)
+        for _ in range(2):  # Both the dirty segment and its rebuilt revision.
+            view = backend.snapshot()
+            assert view["status"]["pending_segments"] == 1
+            assert view["status"]["ready_conversations"] == 1
+            assert view["status"]["pending_conversations"] == 2
+            assert {chat["id"]: chat["nb"] for chat in view["chats"]} == {
+                edited: "pending",
+                unchanged: "done",
+                new: "pending",
+            }
+            assert store.status()["pending_conversations"] == 2
+            builder.build()
+
+        assert (await engine.run_once())["completed"] == 1
+        assert backend.snapshot()["status"]["pending_conversations"] == 0
+
+
 async def test_auto_sync_detects_new_chats_edits_and_retry_deadlines(tmp_path, monkeypatch):
     remote = Remote()
 

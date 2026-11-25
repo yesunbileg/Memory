@@ -36,6 +36,15 @@ SAFE_FAILURES = frozenset(
         "ConnectionError",
         "TimeoutError",
         "CapacityError",
+        "docs_web_unavailable",
+        "docs_web_brave_required",
+        "docs_web_auth_required",
+        "docs_web_uncertain",
+        "docs_web_not_sent",
+        "docs_web_conflict",
+        "docs_web_create_uncertain",
+        "docs_web_title_unconfirmed",
+        "docs_web_link_uncertain",
     }
 )
 

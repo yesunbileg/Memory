@@ -34,6 +34,7 @@ _TIMEOUTS = {
     "ask": 420,
     "check": 90,
     "login": 135,
+    "docs-connect": 90,
     "setup": 165,
     **dict.fromkeys(_SYNC_OPERATIONS, 1800),
 }
@@ -92,6 +93,7 @@ class Backend:
         )
         default = self.repo / "data" / "conversations.sqlite"
         self.db = Path(db or os.environ.get("AI_MEMORY_DB") or default).expanduser().resolve()
+        self._coverage_cache = {}
         _use_repo(self.repo)
 
     @contextmanager
@@ -144,7 +146,7 @@ class Backend:
         return view
 
     def snapshot(self) -> dict:
-        from ai_memory.publication import allowed_sources, current_segments
+        from ai_memory.publication import allowed_sources, published_message_counts
         from ai_memory.sync_activity import read_sync_activity
 
         with self._archive() as (conn, version):
@@ -152,8 +154,10 @@ class Backend:
             sync_activity = read_sync_activity(self.db)
             if version == 2:
                 sources = allowed_sources(view)
-                status = view.status(sources=sources)
-                current = current_segments(sources)
+                published = published_message_counts(
+                    view, sources, comparison_cache=self._coverage_cache
+                )
+                status = view.status(sources=sources, published=published)
             else:
                 status = {
                     "notebook_configured": bool(view.get_setting("notebook_id")),
@@ -164,9 +168,9 @@ class Backend:
                     "sources": conn.execute("SELECT count(*) FROM source_map").fetchone()[0],
                     "schema_upgrade_required": True,
                 }
-                current = set()
+                published = {}
             active_segment = sync_activity.get("segment_id") if sync_activity else None
-            chats = self._chats(conn, current, active_segment)
+            chats = self._chats(conn, published, active_segment)
             status["conversations"] = len(chats)
             status["messages"] = sum(chat["message_count"] for chat in chats)
             status["unapproved_conversations"] = sum(not chat["approved"] for chat in chats)
@@ -215,18 +219,12 @@ class Backend:
         return False
 
     @staticmethod
-    def _chats(conn, current: set[str], active_segment: str | None = None) -> list[dict]:
+    def _chats(conn, published: dict[str, int], active_segment: str | None = None) -> list[dict]:
         from ai_memory.diagnostics import SAFE_FAILURES
 
-        # A conversation is current only if every stored message is covered by a
-        # currently eligible, ready, attested revision of its segment.
-        marks = ",".join("?" for _ in current) or "NULL"
-        query = f"""
-            WITH coverage AS (
-                SELECT m.conversation_id,count(*) AS total,sum(EXISTS(
-                    SELECT 1 FROM segment_messages sm WHERE sm.message_id=m.id
-                    AND sm.segment_id IN ({marks})
-                )) AS published FROM messages m GROUP BY m.conversation_id
+        query = """
+            WITH message_totals AS (
+                SELECT conversation_id, count(*) AS total FROM messages GROUP BY conversation_id
             ), errors AS (
                 SELECT m.conversation_id, MIN(COALESCE(j.error,'remote_missing')) AS reason
                 FROM sync_jobs j JOIN segments s ON s.id=j.segment_id
@@ -239,8 +237,7 @@ class Backend:
                 ) GROUP BY m.conversation_id
             )
             SELECT c.id,c.platform,c.account,c.title,c.project,c.created_at,c.updated_at,
-                c.consent,c.revision,COALESCE(coverage.total,0) AS total,
-                COALESCE(coverage.published,0) AS published,errors.reason,
+                c.consent,c.revision,COALESCE(message_totals.total,0) AS total,errors.reason,
                 EXISTS(
                     SELECT 1 FROM messages active_message
                     JOIN segment_messages active_assignment ON active_assignment.message_id=active_message.id
@@ -248,23 +245,23 @@ class Backend:
                     WHERE active_message.conversation_id=c.id AND active_assignment.segment_id=?
                     AND active_segment.state!='retired'
                 ) AS running
-            FROM conversations c LEFT JOIN coverage ON coverage.conversation_id=c.id
+            FROM conversations c LEFT JOIN message_totals ON message_totals.conversation_id=c.id
             LEFT JOIN errors ON errors.conversation_id=c.id
         """
         chats = []
-        for row in conn.execute(query, (*sorted(current), active_segment)):
-            total, published = row["total"], row["published"]
+        for row in conn.execute(query, (active_segment,)):
+            total, covered = row["total"], published.get(row["id"], 0)
             approved = bool(row["consent"])
             reason = row["reason"] or ""
             if not approved:
                 nb = "none"
             elif row["running"]:
                 nb = "running"
-            elif total and total == published:
+            elif total and total == covered:
                 nb = "done"
             elif reason:
                 nb = "failed"
-            elif published:
+            elif covered:
                 nb = "partial"
             else:
                 nb = "pending"
@@ -284,11 +281,11 @@ class Backend:
                     "local": True,
                     "approved": approved,
                     "nb": nb,
-                    "parts": (published, total),
+                    "parts": (covered, total),
                     "error": (reason if reason in SAFE_FAILURES else "operation_failed")
                     if nb == "failed"
                     else "",
-                    "prog": published / total if total else 0.0,
+                    "prog": covered / total if total else 0.0,
                     "message_count": total,
                 }
             )
@@ -537,14 +534,18 @@ class Backend:
                 "AI Memory-ийн Python үйлдлийг эхлүүлж чадсангүй.",
                 code="backend_unavailable",
             ) from None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TIMEOUTS[operation]
         try:
-            async with asyncio.timeout(_TIMEOUTS[operation]):
+            async with asyncio.timeout_at(deadline):
                 if operation in _SYNC_OPERATIONS:
                     output = await self._sync_output(proc, on_progress)
                 else:
                     output, _ = await proc.communicate(payload)
         except (asyncio.CancelledError, TimeoutError) as error:
-            await self._stop(proc)
+            # A sync may be finishing the upload and persisting its source ID.
+            grace = max(2.0, deadline - loop.time()) if operation in _SYNC_OPERATIONS else 2.0
+            await self._stop(proc, grace=grace)
             if isinstance(error, asyncio.CancelledError):
                 raise
             raise BackendError("AI Memory-ийн үйлдлийн хугацаа хэтэрлээ.", code="timeout") from None
@@ -585,13 +586,13 @@ class Backend:
         return output
 
     @staticmethod
-    async def _stop(proc) -> None:
+    async def _stop(proc, *, grace: float) -> None:
         if proc.returncode is not None:
             return
         with suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGINT)
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=2)
+            await asyncio.wait_for(proc.communicate(), timeout=grace)
         except TimeoutError:
             with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -605,7 +606,7 @@ def _worker(repo: str, db: str, operation: str) -> int:
 
     if operation not in _TIMEOUTS:
         return 2
-    args = ["--db", db, operation]
+    args = ["--db", db, "docs-web-enable" if operation == "docs-connect" else operation]
     if operation in _SYNC_OPERATIONS:
         args[-1] = "sync"
         if operation == "sync-all":

@@ -213,14 +213,15 @@ COMMANDS = [
     Cmd("codex", "Codex чатууд", "Codex-ийн чатуудын tab", "Provider"),
     Cmd("opencode", "OpenCode чатууд", "OpenCode-ийн чатуудын tab", "Provider"),
     Cmd("provider", "Provider сонгох", "Архивын шүүлтүүр", "Provider", ("providers",)),
-    Cmd("connect", "Холболт", "Receiver, extension, NotebookLM", "Холболт", ("status",)),
+    Cmd("connect", "Холболт", "Extension, Google Docs, NotebookLM", "Холболт", ("status",)),
     Cmd("setup", "NotebookLM тохируулах", "Notebook үүсгэх эсвэл бэлэн notebook холбох", "Холболт"),
     Cmd("login", "NotebookLM-д нэвтрэх", "Brave-д нэвтэрсэн Google аккаунтаар холбох", "Холболт"),
+    Cmd("docs-connect", "Google Docs холбох", "Brave-ийн Docs нэвтрэлтийг ашиглах", "Холболт"),
     Cmd("check", "Холболт шалгах", "Алхам алхмаар шалгана", "Холболт"),
     Cmd("flow", "Ажлын урсгал", "Архиваас NotebookLM хүрэх урсгал", "Санах ой"),
     Cmd(
         "sync-all",
-        "Бүх чатыг NotebookLM руу sync хийх",
+        "Архивын өөрчлөлтийг sync хийх",
         "Локал архивын бүх чатын өөрчлөлтийг NotebookLM руу илгээнэ",
         "Sync",
         ("syns-all",),
@@ -722,6 +723,7 @@ class NotebookDialog(ModalScreen[str]):
 
     ACTIONS = (
         ("login", "Нэвтрэх", True),
+        ("docs-connect", "Docs холбох", True),
         ("check", "Шалгах", True),
         ("flow", "Урсгал", True),
         ("create", "Notebook үүсгэх", False),
@@ -2776,6 +2778,15 @@ class Mem(App):
             rows.append(tx("Шинэ notebook үүсгэх эсвэл бэлэн notebook-ийн линкийг оруулна.", TEXT))
         if error := status.get("error"):
             rows.append(tx(error.get("message", ""), YELLOW))
+        if connected:
+            docs = self.archive_status.get("google_docs")
+            rows.append(Text(""))
+            rows.append(tx("Google Docs", TEXT, True))
+            if docs is not None:
+                rows.append(
+                    tx(f"Docs sync идэвхтэй · {docs['indexed_parts']} Docs индексжсэн", GREEN)
+                )
+            rows.append(tx("Brave-д Google Docs-д нэвтэрч, Docs холбох товчийг дарна.", MUTED))
         if self.sync_activity:
             rows.append(tx(sync_phase_text(self.sync_activity), BLUE))
         rows += [
@@ -2813,7 +2824,10 @@ class Mem(App):
         self.dialog(NotebookForm(mode, account), submitted)
 
     def flow_counts(self) -> dict[str, int]:
-        return self.stats(all_chats=True)
+        counts = self.stats(all_chats=True)
+        if (docs := self.archive_status.get("google_docs")) is not None:
+            counts.update(docs_total=docs["documents"], docs_indexed=docs["indexed_parts"])
+        return counts
 
     def flow_notebook_label(self) -> str:
         return (
@@ -2830,6 +2844,12 @@ class Mem(App):
     # — sync —
     def cmd_check(self, args: str = "") -> None:
         self.start_job("check")
+
+    def cmd_docs_connect(self, args: str = "") -> None:
+        if not self.archive_status.get("notebook_configured"):
+            self.cmd_setup()
+            return
+        self.start_job("docs-connect")
 
     def cmd_login(self, args: str = "") -> None:
         if not self.archive_status.get("notebook_configured"):
@@ -2908,10 +2928,11 @@ class Mem(App):
             return
         self.workers.cancel_group(self, "notebook-status")
         titles = {
-            "all": "Бүх чатыг NotebookLM руу sync хийх",
+            "all": "Архивын өөрчлөлтийг sync хийх",
             "auto": "NotebookLM руу автомат sync хийх",
             "check": "Холболт шалгах",
             "login": "NotebookLM-д нэвтрэх",
+            "docs-connect": "Google Docs холбох",
             "setup": "NotebookLM анх тохируулах",
         }
         self.job = Job(titles[kind], automatic=kind == "auto")
@@ -2965,8 +2986,14 @@ class Mem(App):
             {
                 "check": "NotebookLM холболт",
                 "login": "Brave-ийн нэвтрэлтийг холбох",
+                "docs-connect": "Brave-ийн Google Docs нэвтрэлтийг шалгах",
                 "setup": "NotebookLM тохируулж байна",
-            }.get(kind, "NotebookLM руу илгээх")
+            }.get(
+                kind,
+                "Google Docs → NotebookLM"
+                if "google_docs" in self.archive_status
+                else "NotebookLM руу илгээх",
+            )
         )
         job.steps = [local_step, remote_step]
         current_step = local_step
@@ -3003,6 +3030,8 @@ class Mem(App):
                 result = await self.backend.call("check")
             elif kind in {"login", "setup"}:
                 result = await self.backend.call(kind, args)
+            elif kind == "docs-connect":
+                result = await self.backend.call(kind)
             else:
                 operation = "auto-sync" if job.automatic else "sync-all"
                 result = await self.backend.call(operation, on_progress=show_phase)
@@ -3019,6 +3048,8 @@ class Mem(App):
             if kind == "setup" and archive_ready:
                 local_step.state, local_step.detail = "done", f"{len(self.chats)} чат"
             if error := result.get("error"):
+                if error.get("code") == "docs_web_auth_required":
+                    error = {**error, "message": "Brave-д Google Docs-д нэвтэрч дахин холбоорой."}
                 raise BackendError(
                     error.get("message", "Ажил амжилтгүй."),
                     code=error.get("code", "operation_failed"),
@@ -3033,9 +3064,13 @@ class Mem(App):
                 ready = self.notebook_status.get("ready_sources", 0)
                 title = self.notebook_status.get("title")
                 remote_step.detail = f"{title} · {ready} бэлэн эх" if title else f"{ready} бэлэн эх"
+            elif kind == "docs-connect":
+                remote_step.detail = "Google Docs sync идэвхтэй"
             else:
                 completed, deferred = result.get("completed", 0), result.get("deferred", 0)
                 remote_step.detail = f"{completed} дууссан · {deferred} хойшилсон"
+                if type(payload_bytes := result.get("docs_web_write_payload_bytes")) is int:
+                    remote_step.detail += f" · Docs хадгалалт {payload_bytes:,} байт"
                 status = result.get("status") or {}
                 work_left = (
                     status.get("sync_status") == "pending"
@@ -3054,6 +3089,17 @@ class Mem(App):
                             connected=False, error={"code": "auth_required", "message": message}
                         )
                         raise BackendError(message, code="auth_required")
+                    if "docs_web_auth_required" in reasons:
+                        raise BackendError(
+                            "Brave-д Google Docs-д нэвтэрч /docs-connect ажиллуулна уу.",
+                            code="docs_web_auth_required",
+                        )
+                    if "docs_web_conflict" in reasons:
+                        raise BackendError(
+                            "Google Docs өөрчлөгдсөн байна. Sync зогссон. "
+                            "Архив болон Docs-ийн хувилбарыг тулгаж шалгана уу.",
+                            code="docs_web_conflict",
+                        )
                     raise BackendError(
                         f"{len(blocked)} саатсан · {', '.join(reasons)}", code="sync_blocked"
                     )

@@ -1,19 +1,45 @@
 """Archive-local queries and inventory observations for NotebookLM publication state."""
 
+import json
+import re
 import time
 
 from .diagnostics import PublicInputError
-from .privacy import MASKING_POLICY
+from .privacy import MASKING_POLICY, snapshot_sha256
+from .web_docs_publication import DOCS_SETTING
+
+_CHAT_HEADING = re.compile(r'(?m)^## ([A-Z]{2}-[A-F0-9]{16})\n\n```yaml\nconversation_id: "\1"\n')
 
 
 def allowed_sources(store):
     """Freeze managed, attested revisions only. Never infer ownership from filenames."""
+    documents = ""
+    mappings = "SELECT segment_id,source_id,revision FROM source_map"
+    if store.get_setting(DOCS_SETTING):
+        documents = """complete_docs AS (
+            SELECT d.segment_id,d.ready_revision,d.part_count FROM google_docs_publications d
+            WHERE d.updating=0 AND d.part_count>0 AND d.part_count=(
+                SELECT count(*) FROM google_docs_parts p JOIN source_receipts r USING(source_id)
+                WHERE p.segment_id=d.segment_id AND p.part<d.part_count
+                  AND r.segment_id=d.segment_id AND r.revision=d.ready_revision
+                  AND r.remote_state='ready')
+            ), """
+        mappings = """
+        SELECT m.segment_id,m.source_id,m.revision FROM source_map m
+        WHERE NOT EXISTS (SELECT 1 FROM google_docs_parts p WHERE p.source_id=m.source_id)
+          OR EXISTS (SELECT 1 FROM complete_docs d
+            WHERE d.segment_id=m.segment_id AND d.ready_revision=m.revision)
+        UNION ALL
+        SELECT p.segment_id,p.source_id,m.revision FROM google_docs_parts p
+        JOIN complete_docs d ON d.segment_id=p.segment_id
+        JOIN source_map m ON m.segment_id=p.segment_id AND m.revision=d.ready_revision
+        WHERE p.part>0 AND p.part<d.part_count AND p.source_id IS NOT NULL"""
     return {
         row["source_id"]: dict(row)
         for row in store.connection.execute(
-            """
+            f"""WITH {documents}mappings AS ({mappings})
        SELECT m.source_id,m.segment_id,m.revision AS source_revision,s.revision,s.content_hash,r.sha256
-       FROM source_map m JOIN segments s ON s.id=m.segment_id
+       FROM mappings m JOIN segments s ON s.id=m.segment_id
        JOIN source_receipts r ON r.source_id=m.source_id AND r.segment_id=m.segment_id AND r.revision=m.revision
        JOIN outbound_revisions o ON o.segment_id=m.segment_id AND o.revision=m.revision
           AND o.masking_policy=r.masking_policy AND o.sha256=r.sha256
@@ -35,6 +61,78 @@ def current_segments(sources):
         for row in sources.values()
         if row["content_hash"] and row["source_revision"] == row["revision"]
     }
+
+
+def _chat_sections(snapshot):
+    sections = {}
+    headings = list(_CHAT_HEADING.finditer(snapshot))
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(snapshot)
+        sections.setdefault(heading[1], []).append(snapshot[heading.end() : end].rstrip("\n"))
+    return sections
+
+
+def published_message_counts(store, sources, *, comparison_cache=None):
+    """Count messages in ready sources whose chat sections still match the archive."""
+    from .segments import SegmentBuilder
+
+    db = store.connection
+    current = current_segments(sources)
+    unchanged = {}
+    for source in sources.values():
+        segment_id = source["segment_id"]
+        if segment_id in current:
+            continue
+        content_hash = source["content_hash"]
+        signature = (source["sha256"], content_hash)
+        if not content_hash:
+            revisions = db.execute(
+                """SELECT m.id,m.content_hash,c.revision FROM segment_messages sm
+                JOIN messages m ON m.id=sm.message_id JOIN conversations c ON c.id=m.conversation_id
+                WHERE sm.segment_id=? ORDER BY sm.position""",
+                (segment_id,),
+            )
+            signature += tuple(tuple(row) for row in revisions)
+        cached = comparison_cache.get(segment_id) if comparison_cache is not None else None
+        if cached and cached[0] == signature:
+            unchanged[segment_id] = cached[1]
+            continue
+        row = db.execute(
+            "SELECT snapshot FROM outbound_revisions WHERE segment_id=? AND revision=?",
+            (segment_id, source["source_revision"]),
+        ).fetchone()
+        if not row or snapshot_sha256(row[0]) != source["sha256"]:
+            continue
+        old = _chat_sections(bytes(row[0]).decode())
+        new = _chat_sections(
+            SegmentBuilder(store).render_outbound(
+                segment_id,
+                refresh_metadata=not content_hash,
+            )
+        )
+        unchanged[segment_id] = [
+            chat_id for chat_id, parts in new.items() if old.get(chat_id) == parts
+        ]
+        if comparison_cache is not None:
+            comparison_cache[segment_id] = signature, unchanged[segment_id]
+    if comparison_cache is not None:
+        for segment_id in comparison_cache.keys() - unchanged.keys():
+            del comparison_cache[segment_id]
+
+    return dict(
+        db.execute(
+            """WITH published AS (
+            SELECT sm.message_id FROM segment_messages sm JOIN json_each(?) current
+                ON sm.segment_id=current.value
+            UNION
+            SELECT sm.message_id FROM json_each(?) stale JOIN json_each(stale.value) chat
+            JOIN messages m ON m.conversation_id=chat.value
+            JOIN segment_messages sm ON sm.segment_id=stale.key AND sm.message_id=m.id
+        ) SELECT m.conversation_id,count(*) FROM published
+        JOIN messages m ON m.id=published.message_id GROUP BY m.conversation_id""",
+            (json.dumps(sorted(current)), json.dumps(unchanged)),
+        )
+    )
 
 
 def publication_status(store, *, sources=None):
@@ -135,10 +233,29 @@ def observe_inventory(store, sources):
     db = store.connection
     now = time.time()
     available = {s["id"]: bool(s.get("ready")) for s in sources}
+    if store.get_setting(DOCS_SETTING):
+        expected = dict(
+            db.execute(
+                "SELECT source_id,document_id FROM google_docs_parts WHERE source_id IS NOT NULL"
+            )
+        )
+        for source in sources:
+            source_id = source["id"]
+            if (
+                source_id in expected
+                and source.get("drive_document_id", expected[source_id]) != expected[source_id]
+            ):
+                # An ID pointing at a different Drive document cannot attest this publication.
+                available.pop(source_id, None)
+    mapped = "SELECT sm.* FROM source_map sm JOIN segments s ON s.id=sm.segment_id WHERE s.state!='retired'"
+    if store.get_setting(DOCS_SETTING):
+        mapped += """ UNION ALL SELECT p.segment_id,p.source_id,m.revision FROM google_docs_parts p
+            JOIN google_docs_publications d ON d.segment_id=p.segment_id
+            JOIN source_map m ON m.segment_id=p.segment_id AND m.revision=d.ready_revision
+            JOIN segments s ON s.id=p.segment_id
+            WHERE s.state!='retired' AND p.part>0 AND p.part<d.part_count AND p.source_id IS NOT NULL"""
     with db:
-        for mapping in db.execute(
-            "SELECT sm.* FROM source_map sm JOIN segments s ON s.id=sm.segment_id WHERE s.state!='retired'"
-        ).fetchall():
+        for mapping in db.execute(mapped).fetchall():
             source_id = mapping["source_id"]
             state = (
                 ("ready" if available[source_id] else "unready")

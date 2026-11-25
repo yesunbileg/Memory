@@ -1,10 +1,12 @@
 """Single-worker persistent upload → verify → map → delete state machine."""
 
+import asyncio
 import json
 import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 from .archive_lock import archive_lock
@@ -16,6 +18,7 @@ from .publication import observe_inventory
 from .segments import CapacityError, SegmentBuilder, SourceBudgetError
 from .store import Store, digest
 from .sync_activity import sync_activity
+from .web_docs_publication import DOCS_SETTING
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,13 @@ def republish(store, segment_id):
         ).fetchone()
         if not row:
             raise ValueError("Select an active segment with a confirmed missing source")
+        if store.get_setting(DOCS_SETTING):
+            db.execute(
+                """UPDATE google_docs_parts SET source_id=NULL,indexed_hash=NULL
+                WHERE segment_id=? AND source_id IN
+                    (SELECT source_id FROM source_receipts WHERE remote_state='missing')""",
+                (segment_id,),
+            )
         db.execute("DELETE FROM source_map WHERE segment_id=?", (segment_id,))
         db.execute("UPDATE segments SET revision=revision+1 WHERE id=?", (segment_id,))
         db.execute(
@@ -74,11 +84,14 @@ class SyncEngine:
         output_dir: Path,
         *,
         progress: Callable[[dict[str, str]], None] | None = None,
+        docs_client=None,
     ):
         self.store, self.builder, self.adapter = store, builder, adapter
         self.output_dir = Path(output_dir)
         self.progress = progress
         self._activity = None
+        self.docs_client = docs_client
+        self.docs_write_payload_bytes = 0
 
     def _emit_progress(self, phase: str, segment_id: str | None = None) -> None:
         event = {"phase": phase}
@@ -349,7 +362,7 @@ class SyncEngine:
         )
 
     def _old_sources(self, segment_id):
-        return [
+        sources = [
             r[0]
             for r in self.store.connection.execute(
                 """WITH RECURSIVE ancestors(id) AS (
@@ -358,6 +371,75 @@ class SyncEngine:
                 (segment_id,),
             )
         ]
+        if self.docs_client is not None:
+            sources.extend(
+                r[0]
+                for r in self.store.connection.execute(
+                    """WITH RECURSIVE ancestors(id) AS (
+                SELECT ? UNION SELECT sp.parent_id FROM segment_parents sp JOIN ancestors a ON sp.segment_id=a.id)
+                SELECT p.source_id FROM google_docs_parts p JOIN ancestors a ON a.id=p.segment_id
+                WHERE p.source_id IS NOT NULL""",
+                    (segment_id,),
+                )
+            )
+        return list(dict.fromkeys(sources))
+
+    async def _publish_docs(self, job):
+        from .web_docs_publication import DocsPublisher
+        from .web_docs_transport import DocsWebError
+
+        db = self.store.connection
+        segment, revision = job["segment_id"], job["revision"]
+        snapshot = db.execute(
+            """SELECT snapshot,sha256,masking_policy FROM outbound_revisions
+            WHERE segment_id=? AND revision=?""",
+            (segment, revision),
+        ).fetchone()
+        if not snapshot or snapshot["masking_policy"] != MASKING_POLICY:
+            raise SnapshotError("Missing approved snapshot for Google Docs")
+        text = bytes(snapshot["snapshot"]).decode("utf-8")
+        if (
+            snapshot_sha256(text) != snapshot["sha256"]
+            or _filename(segment, revision, text) != job["title"]
+            or redact_sensitive(text) != text
+            or find_sensitive(text)
+        ):
+            raise SnapshotError("Google Docs snapshot failed validation")
+        old = list(dict.fromkeys(json.loads(job["old_source_ids"]) + self._old_sources(segment)))
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._pending_snapshot_changed(job["id"]):
+                raise SnapshotError("Pending segment changed before Google Docs publication")
+        publisher = DocsPublisher(self.store, self.adapter, self.docs_client, self._emit_progress)
+        try:
+            sources = await publisher.publish(segment, text)
+        except DocsWebError as error:
+            if error.code == "SourceQuota":
+                raise SourceQuota(str(error)) from None
+            raise
+        finally:
+            self.docs_write_payload_bytes += publisher.write_payload_bytes
+        # Publication eligibility changes atomically with all parts of this revision.
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._pending_snapshot_changed(job["id"]):
+                raise SnapshotError("Segment changed during Google Docs publication")
+            for source in sources:
+                self.store.attest_source(source, segment, revision)
+            db.execute(
+                "INSERT OR REPLACE INTO source_map VALUES(?,?,?)", (segment, sources[0], revision)
+            )
+            db.execute(
+                """UPDATE google_docs_publications SET ready_revision=?,updating=0,part_count=?
+                WHERE segment_id=?""",
+                (revision, len(sources), segment),
+            )
+            db.execute(
+                """UPDATE sync_jobs SET stage='cleanup',new_source_id=?,old_source_ids=?,
+                error=NULL WHERE id=?""",
+                (sources[0], json.dumps([sid for sid in old if sid not in sources]), job["id"]),
+            )
+        return dict(db.execute("SELECT * FROM sync_jobs WHERE id=?", (job["id"],)).fetchone())
 
     def _requeue_failed_mapping(self, mapping):
         """Requeue a confirmed processing failure without losing cleanup obligations."""
@@ -430,6 +512,56 @@ class SyncEngine:
             raise UploadUncertain("Could not prove exactly one upload; no retry or deletion")
         return matches[0]
 
+    def _record_registration(self, job, source_id, old_ids):
+        db = self.store.connection
+        job.update(new_source_id=source_id, old_source_ids=json.dumps(old_ids))
+        with db:
+            db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (source_id,))
+            db.execute(
+                """UPDATE sync_jobs SET stage='registered',new_source_id=?,old_source_ids=?,
+                failure_phase=NULL WHERE id=?""",
+                (source_id, job["old_source_ids"], job["id"]),
+            )
+
+    async def _upload_and_record(self, job, path, old_ids):
+        db = self.store.connection
+        try:
+            source_id = await self.adapter.upload(path, job["title"])
+        except Exception as exc:
+            # notebooklm-py carries registration IDs on partial upload failures.
+            partial = getattr(exc, "source_id", None)
+            definitely_not_sent = getattr(exc, "definitely_not_sent", False)
+            with db:
+                if isinstance(partial, str) and partial:
+                    db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (partial,))
+                    db.execute(
+                        """UPDATE sync_jobs SET new_source_id=?,stage='processing',failure_phase=?,error=?
+                        WHERE id=?""",
+                        (
+                            partial,
+                            "upload" if definitely_not_sent else "finalize_uncertain",
+                            failure_code(exc),
+                            job["id"],
+                        ),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE sync_jobs SET stage=? WHERE id=?",
+                        ("pending" if definitely_not_sent else "uncertain", job["id"]),
+                    )
+            raise
+        self._record_registration(job, source_id, old_ids)
+
+    async def _finish_registration_before_stopping(self, job, path, old_ids):
+        # Keep the lock and adapter until the in-flight write has recorded its outcome.
+        operation = asyncio.create_task(self._upload_and_record(job, path, old_ids))
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await asyncio.shield(operation)
+            raise
+
     def _pending_snapshot_changed(self, job_id: int) -> bool:
         """An unsent job can be rebuilt after capture changes its local segment."""
         return bool(
@@ -468,6 +600,8 @@ class SyncEngine:
                 return False
             path = self.output_dir / job["title"]
         await self._recover_terminal_upload_failure(job)
+        if self.docs_client is not None and job["stage"] in ("pending", "blocked"):
+            job = await self._publish_docs(job)
         if job["stage"] != "cleanup":
             if job["stage"] not in {"registered", "processing", "ready"}:
                 # No local text leaves the machine until every byte (including metadata) passes.
@@ -507,6 +641,7 @@ class SyncEngine:
                         new_id = await self._prove_uncertain_registration(
                             job, sources, text, excluded_ids
                         )
+                        self._record_registration(job, new_id, old)
                     else:
                         # Account for foreign sources too, and reserve the 50th slot for replacement.
                         if len(sources) >= 50 and job["error"] in {"network_error", "timeout"}:
@@ -549,46 +684,7 @@ class SyncEngine:
                                 ),
                             )
                         self._emit_progress("upload", job["segment_id"])
-                        try:
-                            new_id = await self.adapter.upload(path, job["title"])
-                        except Exception as exc:
-                            # notebooklm-py carries registration IDs on partial upload failures.
-                            partial = getattr(exc, "source_id", None)
-                            if isinstance(partial, str) and partial:
-                                with db:
-                                    db.execute(
-                                        "INSERT OR IGNORE INTO registered_sources VALUES(?)",
-                                        (partial,),
-                                    )
-                                    db.execute(
-                                        "UPDATE sync_jobs SET new_source_id=?,stage='processing',failure_phase=? WHERE id=?",
-                                        (
-                                            partial,
-                                            "upload"
-                                            if getattr(exc, "definitely_not_sent", False)
-                                            else "finalize_uncertain",
-                                            job["id"],
-                                        ),
-                                    )
-                            else:
-                                with db:
-                                    db.execute(
-                                        "UPDATE sync_jobs SET stage=? WHERE id=?",
-                                        (
-                                            "pending"
-                                            if getattr(exc, "definitely_not_sent", False)
-                                            else "uncertain",
-                                            job["id"],
-                                        ),
-                                    )
-                            raise
-                    job["new_source_id"], job["old_source_ids"] = new_id, json.dumps(old)
-                    with db:
-                        db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (new_id,))
-                        db.execute(
-                            "UPDATE sync_jobs SET stage='registered',new_source_id=?,old_source_ids=?,failure_phase=NULL WHERE id=?",
-                            (new_id, json.dumps(old), job["id"]),
-                        )
+                        await self._finish_registration_before_stopping(job, path, old)
             if not self._owns(job["new_source_id"]):
                 raise SnapshotError("No ownership receipt for the registered source")
             if job["stage"] == "ready":
@@ -638,18 +734,31 @@ class SyncEngine:
         self._emit_progress("cleanup", job["segment_id"])
         old_ids = json.loads(job["old_source_ids"])
         sources = {s["id"]: s for s in await self.adapter.list_sources()}
-        replacement = sources.get(job["new_source_id"])
-        if replacement is None:
+        replacement_ids = [job["new_source_id"]]
+        if self.docs_client is not None:
+            replacement_ids.extend(
+                row[0]
+                for row in db.execute(
+                    """SELECT p.source_id FROM google_docs_parts p
+                    JOIN google_docs_publications d USING(segment_id)
+                    WHERE p.segment_id=? AND d.ready_revision=? AND d.updating=0
+                      AND p.part>0 AND p.part<d.part_count ORDER BY p.part""",
+                    (job["segment_id"], job["revision"]),
+                )
+            )
+        if any(source_id not in sources for source_id in replacement_ids):
             observe_inventory(self.store, list(sources.values()))
             raise SnapshotError(
                 "Replacement missing; predecessors retained until explicit republish"
             )
-        if replacement.get("ready") is not True:
+        for source_id in replacement_ids:
+            if sources[source_id].get("ready") is True:
+                continue
             self._emit_progress("readiness", job["segment_id"])
             try:
-                await self.adapter.wait_ready(job["new_source_id"])
+                await self.adapter.wait_ready(source_id)
             except Exception as exc:
-                if failure_code(exc) == "processing_failed":
+                if self.docs_client is None and failure_code(exc) == "processing_failed":
                     # A confirmed failed replacement is not a valid mapping.
                     # Retain it and every predecessor until a new source is ready.
                     self._requeue_failed_mapping(
@@ -658,10 +767,10 @@ class SyncEngine:
                 raise
             self._emit_progress("cleanup", job["segment_id"])
         with db:
-            db.execute(
+            db.executemany(
                 """UPDATE source_receipts SET remote_state='ready',verified_at=?
                    WHERE source_id=? AND segment_id=? AND revision=? AND remote_state!='ready'""",
-                (time.time(), job["new_source_id"], job["segment_id"], job["revision"]),
+                [(time.time(), sid, job["segment_id"], job["revision"]) for sid in replacement_ids],
             )
         if old_ids:
             present = set(sources)
@@ -678,6 +787,11 @@ class SyncEngine:
                     await self.adapter.delete(old_id)
                 with db:
                     db.execute("DELETE FROM source_map WHERE source_id=?", (old_id,))
+                    if self.docs_client is not None:
+                        db.execute(
+                            "UPDATE google_docs_parts SET source_id=NULL,indexed_hash=NULL WHERE source_id=?",
+                            (old_id,),
+                        )
         with db:
             db.execute(
                 "UPDATE sync_jobs SET stage='done',error=NULL,next_attempt=0 WHERE id=?",
@@ -825,6 +939,7 @@ class SyncEngine:
 
     async def _run_with_activity(self) -> dict:
         result = {"completed": 0, "deferred": 0, "blocked": []}
+        self.docs_write_payload_bytes = 0
         self._build_segments(result)
         try:
             self._emit_progress("reconcile")
@@ -866,4 +981,6 @@ class SyncEngine:
                 except CapacityError as exc:
                     result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
         result["status"] = self.store.status()
+        if self.docs_client is not None:
+            result["docs_web_write_payload_bytes"] = self.docs_write_payload_bytes
         return result

@@ -251,6 +251,8 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
     snapshot_dir = workspace_for(db) / "sync"
     write_rollout(rollout)
     cli(db, "init", "--notebook-id", "synthetic-test-notebook")
+    with Store(db) as store:
+        store.set_setting("tui_auto_sync", False)  # This test owns sync via its fake adapter.
     cli(db, "collect", "codex", rollout, "--account", "alpha")
     cli(db, "collect", "codex", rollout, "--account", "beta")
     alpha = rows_by_account(db)["alpha"]
@@ -319,6 +321,8 @@ def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_pat
     rollout = tmp_path / "rollout-mongolian.jsonl"
     write_rollout(rollout)
     cli(db, "init", "--notebook-id", "synthetic-test-notebook")
+    with Store(db) as store:
+        store.set_setting("tui_auto_sync", False)  # Verify queue eligibility without networking.
 
     cli(db, "collect", "codex", rollout, "--account", "alpha")
     alpha = rows_by_account(db)["alpha"]

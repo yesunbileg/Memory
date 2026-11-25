@@ -644,8 +644,9 @@ class Store:
                 WHERE hold.segment_id=j.segment_id AND hold.stage='missing')
         """).fetchone()[0]
 
-    def status(self, *, sources=None) -> dict:
-        from .publication import allowed_sources, current_segments, publication_status
+    def status(self, *, sources=None, published=None) -> dict:
+        from .publication import allowed_sources, publication_status, published_message_counts
+        from .web_docs_publication import DOCS_SETTING, docs_status
 
         db = self.connection
 
@@ -653,19 +654,18 @@ class Store:
             return db.execute(query).fetchone()[0]
 
         sources = allowed_sources(self) if sources is None else sources
-        current = current_segments(sources)
-        marks = ",".join("?" for _ in current) or "NULL"
-        syncable, ready, approved_waiting = db.execute(
-            f"""SELECT count(*), COALESCE(sum(covered),0),
-                    COALESCE(sum(consent=1 AND covered=0),0) FROM (
-                SELECT c.consent, MIN(EXISTS(SELECT 1 FROM segment_messages sm
-                    WHERE sm.message_id=m.id AND sm.segment_id IN ({marks}))) AS covered
-                FROM messages m JOIN conversations c ON c.id=m.conversation_id
-                GROUP BY c.id
-            )""",
-            tuple(sorted(current)),
-        ).fetchone()
-        waiting = syncable - ready
+        if published is None:
+            published = published_message_counts(self, sources)
+        ready = waiting = approved_waiting = 0
+        for chat_id, consent, total in db.execute(
+            """SELECT c.id, c.consent, count(*) FROM messages m
+            JOIN conversations c ON c.id=m.conversation_id GROUP BY c.id""",
+        ):
+            if published.get(chat_id, 0) == total:
+                ready += 1
+            else:
+                waiting += 1
+                approved_waiting += consent == 1
         pending = count("""SELECT COUNT(*) FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
             WHERE s.state!='retired' AND (sm.source_id IS NULL OR sm.revision!=s.revision OR s.content_hash='')""")
         unassigned = count("""SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
@@ -694,6 +694,9 @@ class Store:
             for error in self.get_setting("sync_preflight_errors", [])
             if isinstance(error, dict)
         ]
+        docs = {}
+        if self.get_setting(DOCS_SETTING):
+            docs["google_docs"] = docs_status(self)
         return {
             "conversations": count("SELECT COUNT(*) FROM conversations"),
             "messages": count("SELECT COUNT(*) FROM messages"),
@@ -718,4 +721,5 @@ class Store:
                 else "no_sources"
             ),
             "notebook_configured": bool(self.get_setting("notebook_id")),
+            **docs,
         }

@@ -78,6 +78,8 @@ def parser():
     mode.add_argument(
         "--automatic", action="store_true", help="Sync due work only when /auto on is enabled"
     )
+    web_docs = sub.add_parser("docs-web-enable", help="Publish through linked Google Docs in Brave")
+    web_docs.add_argument("--session", type=int, help="Existing Playwriter Brave session")
     cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
     cleanup.add_argument(
         "--delete",
@@ -156,6 +158,7 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
     from .archive_lock import archive_lock
     from .notebook import NotebookLMAdapter
     from .sync import SyncEngine
+    from .web_docs_publication import DOCS_SETTING
 
     # Hold the same lock as notebook rebinding before reading its settings.
     with archive_lock(store.path):
@@ -179,8 +182,18 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
                         "UPDATE conversations SET consent=1 WHERE consent=0"
                     ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
+            docs = {}
+            if session := store.get_setting(DOCS_SETTING):
+                from .web_docs_transport import WebDocsTransport
+
+                docs["docs_client"] = WebDocsTransport(session)
             engine = SyncEngine(
-                store, SegmentBuilder(store), adapter, store.workspace / "sync", progress=progress
+                store,
+                SegmentBuilder(store),
+                adapter,
+                store.workspace / "sync",
+                progress=progress,
+                **docs,
             )
             result = (
                 await _run_automatic_sync(engine) if automatic else await engine._run_once_locked()
@@ -336,6 +349,29 @@ def execute(args, *, progress=None):
             return {"automatic": "idle"}
         return {"error": {"code": "archive_not_found", "message": "Archive does not exist."}}
     with archive as store:
+        if args.command == "docs-web-enable":
+            from .archive_lock import archive_lock
+            from .web_docs_publication import DOCS_SETTING, enable_web_docs
+            from .web_docs_transport import DocsWebError, WebDocsTransport, new_brave_session
+
+            async def connected_session():
+                session = args.session or store.get_setting(DOCS_SETTING)
+                if session:
+                    try:
+                        await WebDocsTransport(session).call("ping")
+                    except DocsWebError as error:
+                        if args.session or error.code == "docs_web_auth_required":
+                            raise
+                    else:
+                        return session
+                session = await new_brave_session()
+                await WebDocsTransport(session).call("ping")
+                return session
+
+            session = asyncio.run(connected_session())
+            with archive_lock(store.path):
+                enable_web_docs(store, session)
+            return {"docs_web_enabled": True, "status": store.status()}
         if args.command == "init":
             if args.notebook_id:
                 store.set_setting("notebook_id", args.notebook_id)

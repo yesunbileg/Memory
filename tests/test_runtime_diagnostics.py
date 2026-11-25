@@ -142,6 +142,7 @@ def test_build_preserves_existing_symlink_and_publishes_complete_fresh_export(tm
     db = tmp_path / "archive.sqlite"
     output = tmp_path / "public-output"
     output.mkdir(mode=0o755)
+    output.chmod(0o755)  # Fixture must be public even with a restrictive caller umask.
     outside = tmp_path / "existing-user-file"
     outside.write_text("must remain untouched")
     with Store(db) as store:

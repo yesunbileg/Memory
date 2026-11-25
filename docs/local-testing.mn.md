@@ -122,3 +122,8 @@ xvfb-run -a .venv/bin/python scripts/extension_toolbar_check.py --browser-execut
 Browser автоматаар олдохгүй бол `--browser-executable /бүтэн/зам/browser` нэмнэ. Зургууд `data/ui-check/`-д гарна. Эхний тест хөтчийн API-г дуурайлган хуудсуудыг шалгана. Хоёр дахь нь тусгаарласан profile-д өргөтгөл суулгаж toolbar-ийг шалгана. Аль аль нь бодит account-ын API-г шалгахгүй.
 
 Одоогоор Claude Code/Gemini CLI local adapter байхгүй. Gemini organized category, бодит Google quota, урт хугацааны login, Монгол retrieval чанарыг бүрэн батлагдсан гэж тэмдэглэхгүй. Гол V1 урсгалын regression болон суулгах алхмуудыг [validation](validation.md)-д бүртгэнэ.
+
+
+## 8. Туршилтын Google Docs incremental sync
+
+Google Docs-ийн энэ сонголт албан ёсны REST API биш, Docs editor-ийн private web endpoint ашигладаг. Анхны шилжилтэд бүтэн сегментүүд upload хийнэ; дараа нь зөвхөн өөрчлөлтийн patch илгээхээр зориулагдсан. Идэвхжүүлэх болон сэргээх алхмуудын өмнө [дэлгэрэнгүй заавар](google-docs-incremental-sync.mn.md)-ыг унш. Жинхэнэ archive дээр хийхээс өмнө backup авч, synthetic archive болон хоосон demo notebook-оор турш.

@@ -34,6 +34,7 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.hatch.build]
 include = [
     "/src/ai_memory/*.py",
+    "/src/ai_memory/web_docs_driver.js",
     "/vendor/hstry/adapters/codex/adapter.ts",
     "/vendor/hstry/adapters/opencode/adapter.ts",
     "/vendor/hstry/adapters/types/first-message.ts",

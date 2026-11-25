@@ -72,11 +72,11 @@ class SegmentBuilder:
     def render(self, segment_id: str) -> str:
         return self._render(segment_id, outbound=False)
 
-    def render_outbound(self, segment_id: str) -> str:
+    def render_outbound(self, segment_id: str, *, refresh_metadata: bool = False) -> str:
         """Serialize only reviewed cloud fields; local exports retain full originals."""
-        return self._render(segment_id, outbound=True)
+        return self._render(segment_id, outbound=True, refresh_metadata=refresh_metadata)
 
-    def _render(self, segment_id: str, *, outbound: bool) -> str:
+    def _render(self, segment_id: str, *, outbound: bool, refresh_metadata: bool = False) -> str:
         db = self.store.connection
         segment = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
         if segment is None:
@@ -128,10 +128,14 @@ class SegmentBuilder:
         for row in rows:
             m = next(ordered[row["conversation_id"]])
             if previous != m["conversation_id"]:
-                metadata = db.execute(
-                    "SELECT metadata FROM segment_metadata WHERE segment_id=? AND conversation_id=?",
-                    (segment_id, m["conversation_id"]),
-                ).fetchone()
+                metadata = (
+                    None
+                    if refresh_metadata
+                    else db.execute(
+                        "SELECT metadata FROM segment_metadata WHERE segment_id=? AND conversation_id=?",
+                        (segment_id, m["conversation_id"]),
+                    ).fetchone()
+                )
                 c = (
                     json.loads(metadata[0])
                     if metadata
