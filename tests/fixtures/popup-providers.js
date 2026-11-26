@@ -15,6 +15,7 @@
   const result = (value, status = 200) => Response.json(value, { status });
   self.qa = {
     detail: [],
+    claudeDetailBytes: {},
     requests: [],
     unexpected: [],
     native: [],
@@ -156,7 +157,7 @@
       if (path.startsWith('/api/organizations/' + org + '/chat_conversations/')) {
         const id = path.split('/').pop();
         self.qa.detail.push(id);
-        return result({
+        const response = result({
           uuid: id,
           name: 'Fixture ' + id,
           updated_at: claudeTime,
@@ -168,6 +169,8 @@
             },
           ],
         });
+        self.qa.claudeDetailBytes[id] = (await response.clone().arrayBuffer()).byteLength;
+        return response;
       }
     }
     if (u.hostname === 'gemini.google.com') {

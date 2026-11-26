@@ -60,6 +60,7 @@ class DocumentJournal:
         self.document_id = document_id
         self.key = f"docs-web:{document_id}"
         self.write_payload_bytes = 0
+        self.repaired = False
 
     def _load(self):
         row = self.db.execute("SELECT value FROM checkpoints WHERE key=?", (self.key,)).fetchone()
@@ -92,10 +93,25 @@ class DocumentJournal:
         self.write_payload_bytes += sent
         self._save({"text": after})
 
-    async def sync(self, text):
-        self.write_payload_bytes = 0
+    async def verify_remote(self, text):
+        """Independently attest the committed model before linking or indexing it."""
         text = docs_text(text)
         record = self._load()
+        if record != {"text": text}:
+            raise DocsWebError("docs_web_uncertain")
+        remote = await self.provider.call("check", id=self.document_id)
+        if remote.get("hash") != snapshot_sha256(text):
+            raise DocsWebError("docs_web_conflict")
+        if type(remote.get("revision")) is not int or remote["revision"] < 0:
+            raise DocsWebError("docs_web_uncertain")
+
+    async def sync(self, text):
+        self.write_payload_bytes = 0
+        self.repaired = False
+        text = docs_text(text)
+        record = self._load()
+        if "repair" in record:
+            raise DocsWebError("docs_web_uncertain")
         if "pending" in record:
             await self._send(record, recovering=True)
             record = self._load()
@@ -111,3 +127,74 @@ class DocumentJournal:
             await self._send(record, recovering=False)
             record = self._load()
         return self.write_payload_bytes
+
+    async def matches_remote(self, text):
+        known = snapshot_sha256(text)
+        actual = await self.provider.call("inspect", id=self.document_id, known=known)
+        received = actual.get("hash")
+        if actual.get("status") == "ready" and received == known:
+            return True
+        if (
+            actual.get("status") == "changed"
+            and isinstance(received, str)
+            and re.fullmatch(r"[0-9a-f]{64}", received)
+            and received != known
+        ):
+            return False
+        raise DocsWebError("docs_web_uncertain")
+
+    async def sync_mirror(self, text, *, repair_target=None):
+        """Restore a managed copy from the approved archive, including remote-only edits."""
+        self.write_payload_bytes = 0
+        self.repaired = False
+        text = docs_text(text)
+        record = self._load()
+        if "repair" not in record:
+            try:
+                if record == {"text": text}:
+                    if await self.matches_remote(text):
+                        return 0
+                else:
+                    return await self.sync(text)
+            except DocsWebError as error:
+                if error.code != "docs_web_conflict":
+                    raise
+            # Any previous differential packet was computed against a different
+            # model. Keep only trusted local text and verify the current remote
+            # model again before planning a replacement packet.
+            self._save({"text": self._load()["text"], "repair": True})
+
+        self.repaired = True
+        if repair_target is not None:
+            text = docs_text(repair_target())
+        previous_hash = None
+        while True:
+            actual = await self.provider.read_repair_base(self.document_id)
+            before = actual.get("text")
+            before_hash = actual.get("hash")
+            if (
+                not isinstance(before, str)
+                or snapshot_sha256(before) != before_hash
+                or type(actual.get("revision")) is not int
+                or actual["revision"] < 0
+            ):
+                raise DocsWebError("docs_web_uncertain")
+            if before == text:
+                self._save({"text": text})
+                return self.write_payload_bytes
+            if before_hash == previous_hash:
+                raise DocsWebError("docs_web_uncertain")
+            previous_hash = before_hash
+            after = _next_target(before, text)
+            edits = editor_commands(text_edits(before, after))
+            self.write_payload_bytes += await self.provider.write(
+                self.document_id,
+                uuid4().hex,
+                before_hash,
+                snapshot_sha256(after),
+                edits,
+                recovering=False,
+            )
+            if after == text:
+                self._save({"text": text})
+                return self.write_payload_bytes

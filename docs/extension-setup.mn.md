@@ -30,4 +30,4 @@ uv sync --frozen
 
 Brave container бүрдээ sync хийх account-ийнхаа табыг нэвтэрсэн чигээр нь нээлттэй байлгаарай. Tab тус бүр дээр **List mode**-оор яриагаа сонгоод **Sync now**-г нэг удаа дарна. Явцын мөр шалгасан account, шалгасан болон хадгалсан ярианы тоог харуулна. Нэвтэрсэн таб нь олдохгүй account-ыг popup мэдээлнэ.
 
-**Sync now нь NotebookLM рүү илгээдэггүй.** Google-д өгөх бол `ai-memory preview ID`-аар бичвэрээ шалгаж, `ai-memory approve ID`, дараа нь `ai-memory sync` командыг тусад нь ажиллуулна. [Зөвшөөрлийн тайлбар](consent-backup.md).
+**Sync now** сонгосон чатыг SQLite архивт хадгална. NotebookLM холбогдсон, **Auto ON** үед зөвшөөрөлтэй чатуудыг Memory цааш автоматаар илгээнэ. **Auto OFF** үед NotebookLM рүү гараар синк хийхдээ `ai-memory sync` ажиллуулна. [Зөвшөөрлийн тайлбар](consent-backup.md)

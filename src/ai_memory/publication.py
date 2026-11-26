@@ -4,14 +4,16 @@ import json
 import re
 import time
 
+from .cold_archive import PLAN
 from .diagnostics import PublicInputError
 from .privacy import MASKING_POLICY, snapshot_sha256
+from .source_names import matches_source_title
 from .web_docs_publication import DOCS_SETTING
 
 _CHAT_HEADING = re.compile(r'(?m)^## ([A-Z]{2}-[A-F0-9]{16})\n\n```yaml\nconversation_id: "\1"\n')
 
 
-def allowed_sources(store):
+def allowed_sources(store, *, include_staged=False):
     """Freeze managed, attested revisions only. Never infer ownership from filenames."""
     documents = ""
     mappings = "SELECT segment_id,source_id,revision FROM source_map"
@@ -34,6 +36,8 @@ def allowed_sources(store):
         JOIN complete_docs d ON d.segment_id=p.segment_id
         JOIN source_map m ON m.segment_id=p.segment_id AND m.revision=d.ready_revision
         WHERE p.part>0 AND p.part<d.part_count AND p.source_id IS NOT NULL"""
+    plan = None if include_staged else store.get_setting(PLAN)
+    staged = plan["children"] if plan and "cleanup" not in plan else []
     return {
         row["source_id"]: dict(row)
         for row in store.connection.execute(
@@ -44,13 +48,14 @@ def allowed_sources(store):
        JOIN outbound_revisions o ON o.segment_id=m.segment_id AND o.revision=m.revision
           AND o.masking_policy=r.masking_policy AND o.sha256=r.sha256
        WHERE s.state!='retired' AND r.masking_policy=? AND r.remote_state='ready'
+         AND s.id NOT IN (SELECT value FROM json_each(?))
          AND NOT EXISTS(SELECT 1 FROM sync_jobs h WHERE h.segment_id=s.id AND h.stage='missing')
          AND NOT EXISTS(SELECT 1 FROM retained_segments rs WHERE rs.segment_id=m.segment_id)
          AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN messages msg ON msg.id=sm.message_id
            JOIN conversations c ON c.id=msg.conversation_id
            WHERE sm.segment_id=m.segment_id AND c.consent!=1)
        ORDER BY m.segment_id""",
-            (MASKING_POLICY,),
+            (MASKING_POLICY, json.dumps(staged)),
         )
     }
 
@@ -179,11 +184,15 @@ async def cleanup_legacy_sources(store, adapter, approved_ids):
             not mapped
             or mapped["revision"] != row["replacement_revision"]
             or remote.get("ready") is not True
-            or remote.get("title") != row["replacement_title"]
+            or not matches_source_title(
+                store, replacement_id, remote.get("title"), row["replacement_title"]
+            )
         ):
             continue
         source_id = row["source_id"]
-        if source_id in sources and sources[source_id].get("title") != row["title"]:
+        if source_id in sources and not matches_source_title(
+            store, source_id, sources[source_id].get("title"), row["title"]
+        ):
             continue
         checked[source_id] = {
             key: row[key]

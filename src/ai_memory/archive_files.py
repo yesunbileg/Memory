@@ -49,6 +49,44 @@ def _valid_title(title):
     return isinstance(title, str) and re.fullmatch(r"SEG-\d+-r\d+-[a-f0-9]{16,64}\.md", title)
 
 
+def prune_completed_snapshots(store, directory):
+    """Remove exact redundant work files while the caller holds the archive lock."""
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    removed = []
+    for path in directory.iterdir():
+        if not _valid_title(path.name) or path.is_symlink() or not path.is_file():
+            continue
+        rows = store.connection.execute(
+            """SELECT j.stage,j.segment_id,j.revision,o.snapshot,o.sha256
+               FROM sync_jobs j LEFT JOIN outbound_revisions o
+               ON o.segment_id=j.segment_id AND o.revision=j.revision WHERE j.title=?""",
+            (path.name,),
+        ).fetchall()
+        if len(rows) != 1:
+            continue
+        stage, segment, revision, snapshot, sha = rows[0]
+        if (
+            stage not in {"done", "superseded"}
+            or snapshot is None
+            or not sha
+            or path.name != f"{segment}-r{revision}-{sha[:16]}.md"
+        ):
+            continue
+        try:
+            if (
+                path.stat().st_size == len(snapshot)
+                and path.read_bytes() == snapshot
+                and snapshot_sha256(snapshot) == sha
+            ):
+                path.unlink()
+                removed.append(path.name)
+        except OSError:
+            continue
+    return removed
+
+
 def legacy_bytes(store, job):
     """Read only a filename and digest proven by this old archive's job."""
     from .store import digest

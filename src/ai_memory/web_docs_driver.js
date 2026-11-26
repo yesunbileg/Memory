@@ -22,7 +22,18 @@ async function closeDocument(id) {
   if (item && !item.page.isClosed()) await item.page.close();
 }
 
-async function loadDocument(id) {
+async function releaseIdlePages() {
+  // An ambiguous write can only be retried against its original editor session.
+  for (const [id, item] of Object.entries(cache)) {
+    if (!item.pending || item.page.isClosed()) await closeDocument(id);
+  }
+  const exportPage = state.memoryDocsExportPage;
+  delete state.memoryDocsExportPage;
+  if (exportPage && !exportPage.isClosed()) await exportPage.close();
+  return {status: "released", pending: Object.keys(cache).length};
+}
+
+async function loadDocument(id, includeText = false) {
   const page = await newDocumentPage();
   try {
     await page.addInitScript(() => {
@@ -49,7 +60,7 @@ async function loadDocument(id) {
     ]);
     await page.waitForLoadState("domcontentloaded");
     await page.locator(".docs-title-input").waitFor({timeout: 24000});
-    const model = await page.evaluate(async () => {
+    const model = await page.evaluate(async includeText => {
       const chunks = window.__aiMemoryDocsChunks ?? [];
       const revision = Math.max(...chunks.map(chunk => chunk.revision));
       if (!Number.isSafeInteger(revision)) throw Error("Document model revision unavailable");
@@ -75,13 +86,16 @@ async function loadDocument(id) {
         text.push(value);
         next += value.length;
       }
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text.join("")));
-      return {revision, hash: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")};
-    });
+      const content = text.join("");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+      const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      return includeText ? {revision, hash, content} : {revision, hash};
+    }, includeText);
     const url = new URL(request.url());
     url.pathname = `/document/d/${id}/save`;
     url.searchParams.delete("reqid");
-    return {page, url: String(url), revision: model.revision, knownHash: model.hash, requestId: 0};
+    return {page, url: String(url), revision: model.revision, knownHash: model.hash,
+      content: model.content, requestId: 0};
   } catch (error) {
     if (!page.isClosed()) await page.close();
     throw error;
@@ -101,6 +115,60 @@ async function currentModel(id) {
     return {hash: item.knownHash, revision: item.revision};
   } finally {
     await item.page.close();
+  }
+}
+
+async function inspectDocument(id, known) {
+  // The plain text export avoids loading the entire Docs editor for a clean
+  // mirror check. Confirm any mismatch using the actual editor model.
+  try {
+    let page = state.memoryDocsExportPage;
+    if (!page || page.isClosed()) {
+      page = await newDocumentPage();
+      try {
+        const response = await page.goto(origin + "/robots.txt", {timeout: 12000});
+        if (!response?.ok() || new URL(page.url()).origin !== origin) {
+          throw Error("Docs origin unavailable");
+        }
+        state.memoryDocsExportPage = page;
+      } catch (error) {
+        await page.close();
+        throw error;
+      }
+    }
+    const hash = await page.evaluate(async id => {
+      const response = await fetch("/document/d/" + id + "/export?format=txt", {
+        cache: "no-store", signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok || !response.headers.get("content-type")?.startsWith("text/plain")) {
+        return null;
+      }
+      const text = new TextDecoder("utf-8", {fatal: true})
+        .decode(await response.arrayBuffer()).replaceAll("\r\n", "\n");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    }, id);
+    if (hash && hash === known) return {status: "ready", hash};
+  } catch {
+    // An unavailable or lossy export is never evidence of a changed document.
+  }
+  const {hash} = await currentModel(id);
+  return {status: hash === known ? "ready" : "changed", hash};
+}
+
+async function readRepairBase(id) {
+  await closeDocument(id);
+  const item = await loadDocument(id, true);
+  try {
+    // The private file stays inside this invocation's 0700 temporary directory.
+    // Keep manual text out of the Playwriter console and archive journal.
+    require("node:fs").writeFileSync(input.output, item.content, {mode: 0o600, flag: "wx"});
+    delete item.content;
+    cache[id] = item;
+    return {hash: item.knownHash, revision: item.revision};
+  } catch (error) {
+    await item.page.close();
+    throw error;
   }
 }
 
@@ -171,10 +239,11 @@ async function findDocument(title) {
   const page = await newDocumentPage();
   try {
     const url = new URL("https://drive.google.com/drive/u/0/search");
-    url.searchParams.set("q", title);
+    url.searchParams.set("q", 'title:"' + title.replaceAll('"', ' ') + '"');
     await page.goto(url.toString(), {waitUntil: "commit"});
-    const matches = page.getByText(title, {exact: true});
-    await matches.first().waitFor({timeout: 18000});
+    // The search box also echoes the query. Only a Drive file tile/row owns a file ID.
+    const matches = page.locator("[data-id]").getByText(title, {exact: true});
+    await matches.first().waitFor({state: "attached", timeout: 22000});
     const ids = await matches.evaluateAll(elements => Array.from(new Set(elements.map(element =>
       element.closest("[data-id]")?.getAttribute("data-id")
     ).filter(id => typeof id === "string" && /^[\w-]{20,150}$/.test(id)))));
@@ -260,12 +329,15 @@ async function checkAccess() {
 
 async function execute() {
   if (input.action === "ping") return checkAccess();
+  if (input.action === "release") return releaseIdlePages();
   if (input.action === "create") return createDocument(input.title);
   if (input.action === "find") return findDocument(input.title);
   if (!/^[\w-]{20,150}$/.test(input.id)) throw Error("Invalid document identifier");
   if (input.action === "title") return confirmDocumentTitle(input.id, input.title);
   if (input.action === "close") return closeDocument(input.id);
   if (input.action === "check") return currentModel(input.id);
+  if (input.action === "inspect") return inspectDocument(input.id, input.known);
+  if (input.action === "read_repair_base") return readRepairBase(input.id);
   const item = await openDocument(input.id);
   if (input.action === "prepare") {
     return {status: item.knownHash === input.known ? "ready" : "conflict"};

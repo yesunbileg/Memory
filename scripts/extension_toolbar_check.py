@@ -460,7 +460,10 @@ async def exercise(context, worker, driver, archive_id, db):
 
     await wait_for(completed, "manual popup sync did not complete")
     target = sorted([MEMBER, STANDALONE, RECENT_ONLY, LATE_MEMBER, CLAUDE, CLAUDE_MEMBER, GEMINI])
-    report = await worker.evaluate("({detail:qa.detail,unexpected:qa.unexpected,native:qa.native})")
+    report = await worker.evaluate("""({
+      detail:qa.detail,unexpected:qa.unexpected,native:qa.native,
+      claudeDetailBytes:qa.claudeDetailBytes
+    })""")
     status = await state(worker, "status")
     assert all(status[k]["progress"]["phase"] == "complete" for k in SITES), status
     assert archived(db) == target, (archived(db), report, status)
@@ -468,6 +471,10 @@ async def exercise(context, worker, driver, archive_id, db):
         "missing, extra, or duplicate transcript reads: " + str(report)
     )
     assert "ingest" in report["native"] and not report["unexpected"], report
+    claude_bytes = report["claudeDetailBytes"]
+    assert set(claude_bytes) == {CLAUDE, CLAUDE_MEMBER} and all(
+        n > 0 for n in claude_bytes.values()
+    )
     await worker.evaluate("qa.detail.length=0")
     started = await worker.evaluate("Date.now()")
     await toolbar.click("#sync")
@@ -517,6 +524,10 @@ async def exercise(context, worker, driver, archive_id, db):
                 "extra_tabs": len(opened),
                 "real_native_archive_records": len(target),
                 "repeat_detail_reads": {"unchanged": 0, "after_one_update": 1},
+                "claude_synthetic_detail_response_bytes": {
+                    "standalone": claude_bytes[CLAUDE],
+                    "project_member": claude_bytes[CLAUDE_MEMBER],
+                },
                 "stop_sync_aborts_active_detail": True,
                 "providers": ["ChatGPT", "Claude", "Gemini"],
             }

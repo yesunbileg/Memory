@@ -9,6 +9,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
+from . import cold_archive, source_names
+from .archive_files import prune_completed_snapshots
 from .archive_lock import archive_lock
 from .diagnostics import failure_code
 from .notebook import NotebookLMError
@@ -118,7 +120,12 @@ class SyncEngine:
         if digest(original) != segment["content_hash"]:
             raise SnapshotError("Segment changed before its snapshot was validated")
         text = self.builder.render_outbound(segment_id)
-        if len(text.split()) > 500_000:
+        limit = (
+            cold_archive.MAX_WORDS
+            if cold_archive.markdown_segment(self.store, segment_id)
+            else 500_000
+        )
+        if len(text.split()) > limit:
             raise SnapshotError("Redacted snapshot exceeds the source word ceiling")
         title = _filename(segment_id, revision, text)
         return original, text, title
@@ -231,7 +238,11 @@ class SyncEngine:
                 (s for s in await self.adapter.list_sources() if s["id"] == job["new_source_id"]),
                 None,
             )
-            if remote and remote["title"] == job["title"] and self._owns(job["new_source_id"]):
+            if (
+                remote
+                and remote["title"] == source_names.submitted_markdown_name(self.store, job)
+                and self._owns(job["new_source_id"])
+            ):
                 old_ids.append(job["new_source_id"])
         elif job["stage"] in ("uploading", "uncertain"):
             # v1 has no pre-registration inventory or receipt. Quarantine the old
@@ -289,14 +300,14 @@ class SyncEngine:
             job["stage"] != "processing"
             or not job["new_source_id"]
             or job["failure_phase"] != "upload"
-            or job["error"] not in {"network_error", "timeout"}
+            or job["error"] not in {"network_error", "timeout", "upload_registration_failed"}
         ):
             return
         partial_id = job["new_source_id"]
         self._emit_progress("reconcile", job["segment_id"])
         sources = await self.adapter.list_sources()
         partial = next((source for source in sources if source["id"] == partial_id), None)
-        if partial and partial["title"] != job["title"]:
+        if partial and partial["title"] != source_names.submitted_markdown_name(self.store, job):
             mapped = self.store.connection.execute(
                 "SELECT 1 FROM source_map WHERE source_id=?", (partial_id,)
             ).fetchone()
@@ -325,13 +336,20 @@ class SyncEngine:
             old_source_ids=json.dumps(old_ids),
         )
 
-    def _enqueue(self):
+    def _enqueue(self, *, segment_ids=None):
         db = self.store.connection
-        self._migrate_mapped_sources()
+        if segment_ids is None:
+            self._migrate_mapped_sources()
         with db:
             db.execute("BEGIN IMMEDIATE")
+            plan = self.store.get_setting(cold_archive.PLAN)
+            parents = set(plan["parents"]) if plan else set()
             for row in db.execute("""SELECT s.* FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
                 WHERE s.state!='retired' AND s.content_hash!='' AND NOT EXISTS(SELECT 1 FROM sync_jobs j WHERE j.segment_id=s.id AND j.stage='missing') AND (sm.source_id IS NULL OR sm.revision!=s.revision) ORDER BY s.rowid""").fetchall():
+                if row["id"] in parents or (
+                    segment_ids is not None and row["id"] not in segment_ids
+                ):
+                    continue
                 existing = db.execute(
                     "SELECT * FROM sync_jobs WHERE segment_id=? AND revision=?",
                     (row["id"], row["revision"]),
@@ -465,7 +483,7 @@ class SyncEngine:
             "SELECT * FROM source_map ORDER BY segment_id"
         ).fetchall()
         if not mappings:
-            return
+            return []
         # An inventory exception is unknown state, never proof of absence.
         sources = {source["id"]: source for source in await self.adapter.list_sources()}
         observe_inventory(self.store, list(sources.values()))
@@ -494,6 +512,14 @@ class SyncEngine:
                         WHERE segment_id=? AND revision=? AND stage='done'""",
                         (mapping["source_id"], mapping["segment_id"], mapping["revision"]),
                     )
+        if self.docs_client is not None:
+            from .web_docs_publication import DocsPublisher
+
+            publisher = DocsPublisher(
+                self.store, self.adapter, self.docs_client, self._emit_progress
+            )
+            return await publisher.reconcile_mirrors(sources)
+        return []
 
     async def _prove_uncertain_registration(
         self, job, sources, text: str, excluded_ids: set[str]
@@ -502,9 +528,10 @@ class SyncEngine:
         matches = []
         if job["prior_source_ids"] is not None:
             before = set(json.loads(job["prior_source_ids"])) | excluded_ids
+            title = source_names.submitted_markdown_name(self.store, job)
             for source in sources:
                 source_id = source["id"]
-                if source_id in before or source["title"] != job["title"]:
+                if source_id in before or source["title"] != title:
                     continue
                 if await self.adapter.get_source_text(source_id) == text:
                     matches.append(source_id)
@@ -525,14 +552,39 @@ class SyncEngine:
 
     async def _upload_and_record(self, job, path, old_ids):
         db = self.store.connection
+        title = source_names.submitted_markdown_name(self.store, job)
+        before = db.execute(
+            "SELECT prior_source_ids FROM sync_jobs WHERE id=?", (job["id"],)
+        ).fetchone()[0]
+        prior_ids = set(json.loads(before or "[]"))
+
+        def new_registration(source_id):
+            return isinstance(source_id, str) and bool(source_id) and source_id not in prior_ids
+
+        def record_before_transfer(source_id):
+            if not new_registration(source_id):
+                raise UploadUncertain("File registration did not return a new source identity")
+            with db:
+                db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (source_id,))
+                db.execute(
+                    "UPDATE sync_jobs SET new_source_id=? WHERE id=?", (source_id, job["id"])
+                )
+            job["new_source_id"] = source_id
+
         try:
-            source_id = await self.adapter.upload(path, job["title"])
+            tracked = getattr(self.adapter, "upload_tracked", None)
+            if tracked is None:
+                source_id = await self.adapter.upload(path, title)
+            else:
+                source_id = await tracked(path, title, record_before_transfer)
+            if not new_registration(source_id) or (tracked and source_id != job["new_source_id"]):
+                raise UploadUncertain("Upload returned an unverified source identity")
         except Exception as exc:
             # notebooklm-py carries registration IDs on partial upload failures.
-            partial = getattr(exc, "source_id", None)
+            partial = job["new_source_id"] or getattr(exc, "source_id", None)
             definitely_not_sent = getattr(exc, "definitely_not_sent", False)
             with db:
-                if isinstance(partial, str) and partial:
+                if new_registration(partial):
                     db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (partial,))
                     db.execute(
                         """UPDATE sync_jobs SET new_source_id=?,stage='processing',failure_phase=?,error=?
@@ -600,7 +652,11 @@ class SyncEngine:
                 return False
             path = self.output_dir / job["title"]
         await self._recover_terminal_upload_failure(job)
-        if self.docs_client is not None and job["stage"] in ("pending", "blocked"):
+        if (
+            self.docs_client is not None
+            and job["stage"] in ("pending", "blocked")
+            and not cold_archive.markdown_segment(self.store, job["segment_id"])
+        ):
             job = await self._publish_docs(job)
         if job["stage"] != "cleanup":
             if job["stage"] not in {"registered", "processing", "ready"}:
@@ -644,13 +700,18 @@ class SyncEngine:
                         self._record_registration(job, new_id, old)
                     else:
                         # Account for foreign sources too, and reserve the 50th slot for replacement.
-                        if len(sources) >= 50 and job["error"] in {"network_error", "timeout"}:
+                        if len(sources) >= 50 and job["error"] in {
+                            "network_error",
+                            "timeout",
+                            "upload_registration_failed",
+                        }:
                             terminal_partials = [
                                 source
                                 for source in sources
                                 if source["id"] in excluded_ids
                                 and self._owns(source["id"])
-                                and source["title"] == job["title"]
+                                and source["title"]
+                                == source_names.submitted_markdown_name(self.store, job)
                                 and not source.get("ready")
                                 and not db.execute(
                                     "SELECT 1 FROM source_map WHERE source_id=?",
@@ -667,7 +728,12 @@ class SyncEngine:
                             raise SourceQuota(
                                 "No free upload slot; existing remote sources preserved"
                             )
-                        if not old and len(sources) >= 49:
+                        plan = self.store.get_setting(cold_archive.PLAN)
+                        if (
+                            not old
+                            and len(sources) >= 49
+                            and (not plan or job["segment_id"] not in plan["children"])
+                        ):
                             raise SpareSlotNeeded(
                                 "Merge archive sources before growing into the spare slot"
                             )
@@ -675,6 +741,7 @@ class SyncEngine:
                             db.execute("BEGIN IMMEDIATE")
                             if self._pending_snapshot_changed(job["id"]):
                                 raise SnapshotError("Pending segment changed before upload")
+                            source_names.set_markdown_submission_name(self.store, job)
                             db.execute(
                                 "UPDATE sync_jobs SET stage='uploading',old_source_ids=?,prior_source_ids=?,failure_phase=NULL WHERE id=?",
                                 (
@@ -735,6 +802,13 @@ class SyncEngine:
         old_ids = json.loads(job["old_source_ids"])
         sources = {s["id"]: s for s in await self.adapter.list_sources()}
         replacement_ids = [job["new_source_id"]]
+        plan = self.store.get_setting(cold_archive.PLAN)
+        finishing_archive = bool(plan and plan.get("cleanup") == job["id"])
+        if finishing_archive:
+            verified = cold_archive.ready_replacements(self.store, plan)
+            if not verified or any(not sources.get(sid, {}).get("ready") for sid in verified):
+                raise SnapshotError("Archive replacements must all be ready before cleanup")
+            replacement_ids = sorted(verified)
         if self.docs_client is not None:
             replacement_ids.extend(
                 row[0]
@@ -767,6 +841,10 @@ class SyncEngine:
                 raise
             self._emit_progress("cleanup", job["segment_id"])
         with db:
+            submitted = source_names.submitted_markdown_name(self.store, job)
+            actual = sources.get(job["new_source_id"], {}).get("title")
+            if submitted != job["title"] and actual == submitted:
+                source_names.record_verified_name(self.store, job["new_source_id"], submitted)
             db.executemany(
                 """UPDATE source_receipts SET remote_state='ready',verified_at=?
                    WHERE source_id=? AND segment_id=? AND revision=? AND remote_state!='ready'""",
@@ -797,6 +875,12 @@ class SyncEngine:
                 "UPDATE sync_jobs SET stage='done',error=NULL,next_attempt=0 WHERE id=?",
                 (job["id"],),
             )
+            if finishing_archive:
+                db.executemany(
+                    "INSERT OR IGNORE INTO segment_parents VALUES(?,?)",
+                    ((job["segment_id"], parent) for parent in plan["parents"]),
+                )
+                db.execute("DELETE FROM settings WHERE key=?", (cold_archive.PLAN,))
         path.unlink(missing_ok=True)
         return True
 
@@ -920,12 +1004,74 @@ class SyncEngine:
         else:
             result["blocked"].extend(getattr(self.builder, "blocked", []))
 
+    async def _archive_inactive(self, result):
+        db = self.store.connection
+        plan = self.store.get_setting(cold_archive.PLAN)
+        if not plan:
+            if self.store.get_setting(cold_archive.NEXT_CHECK, 0) > time.time():
+                return
+            self._emit_progress("prepare")
+            plan = cold_archive.stage_replacement(self.builder, await self.adapter.list_sources())
+            self.store.set_setting(cold_archive.NEXT_CHECK, time.time() + 86_400)
+            if not plan:
+                return
+        children = set(plan["children"])
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            for (segment_id,) in db.execute(
+                """SELECT id FROM segments WHERE state!='retired' AND content_hash=''
+                AND id IN (SELECT value FROM json_each(?)) ORDER BY id""",
+                (json.dumps(sorted(children)),),
+            ).fetchall():
+                self.builder._refresh(segment_id)
+        self._enqueue(segment_ids=children)
+        await self._drain_queue(result, set(), segment_ids=children)
+        if "cleanup" in plan:
+            return
+        inventory = {
+            source["id"] for source in await self.adapter.list_sources() if source.get("ready")
+        }
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            replacements = cold_archive.ready_replacements(self.store, plan)
+            if not replacements or not replacements <= inventory:
+                return
+            keeper = plan["children"][0]
+            job = db.execute(
+                """SELECT j.id,j.old_source_ids FROM sync_jobs j JOIN source_map s
+                USING(segment_id,revision) WHERE s.segment_id=? AND j.stage='done'""",
+                (keeper,),
+            ).fetchone()
+            if not job:
+                return
+            old = list(
+                dict.fromkeys(
+                    old_id
+                    for parent in plan["parents"]
+                    for old_id in self._old_sources(parent)
+                    if old_id not in replacements
+                )
+            )
+            db.executemany(
+                "UPDATE segments SET state='retired' WHERE id=?",
+                ((p,) for p in plan["parents"]),
+            )
+            db.execute(
+                "UPDATE sync_jobs SET stage='cleanup',old_source_ids=? WHERE id=?",
+                (json.dumps(old), job["id"]),
+            )
+            plan["cleanup"] = job["id"]
+            db.execute(
+                "UPDATE settings SET value=? WHERE key=?", (json.dumps(plan), cold_archive.PLAN)
+            )
+        await self._drain_queue(result, set(), segment_ids={keeper})
+
     async def run_once(self) -> dict:
         """Run one sync cycle with exclusive archive/notebook-binding ownership."""
         with archive_lock(self.store.path):
             return await self._run_once_locked()
 
-    async def _run_once_locked(self, *, automatic=False) -> dict:
+    async def _run_once_locked(self, *, automatic=False, archive_only=False) -> dict:
         """Run while the caller holds archive_lock(self.store.path).
 
         CLI callers acquire the lock before reading settings or constructing the
@@ -933,6 +1079,14 @@ class SyncEngine:
         """
         with sync_activity(self.store.path, automatic=automatic) as self._activity:
             try:
+                with suppress(OSError):
+                    prune_completed_snapshots(self.store, self.output_dir)
+                if archive_only:
+                    result = {"completed": 0, "deferred": 0, "blocked": []}
+                    await self._archive_inactive(result)
+                    result["status"] = self.store.status()
+                    result["archive_pending"] = bool(self.store.get_setting(cold_archive.PLAN))
+                    return result
                 return await self._run_with_activity()
             finally:
                 self._activity = None
@@ -940,10 +1094,13 @@ class SyncEngine:
     async def _run_with_activity(self) -> dict:
         result = {"completed": 0, "deferred": 0, "blocked": []}
         self.docs_write_payload_bytes = 0
+        hybrid = self.docs_client is not None and self.store.get_setting(cold_archive.ENABLED)
+        if hybrid:
+            cold_archive.stage_unassigned(self.builder)
         self._build_segments(result)
         try:
             self._emit_progress("reconcile")
-            await self._reconcile_mapped_sources()
+            result["blocked"].extend(await self._reconcile_mapped_sources())
             self._enqueue()
         except SnapshotError:
             result["blocked"].append({"reason": "SnapshotError"})
@@ -958,7 +1115,7 @@ class SyncEngine:
         if drained in {"complete", "merge"}:
             # One merge per invocation bounds network work; a daemon can continue next cycle.
             status = self.store.status()
-            if (
+            if not self.store.get_setting(cold_archive.PLAN) and (
                 drained == "merge"
                 or status["unassigned_messages"]
                 and status["segments"] >= self.builder.max_active
@@ -980,7 +1137,22 @@ class SyncEngine:
                             )
                 except CapacityError as exc:
                     result["blocked"].append({"reason": "CapacityError", "detail": str(exc)})
+        if hybrid:
+            try:
+                await self._archive_inactive(result)
+            except (
+                CapacityError,
+                SnapshotError,
+                NotebookLMError,
+                ConnectionError,
+                TimeoutError,
+            ) as exc:
+                result["blocked"].append({"reason": failure_code(exc)})
         result["status"] = self.store.status()
+        if result["status"]["sync_status"] == "up_to_date" and any(
+            "document_segment" in item for item in result["blocked"]
+        ):
+            result["status"]["sync_status"] = "pending"
         if self.docs_client is not None:
             result["docs_web_write_payload_bytes"] = self.docs_write_payload_bytes
         return result

@@ -1,9 +1,0 @@
-# Extension handoff
-
-Open a signed-in provider tab and enable **List mode** in the AI Memory toolbar. Check a chat or a project directly in the website sidebar. Each check or uncheck immediately changes the account-scoped sync list, without reading a transcript or starting a capture. Project selection does not require expanding the project. Its eligible chats are discovered at sync time, including those not visible in the sidebar. A dash on a chat means it is covered by a selected project but not individually selected. Turning the mode off hides the controls and preserves the list. Gemini offers chats only.
-
-Pair the local archive in the popup’s **Settings**. **Sync now** and enabled automatic captures write saved items from enabled providers to the paired local archive. There is no category-based fallback, including on upgrade or after removing the last saved item. Local capture has no effect on NotebookLM consent. Google publication still needs explicit archive approval and the CLI sync command.
-
-Pull the updated checkout, then reload the unpacked extension in your browser’s extension manager. Refresh any provider tab that was already open so the new version can receive the mode switch. Keep the same installation and ID to retain its local settings. Existing ChatGPT saved IDs remain scoped to their original account and restrictions. If you package the extension, extract the ZIP printed by `python scripts/package_extension.py` and load the directory containing `manifest.json`. Runtime files and both MIT notices are included, not personal data or tests.
-
-See [native pairing](native-pairing.md), the [Mongolian setup guide](extension-setup.mn.md) and the [verification record](validation.md). Tests with isolated browser profiles and synthetic provider data are separate from signed-in, user-device verification.

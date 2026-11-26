@@ -593,13 +593,17 @@ class Store:
 
     def auto_sync_due(self) -> float | None:
         """Return immediate work or the earliest retry for an opted-in archive."""
+        from . import cold_archive
         from .privacy import MASKING_POLICY
+        from .web_docs_publication import DOCS_SETTING
 
         if self.get_setting("tui_auto_sync", True) is not True or not self.get_setting(
             "notebook_id"
         ):
             return None
         db = self.connection
+        hybrid = self.get_setting(cold_archive.ENABLED) and self.get_setting(DOCS_SETTING)
+        plan = self.get_setting(cold_archive.PLAN) if hybrid else None
         if db.execute("""
             SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
             WHERE c.consent=1 AND NOT EXISTS (
@@ -608,9 +612,11 @@ class Store:
             LIMIT 1
         """).fetchone():
             return 0
-        if db.execute("""
+        if db.execute(
+            """
             SELECT 1 FROM segments s LEFT JOIN source_map sm ON sm.segment_id=s.id
             WHERE s.state!='retired'
+                AND s.id NOT IN (SELECT value FROM json_each(?))
                 AND NOT EXISTS (SELECT 1 FROM sync_jobs j
                     WHERE j.segment_id=s.id AND j.stage='missing')
                 AND (s.content_hash='' OR (
@@ -618,7 +624,9 @@ class Store:
                     AND NOT EXISTS (SELECT 1 FROM sync_jobs j
                         WHERE j.segment_id=s.id AND j.revision=s.revision)))
             LIMIT 1
-        """).fetchone():
+        """,
+            (json.dumps(plan["parents"] if plan else []),),
+        ).fetchone():
             return 0
         if (
             db.execute("PRAGMA user_version").fetchone()[0] >= 2
@@ -637,12 +645,20 @@ class Store:
             ).fetchone()
         ):
             return 0
-        return db.execute("""
+        due = db.execute("""
             SELECT MIN(j.next_attempt) FROM sync_jobs j
             WHERE j.stage NOT IN ('done','superseded','missing')
             AND NOT EXISTS (SELECT 1 FROM sync_jobs hold
                 WHERE hold.segment_id=j.segment_id AND hold.stage='missing')
         """).fetchone()[0]
+        if not hybrid:
+            return due
+        if not plan:
+            archive_due = self.get_setting(cold_archive.NEXT_CHECK, 0)
+            return archive_due if due is None else min(due, archive_due)
+        if "cleanup" not in plan and cold_archive.ready_replacements(self, plan):
+            return 0
+        return due
 
     def status(self, *, sources=None, published=None) -> dict:
         from .publication import allowed_sources, publication_status, published_message_counts

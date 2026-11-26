@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 from test_store import conversation
 
+from ai_memory.archive_files import prune_completed_snapshots
 from ai_memory.cli import main
+from ai_memory.privacy import snapshot_sha256
 from ai_memory.segments import SegmentBuilder
 from ai_memory.store import Store
 
@@ -16,6 +18,35 @@ from ai_memory.store import Store
 def cli(db, capsys, *args, code=0):
     assert main(["--db", str(db), *map(str, args)]) == code
     return json.loads(capsys.readouterr().out)
+
+
+def test_prune_removes_only_byte_identical_terminal_work_files(tmp_path):
+    with Store(tmp_path / "archive.sqlite") as store:
+        folder = store.workspace / "sync"
+        folder.mkdir(parents=True)
+        builder = SegmentBuilder(store)
+        files = []
+        with store.connection:
+            for stage, changed in (("superseded", False), ("done", True), ("pending", False)):
+                sid = builder._new("sealed")
+                text = f"Synthetic snapshot for {sid}\n"
+                title = f"{sid}-r1-{snapshot_sha256(text)[:16]}.md"
+                store.save_outbound(sid, 1, text)
+                store.connection.execute(
+                    "INSERT INTO sync_jobs(segment_id,revision,title,stage) VALUES(?,1,?,?)",
+                    (sid, title, stage),
+                )
+                path = folder / title
+                path.write_text(text.replace("Synthetic", "Different") if changed else text)
+                files.append(path)
+        unrelated = folder / "my-notes.md"
+        unrelated.write_text("local notes")
+        assert prune_completed_snapshots(store, folder) == [files[0].name]
+        assert not files[0].exists()
+        assert all(path.is_file() for path in [*files[1:], unrelated])
+        assert (
+            store.connection.execute("SELECT count(*) FROM outbound_revisions").fetchone()[0] == 3
+        )
 
 
 def test_atomic_approval_preview_revocation_and_private_fields(tmp_path, capsys):

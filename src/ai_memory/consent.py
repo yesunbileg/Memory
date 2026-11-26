@@ -4,6 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from .cold_archive import cancel_for_revocation
 from .diagnostics import PublicInputError
 from .privacy import MASKING_POLICY, find_sensitive, snapshot_sha256
 
@@ -46,7 +47,7 @@ def update_consent(store, ids, *, approved):
                     (key,),
                 )
             ]
-            for sid in segments:
+            for sid in cancel_for_revocation(store, segments):
                 db.execute("INSERT OR IGNORE INTO retained_segments VALUES(?)", (sid,))
                 ids_to_keep = {
                     r[0]

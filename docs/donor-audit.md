@@ -104,7 +104,7 @@ extension does not fall back to this endpoint.
 
 The user-supplied ChatVault reference discovers sidebar chat links by route rather than by a provider’s generated CSS classes. It adds a checkbox only in multi-selection mode and removes it when leaving that mode. AI Memory applies this visible-link pattern to the provider page. The worker, not page text or a link alone, verifies allowed IDs and project membership against signed-in listing metadata. Only deliberate choices change the local sync scope. No exporter, donor code or new upload destination is bundled.
 
-The earlier category classifier described below is still relevant to restricted legacy selections and the synthetic reader fixtures. It is **not** permission for an extension capture. An account with no saved IDs collects nothing. ChatGPT binds selections to the active user and account from the session; a [public client](https://github.com/bigfei/chats2md) uses those same identity fields. See the [current extension guide](extension-handoff.md).
+The earlier category classifier described below is still relevant to restricted legacy selections and the synthetic reader fixtures. It is **not** permission for an extension capture. An account with no saved IDs collects nothing. ChatGPT binds selections to the active user and account from the session; a [public client](https://github.com/bigfei/chats2md) uses those same identity fields. See the [current extension guide](extension-setup.mn.md).
 
 The following public sources were inspected over HTTPS for protocol evidence.
 They are unofficial clients; no code was copied from them and no logged-in user

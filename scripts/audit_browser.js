@@ -65,7 +65,7 @@ if (auditInput.action === "start") {
         task.finally(() => settling.delete(task));
       });
       try {
-        const cdp = await context.newCDPSession(page);
+        const cdp = await getCDPSession({page});
         const transfers = new Map();
         cdp.on("Network.requestWillBeSent", e => {
           const previous = transfers.get(e.requestId);

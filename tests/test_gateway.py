@@ -4,10 +4,6 @@ import json
 import sys
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.shared.memory import create_connected_server_and_client_session
-
 import ai_memory
 
 
@@ -100,6 +96,8 @@ def seed_archive(db_path, *, map_source=True, decision="Memory."):
 
 
 async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
 
     db = tmp_path / "memory.sqlite"
@@ -127,6 +125,8 @@ async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
 
 
 async def test_citations_identify_only_exact_verified_headings(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
 
     db = tmp_path / "memory.sqlite"
@@ -236,6 +236,8 @@ def test_quoted_message_heading_does_not_authorize_another_message_id(tmp_path):
 
 
 async def test_empty_sources_and_question_fail_without_unscoped_retrieval(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
 
     db = tmp_path / "memory.sqlite"
@@ -254,6 +256,8 @@ async def test_empty_sources_and_question_fail_without_unscoped_retrieval(tmp_pa
 async def test_missing_configuration_and_auth_are_reported_without_fake_answer(
     tmp_path, monkeypatch
 ):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
     from ai_memory.store import Store
 
@@ -281,6 +285,9 @@ async def test_missing_configuration_and_auth_are_reported_without_fake_answer(
 
 
 async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_path):
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
     """A genuine MCP handshake parses stdout from the production gateway process."""
     from datetime import timedelta
 
@@ -299,7 +306,7 @@ async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_p
             str(db),
         ],
     )
-    async with stdio_client(parameters) as (reader, writer):
+    async with stdio_client(parameters, errlog=sys.__stderr__) as (reader, writer):
         async with ClientSession(
             reader, writer, read_timeout_seconds=timedelta(seconds=15)
         ) as client:
@@ -316,6 +323,8 @@ async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_p
 
 
 async def test_edited_archive_does_not_attribute_old_cloud_passage_to_current_message(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
     from ai_memory.store import Store
 
@@ -364,6 +373,8 @@ async def test_mongolian_terminal_question_links_exact_passage_to_original_messa
 
 
 async def test_foreign_or_absent_citation_withholds_entire_answer(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
 
     db = tmp_path / "db"
@@ -432,6 +443,8 @@ async def test_terminal_chat_rechecks_sources_and_rejects_foreign_citations(tmp_
 
 
 async def test_legacy_receipt_and_oversized_or_malformed_question_never_dispatch(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
     from ai_memory.store import Store
 
@@ -456,6 +469,8 @@ async def test_legacy_receipt_and_oversized_or_malformed_question_never_dispatch
 
 
 async def test_scope_is_frozen_and_rechecked_across_provider_wait(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
     from ai_memory.store import Store
 
@@ -483,6 +498,8 @@ async def test_scope_is_frozen_and_rechecked_across_provider_wait(tmp_path):
 
 
 async def test_mcp_missing_archive_never_creates_file(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
     from ai_memory.gateway import create_server
 
     db = tmp_path / "typo" / "absent.sqlite"

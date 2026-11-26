@@ -78,8 +78,14 @@ def parser():
     mode.add_argument(
         "--automatic", action="store_true", help="Sync due work only when /auto on is enabled"
     )
+    mode.add_argument(
+        "--archive-cold",
+        action="store_true",
+        help="Enable 30-day Markdown archiving and compact eligible NotebookLM sources",
+    )
     web_docs = sub.add_parser("docs-web-enable", help="Publish through linked Google Docs in Brave")
     web_docs.add_argument("--session", type=int, help="Existing Playwriter Brave session")
+    sub.add_parser("source-names", help="Apply readable labels to NotebookLM sources")
     cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
     cleanup.add_argument(
         "--delete",
@@ -154,8 +160,11 @@ async def _run_automatic_sync(engine):
                 await worker
 
 
-async def sync_archive(store, *, progress=None, all_chats=False, automatic=False):
+async def sync_archive(
+    store, *, progress=None, all_chats=False, automatic=False, archive_cold=False
+):
     from .archive_lock import archive_lock
+    from .cold_archive import ENABLED, NEXT_CHECK
     from .notebook import NotebookLMAdapter
     from .sync import SyncEngine
     from .web_docs_publication import DOCS_SETTING
@@ -172,8 +181,14 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
         notebook_id = store.get_setting("notebook_id")
         if not notebook_id:
             raise PublicInputError("Set a notebook ID with init --notebook-id before syncing")
+        if archive_cold:
+            if not store.get_setting(DOCS_SETTING):
+                raise PublicInputError("Connect Google Docs before enabling hybrid publication")
+            store.set_setting(ENABLED, True)
+            store.set_setting(NEXT_CHECK, 0)
         storage = store.get_setting("storage_path")
         adapter = None
+        docs_client = None
         try:
             approved_count = 0
             if all_chats:
@@ -182,21 +197,22 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
                         "UPDATE conversations SET consent=1 WHERE consent=0"
                     ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
-            docs = {}
             if session := store.get_setting(DOCS_SETTING):
                 from .web_docs_transport import WebDocsTransport
 
-                docs["docs_client"] = WebDocsTransport(session)
+                docs_client = WebDocsTransport(session)
             engine = SyncEngine(
                 store,
                 SegmentBuilder(store),
                 adapter,
                 store.workspace / "sync",
                 progress=progress,
-                **docs,
+                docs_client=docs_client,
             )
             result = (
-                await _run_automatic_sync(engine) if automatic else await engine._run_once_locked()
+                await _run_automatic_sync(engine)
+                if automatic
+                else await engine._run_once_locked(archive_only=archive_cold)
             )
             if result is None:
                 return {"automatic": "stopped"}
@@ -210,8 +226,29 @@ async def sync_archive(store, *, progress=None, all_chats=False, automatic=False
             store.set_setting("sync_preflight_errors", [{"reason": failure_code(error)}])
             raise
         finally:
+            if docs_client is not None:
+                with suppress(Exception):
+                    await docs_client.release()
             if adapter is not None:
                 await adapter.close()
+
+
+async def rename_notebook_sources(store):
+    from .archive_lock import archive_lock
+    from .notebook import NotebookLMAdapter
+    from .source_names import ENABLED, apply_source_names
+
+    with archive_lock(store.path):
+        notebook_id = store.get_setting("notebook_id")
+        if not notebook_id:
+            raise PublicInputError("Connect NotebookLM before renaming sources")
+        adapter = NotebookLMAdapter(notebook_id, store.get_setting("storage_path"))
+        try:
+            result = await apply_source_names(store, adapter, include_legacy=True)
+            store.set_setting(ENABLED, True)
+            return result
+        finally:
+            await adapter.close()
 
 
 async def cleanup_legacy_archive(store, approved_ids):
@@ -419,7 +456,11 @@ def execute(args, *, progress=None):
             try:
                 return asyncio.run(
                     sync_archive(
-                        store, progress=progress, all_chats=args.all_chats, automatic=args.automatic
+                        store,
+                        progress=progress,
+                        all_chats=args.all_chats,
+                        automatic=args.automatic,
+                        archive_cold=args.archive_cold,
                     )
                 )
             except ArchiveBusyError:
@@ -428,6 +469,8 @@ def execute(args, *, progress=None):
                 raise
         if args.command == "cleanup-legacy":
             return asyncio.run(cleanup_legacy_archive(store, args.delete))
+        if args.command == "source-names":
+            return asyncio.run(rename_notebook_sources(store))
         if args.command == "show":
             return store.get_conversation(args.conversation_id)
         return store.status()
@@ -490,10 +533,13 @@ def main(argv=None, *, progress=None):
             "error" in result
             or (args.command == "check" and not result.get("notebook", {}).get("connected"))
             or result.get("blocked")
+            or result.get("archive_pending")
             or result.get("failed_files")
+            or (args.command == "source-names" and result.get("failed"))
             or (
                 args.command == "sync"
                 and not args.automatic
+                and not args.archive_cold
                 and status.get("sync_status") == "pending"
                 and (
                     args.all_chats

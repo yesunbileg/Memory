@@ -57,6 +57,19 @@ def sync_phase_text(activity: dict) -> str:
     return f"{segment} · {label}" if segment else label
 
 
+def sync_failure_text(failure: dict) -> str:
+    reason = failure.get("reason")
+    label = {
+        "docs_web_not_sent": "Google Docs-д бичих хүсэлт эхлээгүй",
+        "docs_web_uncertain": "Google Docs-ийн бичилт баталгаажихыг хүлээж байна",
+        "docs_web_auth_required": "Brave дээр Google Docs-д нэвтрэх шаардлагатай",
+        "remote_missing": "NotebookLM-д эх сурвалж олдсонгүй",
+        "not_ready": "NotebookLM эхээ индексэлж дуусаагүй",
+    }.get(reason, f"Синк саатсан · {reason or 'operation_failed'}")
+    segment = failure.get("segment_id")
+    return f"{segment} · {label}" if segment else label
+
+
 def rgb(k: tuple[int, int, int]) -> str:
     return f"rgb({k[0]},{k[1]},{k[2]})"
 
@@ -221,8 +234,8 @@ COMMANDS = [
     Cmd("flow", "Ажлын урсгал", "Архиваас NotebookLM хүрэх урсгал", "Санах ой"),
     Cmd(
         "sync-all",
-        "Архивын өөрчлөлтийг sync хийх",
-        "Локал архивын бүх чатын өөрчлөлтийг NotebookLM руу илгээнэ",
+        "Архивын бүх чатыг sync хийх",
+        "Бүх чатад NotebookLM рүү илгээх зөвшөөрөл өгнө",
         "Sync",
         ("syns-all",),
     ),
@@ -1988,11 +2001,9 @@ class Mem(App):
         if self.notebook_status.get("connected") and self.notebook_status.get("can_write") is False:
             return "login", "NotebookLM-д засах эрхтэй аккаунтаар нэвтрэх"
         s = self.stats(all_chats=True)
-        if (
-            s["failed"]
-            or self.archive_status.get("sync_errors")
-            or self.archive_status.get("sync_preflight_errors")
-        ):
+        if failures := self.archive_status.get("sync_errors"):
+            return "dashboard", sync_failure_text(failures[0])
+        if s["failed"] or self.archive_status.get("sync_preflight_errors"):
             return "check", "NotebookLM sync-ийн алдаа байна"
         if remaining := s["syncable"] - s["done"]:
             return "dashboard", f"NotebookLM рүү илгээх {remaining} чат байна"
@@ -2142,10 +2153,14 @@ class Mem(App):
                     f"Нэмэх мессеж · {self.archive_status.get('unassigned_messages', 0)}",
                     MUTED,
                 ),
+                *[
+                    tx(sync_failure_text(failure), YELLOW)
+                    for failure in self.archive_status.get("sync_errors", ())[:3]
+                ],
             ]
         )
-        auto = "асаалттай" if self.auto_sync else "унтраалттай"
         when = "mem хаалттай үед ч ажиллана" if self.background_sync else "mem нээлттэй үед"
+        auto = f"асаалттай · {when}" if self.auto_sync else "унтраалттай"
         saved = self.archive_status.get("conversations", 0)
         ready = self.archive_status.get("ready_conversations", 0)
         pending = self.archive_status.get("pending_conversations", 0)
@@ -2157,7 +2172,7 @@ class Mem(App):
                 tx(f"NotebookLM-д бэлэн · {ready}", GREEN),
                 tx(f"Хүлээгдэж буй чат · {pending}", YELLOW),
                 *([tx(f"Мессежгүй чат · {empty}", MUTED)] if empty > 0 else []),
-                tx(f"Автомат синк {auto} · {when}", MUTED),
+                tx(f"Автомат синк {auto}", MUTED),
             ]
         )
         col = {"OK": GREEN, "INFO": CYAN, "WARN": ORANGE, "ERR": RED, "NEW": PURPLE}
@@ -2880,7 +2895,27 @@ class Mem(App):
             )
             self.open_notebook_form("login")
             return
-        self.start_job("all")
+
+        def confirmed(result) -> None:
+            if result == ("pick", "sync-all"):
+                self.call_after_refresh(lambda: self.start_job("all"))
+
+        self.dialog(
+            DialogSelect(
+                "Архивын бүх чатыг илгээх үү?",
+                [
+                    Opt("scope", "Sync эхлэхэд архивт байгаа бүх чат", disabled=True),
+                    Opt("revoked", "Цуцалсан зөвшөөрлийг сэргээнэ", disabled=True),
+                    Opt("future", "Цаашдын үргэлжлэлд мөн үйлчилнэ", disabled=True),
+                    Opt("cancel", "Буцах"),
+                    Opt("sync-all", "Бүх чатад зөвшөөрөл өгч sync хийх"),
+                ],
+                searchable=False,
+                size=74,
+                current="cancel",
+            ),
+            confirmed,
+        )
 
     def cmd_auto(self, args: str = "") -> None:
         mode = args.strip().lower()
@@ -3094,12 +3129,15 @@ class Mem(App):
                             "Brave-д Google Docs-д нэвтэрч /docs-connect ажиллуулна уу.",
                             code="docs_web_auth_required",
                         )
-                    if "docs_web_conflict" in reasons:
-                        raise BackendError(
-                            "Google Docs өөрчлөгдсөн байна. Sync зогссон. "
-                            "Архив болон Docs-ийн хувилбарыг тулгаж шалгана уу.",
-                            code="docs_web_conflict",
-                        )
+                    docs_recovery = {
+                        "docs_web_conflict": "Docs-ийн хувилбар солигдсон. Sync-ийг дахин ажиллуулж архиваас сэргээнэ үү.",
+                        "docs_web_title_unconfirmed": "Docs-ийн нэр батлагдсангүй. Дахин sync хийхэд ижил файлаар үргэлжилнэ.",
+                        "docs_web_link_uncertain": "NotebookLM-ийн холбоос батлагдсангүй. Эх сурвалжийн жагсаалтыг шалгаад sync хийнэ үү.",
+                        "docs_web_uncertain": "Docs хадгалалтыг баталж чадсангүй. Brave нээлттэй үед дахин sync хийнэ үү.",
+                    }
+                    for code, message in docs_recovery.items():
+                        if code in reasons:
+                            raise BackendError(message, code=code)
                     raise BackendError(
                         f"{len(blocked)} саатсан · {', '.join(reasons)}", code="sync_blocked"
                     )

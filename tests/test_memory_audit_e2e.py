@@ -7,8 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import pytest
 
 from ai_memory.archive_files import workspace_for
 from ai_memory.segments import SegmentBuilder
@@ -169,6 +168,9 @@ def decode_mcp(result):
 
 
 async def verify_mcp_scope(db, remote_path, source_id):
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
     # Run the real CLI/SDK protocol in another process. The only substitution
     # is the provider adapter, constructed inside this synthetic test's child.
     bootstrap = (
@@ -185,7 +187,10 @@ async def verify_mcp_scope(db, remote_path, source_id):
         args=["-c", bootstrap, str(remote_path), "--db", str(db), "mcp"],
         env={"PYTHONPATH": pythonpath},
     )
-    async with stdio_client(parameters) as streams, ClientSession(*streams) as client:
+    async with (
+        stdio_client(parameters, errlog=sys.__stderr__) as streams,
+        ClientSession(*streams) as client,
+    ):
         await client.initialize()
         assert {tool.name for tool in (await client.list_tools()).tools} == {
             "memory_ask",
@@ -244,7 +249,26 @@ def requeue_after_deadline(store):
         store.connection.execute("UPDATE sync_jobs SET next_attempt=0 WHERE next_attempt>0")
 
 
-async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
+async def verify_direct_scope(db, remote_path, source_id):
+    from ai_memory.gateway import MemoryApplication
+
+    notebook = FakeNotebook(remote_path)
+    app = MemoryApplication(db, adapter=notebook)
+    accepted = await app.call("memory_ask", {"question": QUESTION})
+    assert ANSWER in accepted["answer"]
+    assert [source["source_id"] for source in accepted["sources"]] == [source_id]
+    rejected = await app.call("memory_ask", {"question": FOREIGN_QUESTION})
+    assert rejected["error"]["code"] == "unverified_sources"
+    assert "answer" not in rejected
+    assert FOREIGN_ANSWER not in str(rejected) and FOREIGN_PASSAGE not in str(rejected)
+    assert notebook.read()["questions"] == [
+        [QUESTION, [source_id]],
+        [FOREIGN_QUESTION, [source_id]],
+    ]
+
+
+@pytest.mark.parametrize("transport", ["direct", "stdio"])
+async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path, transport):
     db = tmp_path / "memory.sqlite"
     rollout = tmp_path / "rollout-mongolian.jsonl"
     remote_path = tmp_path / "remote.json"
@@ -313,7 +337,8 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path):
     cli(pending_archive, "backup", finished_backup)
     cli(finished_archive, "restore", finished_backup)
     assert archive_evidence(finished_archive) == evidence
-    await verify_mcp_scope(finished_archive, remote_path, source_id)
+    verify = verify_mcp_scope if transport == "stdio" else verify_direct_scope
+    await verify(finished_archive, remote_path, source_id)
 
 
 def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_path):

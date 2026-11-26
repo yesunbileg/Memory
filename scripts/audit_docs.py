@@ -24,10 +24,13 @@ from ai_memory.gateway import MemoryApplication
 from ai_memory.notebook import NotebookLMAdapter
 from ai_memory.privacy import snapshot_sha256
 from ai_memory.private_io import write_private_text
+from ai_memory.publication import allowed_sources
 from ai_memory.store import Store
-from ai_memory.web_docs_journal import INDEX_RECEIPT_PREFIX, split_document
+from ai_memory.web_docs_journal import INDEX_RECEIPT_PREFIX, DocumentJournal, split_document
+from ai_memory.web_docs_protocol import editor_commands
 from ai_memory.web_docs_publication import enable_web_docs
 from ai_memory.web_docs_transport import WebDocsTransport, new_brave_session
+from ai_memory.web_text_delta import text_edits
 
 MARKER = "UNCHANGEDFIELDLOGSENTINEL"
 QUESTION = "Quote the complete sentence from the field log about the winter observatory's spare compass and cite the original message."
@@ -272,7 +275,52 @@ def source_pair(store):
     return dict(row) if row else {}
 
 
-async def trace(store, folder, notebook, docs, report, phase):
+async def check_mirror_repair(store, docs, report, phase, pair, sentence):
+    doc, source_id = pair["document_id"], pair["source_id"]
+    journal = DocumentJournal(store, docs, doc)
+    original = journal._load()["text"]
+    damage = "Synthetic manual edit " + uuid4().hex
+    changed = original.replace(sentence, damage, 1)
+    if changed == original:
+        report.record("mirror_repair", "BLOCKED", reason="no_verified_document")
+        return
+    old_state = state_digest(store)
+    old_revision = allowed_sources(store)[source_id]["source_revision"]
+    await phase("manual_edit")
+    before = snapshot_sha256(original)
+    if (await docs.call("prepare", id=doc, known=before)).get("status") != "ready":
+        report.record("mirror_repair", "BLOCKED", reason="no_verified_document")
+        return
+    await docs.write(
+        doc,
+        uuid4().hex,
+        before,
+        snapshot_sha256(changed),
+        editor_commands(text_edits(original, changed)),
+        recovering=False,
+    )
+    await phase("repair")
+    if not await publication_cycle(store, report, "repair_publication"):
+        report.record("mirror_repair", "BLOCKED", reason="repair_not_verified")
+        return
+    restored = journal._load()["text"]
+    await journal.verify_remote(restored)
+    new_state = state_digest(store)
+    revision = allowed_sources(store)[source_id]["source_revision"]
+    report.verify(
+        "mirror_repair",
+        restored.count(sentence) == 1
+        and damage not in restored
+        and pair == source_pair(store)
+        and old_state["messages_sha256"] == new_state["messages_sha256"]
+        and revision > old_revision,
+        **pair,
+        revision=revision,
+        sha256=snapshot_sha256(restored),
+    )
+
+
+async def trace(store, folder, notebook, docs, report, phase, *, repair=False):
     run_id = folder.name + "-" + uuid4().hex[:12]
     secret = "Synthetic" + uuid4().hex[:12]
     seed = f"Өвлийн тэмдэглэл 🧭\r\n{MARKER}\r\npassword={secret}"
@@ -366,6 +414,11 @@ async def trace(store, folder, notebook, docs, report, phase):
         )
     else:
         report.record("memory_ask", "BLOCKED", reason="no_verified_publication")
+    if repair:
+        if published and report.checks["reopened_document"]["status"] == "PASS":
+            await check_mirror_repair(store, docs, report, phase, pair, sentence)
+        else:
+            report.record("mirror_repair", "BLOCKED", reason="no_verified_publication")
     await phase("unchanged")
     if published:
         await publication_cycle(store, report, "unchanged_publication")
@@ -409,7 +462,9 @@ async def run(args):
                 report.phase = name
                 await browser_audit(session, "phase", phase=name)
 
-            seeded, published, stable = await trace(store, folder, notebook, docs, report, phase)
+            seeded, published, stable = await trace(
+                store, folder, notebook, docs, report, phase, repair=args.repair
+            )
             traffic = await browser_audit(session, "report")
             append = traffic.get("append", {})
             idle = traffic.get("unchanged", {})
@@ -461,6 +516,9 @@ def main():
     )
     p.add_argument(
         "--session", type=int, help="Dedicated Brave Playwriter session (default: create)"
+    )
+    p.add_argument(
+        "--repair", action="store_true", help="Verify repair of the synthetic Google Doc"
     )
     args = p.parse_args()
     try:

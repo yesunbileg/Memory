@@ -47,9 +47,17 @@ class Docs:
         assert doc in self.documents
         self.titles[doc] = title
 
-    async def call(self, action, *, id, known):
+    async def call(self, action, *, id, known=None):
+        if action == "check":
+            return {"hash": snapshot_sha256(self.documents[id]), "revision": len(self.writes)}
+        if action == "inspect":
+            digest = snapshot_sha256(self.documents[id])
+            return {"hash": digest, "status": "ready" if digest == known else "changed"}
         assert action == "prepare"
         return {"status": "ready" if snapshot_sha256(self.documents[id]) == known else "conflict"}
+
+    async def read_repair_base(self, doc):
+        return {"text": self.documents[doc], **await self.call("check", id=doc)}
 
     async def write(self, doc, transaction, before, after, commands, *, recovering):
         current = self.documents[doc]
@@ -75,7 +83,7 @@ class Notebook(Remote):
         self.sources[source_id] = {"title": title, "ready": False, "drive_document_id": document_id}
         return source_id
 
-    async def refresh_document(self, source_id, receipt, *, refresh=True, allow_indexed_read=False):
+    async def refresh_document(self, source_id, receipt, *, refresh=True):
         await self.wait_ready(source_id)
 
 
@@ -117,13 +125,13 @@ async def test_transport_rejects_a_signed_out_brave_session(monkeypatch):
     assert error.value.code == "docs_web_auth_required"
 
 
-async def test_initial_docs_publication_can_verify_indexed_text_when_chat_fails():
-    from notebooklm.exceptions import ChatError, NetworkError
+async def test_docs_publication_checks_ready_source_and_indexed_receipt_without_chat():
+    from notebooklm.exceptions import NetworkError
 
     receipt = "a" * 24
     sources = SimpleNamespace(
         refresh=AsyncMock(side_effect=NetworkError("refresh response lost")),
-        wait_until_ready=AsyncMock(),
+        wait_until_ready=AsyncMock(return_value=SimpleNamespace(is_ready=True)),
         get_fulltext=AsyncMock(
             return_value=SimpleNamespace(
                 source_id="source", content=f"Memory publication receipt {receipt}\nMessage text"
@@ -131,19 +139,46 @@ async def test_initial_docs_publication_can_verify_indexed_text_when_chat_fails(
         ),
     )
     adapter = NotebookLMAdapter("notebook")
-    adapter._client = SimpleNamespace(
-        sources=sources, chat=SimpleNamespace(ask=AsyncMock(side_effect=ChatError("rejected")))
-    )
-    with pytest.raises(NotebookLMError):
-        await adapter.refresh_document("source", receipt, refresh=False)
-    sources.get_fulltext.assert_not_awaited()
-    await adapter.refresh_document("source", receipt, allow_indexed_read=True)
+    adapter._client = SimpleNamespace(sources=sources, chat=SimpleNamespace(ask=AsyncMock()))
+    await adapter.refresh_document("source", receipt)
     sources.refresh.assert_awaited_once_with("notebook", "source")
+    sources.wait_until_ready.assert_awaited_once_with("notebook", "source")
     sources.get_fulltext.assert_awaited_once_with("notebook", "source")
 
     with pytest.raises(NotebookLMError) as rejected:
-        await adapter.refresh_document("source", "b" * 24, refresh=False, allow_indexed_read=True)
+        await adapter.refresh_document("source", "b" * 24, refresh=False)
     assert rejected.value.code == "not_ready"
+    sources.refresh.assert_awaited_once()
+
+    sources.get_fulltext.reset_mock()
+    sources.wait_until_ready.return_value = SimpleNamespace(is_ready=False)
+    with pytest.raises(NotebookLMError) as rejected:
+        await adapter.refresh_document("source", receipt, refresh=False)
+    assert rejected.value.code == "not_ready"
+    sources.get_fulltext.assert_not_awaited()
+    adapter._client.chat.ask.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("indexed_id", "content"),
+    [
+        ("other-source", f"Memory publication receipt {'a' * 24}\n"),
+        ("source", f"Memory publication receipt {'a' * 24}extra\n"),
+        ("source", f"{' ' * 1996}\nMemory publication receipt {'a' * 24}extra\n"),
+    ],
+)
+async def test_docs_publication_rejects_unscoped_or_inexact_indexed_receipt(indexed_id, content):
+    adapter = NotebookLMAdapter("notebook")
+    adapter._client = SimpleNamespace(
+        sources=SimpleNamespace(
+            wait_until_ready=AsyncMock(return_value=SimpleNamespace(is_ready=True)),
+            get_fulltext=AsyncMock(
+                return_value=SimpleNamespace(source_id=indexed_id, content=content)
+            ),
+        )
+    )
+    with pytest.raises(NotebookLMError):
+        await adapter.refresh_document("source", "a" * 24, refresh=False)
 
 
 def test_large_sparse_edits_keep_unchanged_middle_out_of_payload():
@@ -509,3 +544,230 @@ def test_same_ten_word_append_has_bounded_payload_near_document_limit():
     assert "".join(parts) == boundary
     assert parts[1].startswith("🐎")
     assert all(utf16_length(part) + reserve <= DOCS_LIMIT for part in parts)
+
+
+async def test_publication_requires_independent_remote_hash_after_ack(tmp_path):
+    class ChangedAfterAck(Docs):
+        expected = None
+
+        async def write(self, doc, *args, recovering):
+            count = await super().write(doc, *args, recovering=recovering)
+            self.expected = self.documents[doc]
+            self.documents[doc] += "Unexpected external text."
+            return count
+
+    docs, notebook = ChangedAfterAck(), Notebook()
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook")
+        store.ingest(conversation(), consent=True)
+        enable_web_docs(store, 8)
+        engine = SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        )
+        result = await engine.run_once()
+        assert result["completed"] == 0
+        assert result["blocked"][0]["reason"] == "docs_web_conflict"
+        assert not notebook.sources and not allowed_sources(store)
+        assert len(docs.writes) == 1
+        (doc,) = docs.documents
+        assert docs.documents[doc].endswith("Unexpected external text.")
+        # An unresolved mismatch remains blocked after restart; do not overwrite it.
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        restarted = SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        )
+        assert (await restarted.run_once())["blocked"][0]["reason"] == "docs_web_conflict"
+        assert len(docs.writes) == 1 and not notebook.sources
+        # Explicitly restoring the expected remote content permits a zero-write retry.
+        docs.documents[doc] = docs.expected
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await restarted.run_once()
+        assert result["completed"] == 1
+        assert result["docs_web_write_payload_bytes"] == 0
+        assert len(docs.writes) == 1 and len(allowed_sources(store)) == 1
+
+
+async def test_publication_with_missing_remote_revision_remains_unverified(tmp_path):
+    class IncompleteRead(Docs):
+        async def call(self, action, **kwargs):
+            result = await super().call(action, **kwargs)
+            if action == "check":
+                result.pop("revision")
+            return result
+
+    docs, notebook = IncompleteRead(), Notebook()
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook")
+        store.ingest(conversation(), consent=True)
+        enable_web_docs(store, 8)
+        result = await SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        ).run_once()
+        assert result["completed"] == 0
+        assert result["blocked"][0]["reason"] == "docs_web_uncertain"
+        assert not notebook.sources and not allowed_sources(store)
+
+
+async def test_link_requires_independent_drive_identity_and_does_not_duplicate(tmp_path):
+    class DelayedInventory(Notebook):
+        hidden = True
+        adds = 0
+
+        async def add_document(self, document_id, title):
+            self.adds += 1
+            return await super().add_document(document_id, title)
+
+        async def list_sources(self):
+            items = await super().list_sources()
+            if self.hidden:
+                for item in items:
+                    item.pop("drive_document_id", None)
+            return items
+
+    docs, notebook = Docs(), DelayedInventory()
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook")
+        store.ingest(conversation(), consent=True)
+        enable_web_docs(store, 8)
+        engine = SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        )
+        first = await engine.run_once()
+        assert first["blocked"][0]["reason"] == "docs_web_link_uncertain"
+        assert not allowed_sources(store)
+        row = store.connection.execute("SELECT linking,source_id FROM google_docs_parts").fetchone()
+        assert tuple(row) == (1, None)
+        assert notebook.adds == 1 and len(docs.writes) == 1
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        assert (await engine.run_once())["blocked"][0]["reason"] == "docs_web_link_uncertain"
+        assert notebook.adds == 1 and len(docs.writes) == 1
+        notebook.hidden = False
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        assert result["completed"] == 1 and result["docs_web_write_payload_bytes"] == 0
+        assert notebook.adds == 1 and len(allowed_sources(store)) == 1
+
+
+async def test_registered_source_with_sparse_metadata_does_not_consume_new_quota_slot(tmp_path):
+    docs, notebook = Docs(), Notebook()
+    chat = conversation()
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook")
+        store.ingest(chat, consent=True)
+        enable_web_docs(store, 8)
+        engine = SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        )
+        assert (await engine.run_once())["completed"] == 1
+        (source,) = allowed_sources(store)
+        notebook.sources[source].pop("drive_document_id")
+        for index in range(49):
+            notebook.sources[f"foreign-{index}"] = {"title": "foreign", "ready": True}
+        chat["messages"][0]["text"] += " One more approved message."
+        store.ingest(chat)
+        result = await engine.run_once()
+        assert result["completed"] == 1 and not result["blocked"]
+        assert set(allowed_sources(store)) == {source}
+        assert len(notebook.sources) == 50 and len(docs.documents) == 1
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        ({"status": "committed", "bytes": -1}, "docs_web_uncertain"),
+        ({"status": "committed", "bytes": False}, "docs_web_uncertain"),
+        ({"status": "submitted", "previous": 7, "bytes": 258, "ack": []}, "docs_web_uncertain"),
+        (
+            {
+                "status": "submitted",
+                "previous": 7,
+                "bytes": 258,
+                "ack": {"http": 200, "metadata": {"needsTransformOnClient": True}},
+            },
+            "docs_web_conflict",
+        ),
+        (
+            {
+                "status": "submitted",
+                "previous": 7,
+                "bytes": 258,
+                "ack": {
+                    "http": 500,
+                    "metadata": {"needsTransformOnClient": False, "serverRevision": 7},
+                    "revisionRanges": [[8, 8]],
+                },
+            },
+            "docs_web_uncertain",
+        ),
+    ],
+)
+async def test_transport_rejects_invalid_or_transformed_save_response(monkeypatch, result, reason):
+    transport = web_docs_transport.WebDocsTransport(3)
+    monkeypatch.setattr(transport, "call", AsyncMock(return_value=result))
+    with pytest.raises(DocsWebError) as rejected:
+        await transport.write("synthetic", "tx", "before", "after", [], recovering=False)
+    assert rejected.value.code == reason
+
+
+async def test_transport_accepts_exact_save_ack_or_zero_byte_reconciliation(monkeypatch):
+    transport = web_docs_transport.WebDocsTransport(3)
+    result = {
+        "status": "submitted",
+        "previous": 7,
+        "bytes": 258,
+        "ack": {
+            "http": 200,
+            "metadata": {"needsTransformOnClient": False, "serverRevision": 7},
+            "revisionRanges": [[8, 8]],
+        },
+    }
+    call = AsyncMock(side_effect=[result, {"status": "committed", "bytes": 0}])
+    monkeypatch.setattr(transport, "call", call)
+    assert await transport.write("synthetic", "tx", "before", "after", [], recovering=False) == 258
+    assert await transport.write("synthetic", "tx", "before", "after", [], recovering=True) == 0
+
+
+async def test_change_during_notebook_indexing_requires_reindex_before_publication(tmp_path):
+    docs = Docs()
+
+    class ChangedDuringIndex(Notebook):
+        original = None
+        refreshes = 0
+
+        async def refresh_document(self, source_id, receipt, **kwargs):
+            await super().refresh_document(source_id, receipt, **kwargs)
+            self.refreshes += 1
+            if self.refreshes == 1:
+                doc = self.sources[source_id]["drive_document_id"]
+                self.original = docs.documents[doc]
+                # Leave the receipt untouched: the receipt alone is insufficient.
+                docs.documents[doc] += " Unexpected editor change during indexing."
+
+    notebook = ChangedDuringIndex()
+    with Store(tmp_path / "archive.sqlite") as store:
+        store.set_setting("notebook_id", "notebook")
+        store.ingest(conversation(), consent=True)
+        enable_web_docs(store, 8)
+        engine = SyncEngine(
+            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
+        )
+        first = await engine.run_once()
+        assert first["blocked"][0]["reason"] == "docs_web_conflict"
+        assert first["completed"] == 0 and not allowed_sources(store)
+        row = store.connection.execute(
+            "SELECT source_id,written_hash,indexed_hash FROM google_docs_parts"
+        ).fetchone()
+        assert row["source_id"] and row["written_hash"] is None and row["indexed_hash"] is None
+        assert len(docs.writes) == notebook.refreshes == 1
+        (doc,) = docs.documents
+        docs.documents[doc] = notebook.original
+        with store.connection:
+            store.connection.execute("UPDATE sync_jobs SET next_attempt=0")
+        result = await engine.run_once()
+        assert result["completed"] == 1 and result["docs_web_write_payload_bytes"] == 0
+        assert len(docs.writes) == 1 and notebook.refreshes == 2
+        assert set(allowed_sources(store)) == {row["source_id"]}

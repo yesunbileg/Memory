@@ -47,7 +47,6 @@ collectors, extension or Python checks does not require npm packages.
 | `tests/`, `vendor/hstry/extension/test/` | Synthetic behavior and recovery regressions |
 | `scripts/` | Checks, smoke tests, UI verification and extension packaging |
 | `config/` | Client/service examples and explicitly named cloud executor helpers |
-| `docs/archive/` | Historical designs, plans and previous verification records |
 
 Keep parser logic in the adapters and archive policy in Python. Avoid adding a
 second retrieval engine or reimplementing notebooklm-py's authentication.

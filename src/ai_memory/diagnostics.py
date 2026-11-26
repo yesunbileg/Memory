@@ -12,6 +12,10 @@ _PROVIDER_MESSAGES = {
     "not_ready": "NotebookLM source is not ready. Retry sync later.",
     "timeout": "NotebookLM request timed out. Retry later.",
     "network_error": "NotebookLM connection failed. Check connectivity and retry.",
+    "upload_registration_unavailable": (
+        "NotebookLM uploads require an SDK that can persist the source ID before sending data."
+    ),
+    "upload_registration_failed": "NotebookLM registration could not be safely recorded.",
     "notebooklm_error": "NotebookLM request failed. Check login and retry.",
 }
 

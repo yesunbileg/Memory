@@ -16,6 +16,5 @@ Historical counts and digests do not describe a newer build.
 | Live NotebookLM | Not part of offline CI. Only an explicitly selected empty demo notebook and newly generated synthetic data are supported by the live script. |
 
 To reproduce the manifest from a clean checkout, run the build and record commands
-in [development.md](development.md). The [2026-11-11 cleanup record](archive/validation-cleanup-2026-11-11.md)
-describes that earlier checkout only. Instructions for optional signed-in local
+in [development.md](development.md). Instructions for optional signed-in local
 checks are in the [Mongolian test guide](local-testing.mn.md).

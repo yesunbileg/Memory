@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import cold_archive
 from .privacy import MASKING_POLICY, find_sensitive, redact_sensitive
 from .revisions import receipt_marker
 from .store import Store, digest
@@ -195,9 +196,14 @@ class SegmentBuilder:
                     (segment_id, row[0], json.dumps(c, ensure_ascii=False)),
                 )
         text = self.render(segment_id)
-        if len(self.render_outbound(segment_id).split()) > 500_000:
+        limit = (
+            cold_archive.MAX_WORDS
+            if cold_archive.markdown_segment(self.store, segment_id)
+            else 500_000
+        )
+        if len(self.render_outbound(segment_id).split()) > limit:
             raise CapacityError(
-                "Rendered segment exceeds the 500000-word source ceiling; archive retained"
+                f"Rendered segment exceeds the {limit}-word source ceiling; archive retained"
             )
         value = digest(text)
         if value == state["content_hash"]:

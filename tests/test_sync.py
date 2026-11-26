@@ -1444,6 +1444,37 @@ async def test_sync_activity_is_visible_across_readers_and_cleared_on_cancel(tmp
         assert read_sync_activity(path) is None
 
 
+async def test_restart_after_upload_interruption_uses_the_pretransfer_registration(tmp_path):
+    import asyncio
+
+    class TrackedRemote(Remote):
+        async def upload_tracked(self, path, title, on_registration):
+            self.operations.append(("upload", title))
+            self.sources["registered-source"] = {"title": title, "ready": False}
+            on_registration("registered-source")
+            self.sources["registered-source"]["ready"] = True
+            # The provider indexed it, but the process exited before upload() returned.
+            raise asyncio.CancelledError
+
+        async def get_source_text(self, source_id):
+            raise AssertionError("Recovery should use the exact persisted source ID")
+
+    remote = TrackedRemote()
+    database = tmp_path / "db"
+    with Store(database) as store:
+        store.ingest(conversation(), consent=True)
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        with pytest.raises(asyncio.CancelledError):
+            await engine.run_once()
+        job = store.connection.execute("SELECT stage,new_source_id FROM sync_jobs").fetchone()
+        assert tuple(job) == ("uploading", "registered-source")
+    with Store(database, existing=True) as store:
+        engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
+        assert (await engine.run_once())["completed"] == 1
+        assert store.status()["sync_status"] == "up_to_date"
+        assert sum(op[0] == "upload" for op in remote.operations) == 1
+
+
 def test_sync_activity_reader_handles_other_process_death(tmp_path):
     import subprocess
     import sys

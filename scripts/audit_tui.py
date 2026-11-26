@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def audit(db):
+async def audit(db, output=None):
     sys.path.insert(0, str(ROOT))
-    from mem import JobDialog, Mem, NotebookDialog, PromptInput
+    from mem import DialogSelect, JobDialog, Mem, NotebookDialog, PromptInput
     from mem_backend import Backend
     from mem_flow import FlowCanvas
 
@@ -57,6 +57,8 @@ async def audit(db):
         raise AssertionError("TUI condition did not complete")
 
     results = []
+    if output is not None:
+        output.mkdir(mode=0o700, parents=True, exist_ok=True)
     for width, height in ((140, 42), (54, 24)):
         backend = OfflineBackend()
         app = OfflineMem(backend)
@@ -84,9 +86,21 @@ async def audit(db):
             await pilot.press("tab", "tab")
             assert app.focused.id == "sync-all"
             await pilot.press("enter")
+            await until(pilot, lambda app=app: isinstance(app.screen, DialogSelect))
+            assert app.screen.current_opt().value == "cancel"
+            assert "Цуцалсан зөвшөөрлийг сэргээнэ" in [opt.title for opt in app.screen.opts_all]
+            if output is not None:
+                app.save_screenshot(f"consent-{width}x{height}.svg", path=str(output))
+            await pilot.press("escape")
+            assert backend.operations == ["docs-connect"]
+            app.cmd_sync_all()
+            await until(pilot, lambda app=app: isinstance(app.screen, DialogSelect))
+            await pilot.press("down", "enter")
             await until(pilot, backend.indexing.is_set)
             assert isinstance(app.screen, JobDialog)
             assert "хүлээж" in app.job.steps[-1].detail
+            if output is not None:
+                app.save_screenshot(f"indexing-{width}x{height}.svg", path=str(output))
             backend.release.set()
             await until(pilot, lambda app=app: app.job.status in {"done", "partial"})
             assert "888 байт" in app.job.steps[-1].detail
@@ -107,6 +121,6 @@ async def audit(db):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", type=Path, required=True, help="Synthetic audit SQLite only")
-    print(
-        json.dumps({"remote": "simulated", "screens": asyncio.run(audit(parser.parse_args().db))})
-    )
+    parser.add_argument("--output", type=Path, help="Save synthetic TUI screenshots here")
+    args = parser.parse_args()
+    print(json.dumps({"remote": "simulated", "screens": asyncio.run(audit(args.db, args.output))}))

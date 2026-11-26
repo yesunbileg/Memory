@@ -6,6 +6,7 @@ Use only newly created synthetic documents in the dedicated audit session.
 import argparse
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -47,6 +48,26 @@ async def run(args):
     docs = WebDocsTransport(args.session)
     if args.action == "init":
         assert (await docs.call("ping"))["status"] == "ready"
+        if args.previous:
+            prior = json.loads((args.previous / "benchmark.json").read_text())
+            if not re.fullmatch(r"[0-9a-f]{12}", prior["run"]):
+                raise ValueError("Expected a recorded synthetic benchmark")
+            for kind in ("small", "large"):
+                entry = prior["documents"][kind]
+                expected = snapshot_sha256(base(kind) + ADDITION)
+                if (
+                    entry["title"] != f"AI Memory Test Benchmark {prior['run']} {kind}"
+                    or entry.get("reopened", {}).get("remote_hash") != expected
+                    or entry.get("append", {}).get("status") != "PASS"
+                ):
+                    raise ValueError("Previous synthetic benchmark was not verified")
+                state["documents"][kind] = {
+                    "id": entry["id"],
+                    "title": entry["title"],
+                    "previous_hash": expected,
+                    "seed_length": 0,
+                }
+            save(folder, state)
         return
     with Store(folder / "audit.sqlite") as store:
         if args.action == "create":
@@ -62,6 +83,21 @@ async def run(args):
         doc = entry["id"]
         journal = DocumentJournal(store, docs, doc)
         content = base(args.kind)
+        if args.action == "restore_seed":
+            # Reuse the two synthetic files without reseeding a megabyte. Check
+            # both the Drive identity and the complete text before changing either.
+            expected = entry["previous_hash"]
+            if not journal._load()["text"] and "pending" not in journal._load():
+                found = await docs.call("find", title=entry["title"])
+                actual = await docs.call("check", id=doc)
+                if found.get("ids") != [doc] or actual.get("hash") != expected:
+                    raise ValueError("Previous synthetic file identity or content changed")
+                journal._save({"text": content + ADDITION})
+            await journal.sync(content)
+            await journal.verify_remote(content)
+            entry["seed_length"] = len(content)
+            save(folder, state)
+            return
         if args.action == "seed":
             end = min(len(content), entry["seed_length"] + args.chunk)
             begin = time.monotonic()
@@ -90,6 +126,11 @@ async def run(args):
                 begin = time.monotonic()
                 count = await journal.sync(content + ADDITION)
                 seconds = round(time.monotonic() - begin, 2)
+                # Exercise both independent reads used by DocsPublisher. NotebookLM
+                # transfer and indexing are measured separately by audit_docs.py.
+                for phase in ("verify_before_index", "verify_before_publication"):
+                    await browser_audit(args.session, "phase", phase=phase)
+                    await journal.verify_remote(content + ADDITION)
                 await browser_audit(args.session, "phase", phase="unchanged")
                 unchanged = await journal.sync(content + ADDITION)
             finally:
@@ -101,6 +142,7 @@ async def run(args):
                 if 0 < count <= 2048
                 and append.get("saves") == 1
                 and append.get("saveBytes") == count
+                and append.get("unknownSaveBodies") == 0
                 and not append.get("unchangedMarkerSent")
                 and unchanged == 0
                 and idle.get("saves", 0) == 0
@@ -133,7 +175,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--session", type=int, required=True)
-    p.add_argument("action", choices=["init", "create", "seed", "append", "verify", "close"])
+    p.add_argument(
+        "action", choices=["init", "create", "seed", "restore_seed", "append", "verify", "close"]
+    )
+    p.add_argument(
+        "--previous", type=Path, help="Reuse a verified synthetic benchmark when initializing"
+    )
     p.add_argument("--kind", choices=["small", "large"], default="small")
     p.add_argument("--chunk", type=int, default=128_000)
     args = p.parse_args()

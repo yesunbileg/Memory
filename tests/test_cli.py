@@ -446,8 +446,8 @@ def test_automatic_sync_leaves_work_for_the_next_cycle_without_failing(
     from ai_memory.cli import main
     from ai_memory.store import Store
 
-    async def sync(store, *, progress, all_chats, automatic):
-        assert automatic and not all_chats
+    async def sync(store, *, progress, all_chats, automatic, archive_cold):
+        assert automatic and not all_chats and not archive_cold
         return {
             "completed": 1,
             "status": {"sync_status": "pending", "unassigned_messages": 1},

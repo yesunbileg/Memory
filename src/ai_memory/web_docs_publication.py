@@ -1,7 +1,12 @@
 """Publish approved archive snapshots through Google Docs web sync."""
 
-from .diagnostics import PublicInputError
-from .privacy import snapshot_sha256
+import json
+from functools import partial
+from uuid import uuid4
+
+from . import source_names
+from .diagnostics import PublicInputError, failure_code
+from .privacy import MASKING_POLICY, snapshot_sha256
 from .web_docs_journal import INDEX_RECEIPT_PREFIX, DocumentJournal, split_document
 from .web_docs_transport import DocsWebError, WebDocsTransport
 
@@ -102,11 +107,94 @@ class DocsPublisher:
             (segment_id, number),
         ).fetchone()
 
+    def _receipt_state(self, document_id):
+        row = self.db.execute(
+            "SELECT value FROM checkpoints WHERE key=?", (f"docs-receipt:{document_id}",)
+        ).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def _write_receipt_state(self, document_id, state):
+        self.db.execute(
+            "INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+            (f"docs-receipt:{document_id}", json.dumps(state)),
+        )
+
+    def _receipt(self, document_id, part_hash):
+        nonce = self._receipt_state(document_id).get("nonce")
+        return (snapshot_sha256(f"{nonce}:{part_hash}") if nonce else part_hash)[:24]
+
+    def _mark_repair(self, row):
+        document_id = row["document_id"]
+        if not self._receipt_state(document_id).get("pending"):
+            self._write_receipt_state(document_id, {"nonce": uuid4().hex, "pending": True})
+        self.db.execute(
+            "UPDATE google_docs_parts SET indexed_hash=NULL WHERE document_id=?", (document_id,)
+        )
+        self.db.execute(
+            "UPDATE google_docs_publications SET updating=1 WHERE segment_id=?",
+            (row["segment_id"],),
+        )
+
+    def _repair_model(self, row, part, part_hash):
+        with self.db:
+            self._mark_repair(row)
+        receipt = self._receipt(row["document_id"], part_hash)
+        return f"{INDEX_RECEIPT_PREFIX}{receipt}\n{part}"
+
+    async def reconcile_mirrors(self, inventory):
+        """Queue repairs to current managed copies even if SQLite content is unchanged."""
+        from .publication import allowed_sources
+
+        allowed = allowed_sources(self.store)
+        rows = self.db.execute("""SELECT p.* FROM google_docs_parts p
+            JOIN google_docs_publications d USING(segment_id)
+            WHERE d.updating=0 AND p.part<d.part_count AND p.document_id IS NOT NULL
+                AND p.written_hash=p.indexed_hash ORDER BY p.segment_id,p.part""").fetchall()
+        blocked = []
+        for row in rows:
+            source_id, document_id = row["source_id"], row["document_id"]
+            mapping = allowed.get(source_id)
+            if (
+                not mapping
+                or not mapping["content_hash"]
+                or mapping["source_revision"] != mapping["revision"]
+                or inventory.get(source_id, {}).get("drive_document_id") != document_id
+            ):
+                continue
+            journal = DocumentJournal(self.store, self.client, document_id)
+            prefix = f"{INDEX_RECEIPT_PREFIX}{self._receipt(document_id, row['written_hash'])}\n"
+            recorded = journal._load()
+            text = recorded["text"]
+            try:
+                if (
+                    recorded.keys() != {"text"}
+                    or not text.startswith(prefix)
+                    or snapshot_sha256(text[len(prefix) :]) != row["written_hash"]
+                ):
+                    raise DocsWebError("docs_web_uncertain")
+                if await journal.matches_remote(text):
+                    continue
+            except DocsWebError as error:
+                blocked.append(
+                    {"reason": failure_code(error), "document_segment": row["segment_id"]}
+                )
+                continue
+            with self.db:
+                self._mark_repair(row)
+                self.db.execute(
+                    "UPDATE segments SET revision=revision+1 WHERE id=? AND revision=?",
+                    (row["segment_id"], mapping["revision"]),
+                )
+        return blocked
+
     async def _document(self, segment_id, number, title):
         row = self._part(segment_id, number)
         document_id = row["document_id"]
         if document_id and not row["creating"]:
             return document_id
+        title = source_names.drive_document_name(
+            self.store, segment_id, number, title, new=not document_id and not row["creating"]
+        )
         if not document_id:
             if row["creating"]:
                 try:
@@ -180,8 +268,19 @@ class DocsPublisher:
                 if len(linked) != 1:
                     raise
                 source_id = linked[0]["id"]
+            else:
+                # Do not manufacture Drive identity from the add response alone.
+                # An ambiguous result stays in linking state; retry only adopts
+                # an independently observed, uniquely matching Drive source.
+                linked = [
+                    item
+                    for item in await self.notebook.list_sources()
+                    if item.get("drive_document_id") == document_id
+                ]
+                if len(linked) != 1 or linked[0]["id"] != source_id:
+                    raise DocsWebError("docs_web_link_uncertain")
             if not any(item["id"] == source_id for item in inventory):
-                inventory.append({"id": source_id, "drive_document_id": document_id})
+                inventory.append(linked[0])
         with self.db:
             self.db.execute(
                 "UPDATE google_docs_parts SET source_id=?,linking=0 WHERE segment_id=? AND part=?",
@@ -190,21 +289,45 @@ class DocsPublisher:
             self.db.execute("INSERT OR IGNORE INTO registered_sources VALUES(?)", (source_id,))
         return source_id, True
 
+    async def _verify_part(self, segment_id, number, journal, model):
+        try:
+            await journal.verify_remote(model)
+        except DocsWebError as error:
+            if error.code in {"docs_web_conflict", "docs_web_uncertain"}:
+                # A previously indexed receipt cannot attest a now-mismatching
+                # document. Force independent re-indexing after reconciliation.
+                with self.db:
+                    self.db.execute(
+                        """UPDATE google_docs_parts SET written_hash=NULL,indexed_hash=NULL
+                        WHERE segment_id=? AND part=?""",
+                        (segment_id, number),
+                    )
+            raise
+
     async def publish(self, segment_id, text):
         parts = split_document(text)
         inventory = await self.notebook.list_sources()
         existing = self.db.execute(
             "SELECT * FROM google_docs_parts WHERE segment_id=? ORDER BY part", (segment_id,)
         ).fetchall()
-        documents = {row["document_id"] for row in existing if row["part"] < len(parts)}
+        active = [row for row in existing if row["part"] < len(parts)]
+        registered = {item["id"]: item for item in inventory}
         attached = {item.get("drive_document_id") for item in inventory}
-        new_slots = len(parts) - len((documents - {None}) & attached)
+        covered = 0
+        for row in active:
+            document_id, source_id = row["document_id"], row["source_id"]
+            if source_id:
+                item = registered.get(source_id)
+                if item is None or item.get("drive_document_id", document_id) != document_id:
+                    raise DocsWebError("remote_missing")
+                covered += 1
+            elif document_id and document_id in attached:
+                if sum(item.get("drive_document_id") == document_id for item in inventory) != 1:
+                    raise DocsWebError("docs_web_link_uncertain")
+                covered += 1
+        new_slots = len(parts) - covered
         if len(inventory) + new_slots > 50:
             raise DocsWebError("SourceQuota")
-        publication = self.db.execute(
-            "SELECT ready_revision FROM google_docs_publications WHERE segment_id=?", (segment_id,)
-        ).fetchone()
-        first_publication = publication is None or publication["ready_revision"] is None
         archive_id = self.store.archive_instance_id()[:12]
         with self.db:
             self.db.execute(
@@ -217,15 +340,38 @@ class DocsPublisher:
                 ((segment_id, number) for number in range(len(parts))),
             )
         sources = []
+        verified_parts = []
         for number, part in enumerate(parts):
             title = f"AI Memory {archive_id} {segment_id} part {number + 1}"
             document_id = await self._document(segment_id, number, title)
             delta = DocumentJournal(self.store, self.client, document_id)
             wanted_hash = snapshot_sha256(part)
-            receipt = wanted_hash[:24]
+            row = self._part(segment_id, number)
+            source_id = row["source_id"]
+            owned = (
+                source_id
+                and registered.get(source_id, {}).get("drive_document_id") == document_id
+                and self.db.execute(
+                    "SELECT 1 FROM source_receipts WHERE source_id=? AND segment_id=? AND masking_policy=?",
+                    (source_id, segment_id, MASKING_POLICY),
+                ).fetchone()
+            )
             self.progress("upload", segment_id)
+
+            receipt = self._receipt(document_id, wanted_hash)
+            model = f"{INDEX_RECEIPT_PREFIX}{receipt}\n{part}"
             try:
-                await delta.sync(f"{INDEX_RECEIPT_PREFIX}{receipt}\n{part}")
+                if owned:
+                    await delta.sync_mirror(
+                        model, repair_target=partial(self._repair_model, row, part, wanted_hash)
+                    )
+                    receipt = self._receipt(document_id, wanted_hash)
+                    model = f"{INDEX_RECEIPT_PREFIX}{receipt}\n{part}"
+                else:
+                    await delta.sync(model)
+                # A save ACK is not independent evidence of the final document.
+                # Also recheck when a prior attempt saved but failed before indexing.
+                await self._verify_part(segment_id, number, delta, model)
             finally:
                 self.write_payload_bytes += delta.write_payload_bytes
             with self.db:
@@ -234,19 +380,33 @@ class DocsPublisher:
                     (wanted_hash, segment_id, number),
                 )
             row = self._part(segment_id, number)
-            source_id, newly_linked = await self._source(row, document_id, title, inventory)
+            display_title = (
+                source_names.docs_name(segment_id, number)
+                if self.store.get_setting(source_names.ENABLED)
+                else title
+            )
+            source_id, newly_linked = await self._source(row, document_id, display_title, inventory)
             if newly_linked or row["indexed_hash"] != wanted_hash:
                 self.progress("readiness", segment_id)
                 await self.notebook.refresh_document(
                     source_id,
                     receipt,
                     refresh=not newly_linked,
-                    allow_indexed_read=first_publication,
                 )
                 with self.db:
                     self.db.execute(
                         "UPDATE google_docs_parts SET indexed_hash=? WHERE source_id=?",
                         (wanted_hash, source_id),
                     )
+                    state = self._receipt_state(document_id)
+                    if state.get("pending"):
+                        state["pending"] = False
+                        self._write_receipt_state(document_id, state)
             sources.append(source_id)
+            verified_parts.append((number, delta, model))
+        # Indexing can take a long time; do not publish a multipart revision
+        # if an already processed part changed while another part was indexed.
+        # This is a second observation, not a server-side atomic write lock.
+        for number, delta, model in verified_parts:
+            await self._verify_part(segment_id, number, delta, model)
         return sources

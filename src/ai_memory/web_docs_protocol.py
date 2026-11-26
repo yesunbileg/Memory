@@ -21,14 +21,19 @@ def editor_commands(edits: list[TextEdit]) -> list[dict]:
 
 def confirmed_revision(acknowledgement: dict, previous: int) -> int | None:
     """Accept only the next revision without a concurrent-edit transformation."""
+    if type(previous) is not int or previous < 0:
+        return None
     expected = previous + 1
     metadata = acknowledgement.get("metadata")
     if not isinstance(metadata, dict):
         return None
+    ranges = acknowledgement.get("revisionRanges")
     if (
         metadata.get("needsTransformOnClient") is False
+        and type(metadata.get("serverRevision")) is int
         and metadata.get("serverRevision") == previous
-        and acknowledgement.get("revisionRanges") == [[expected, expected]]
+        and ranges == [[expected, expected]]
+        and all(type(number) is int for number in ranges[0])
     ):
         return expected
     return None
