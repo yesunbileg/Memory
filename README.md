@@ -48,6 +48,9 @@ access, open `/connect` and choose **Нэвтрэх**. The form accepts a Brave 
 and a Google email when several accounts share that profile. The connection
 screen shows the verified notebook, account and access when available.
 `/login Profile 1` is also available for direct login with that profile.
+Leave the fields blank during renewal to reuse the archive's last verified
+account and saved Brave profile. Each archive has its own auth file after
+setup or renewal, unless you explicitly configured a storage path.
 
 The extension's **Sync now** saves selected web chats in the local archive.
 Once a notebook is connected, new captures are automatically queued for NotebookLM.
@@ -125,6 +128,8 @@ Create a new empty notebook specifically for the test and copy its ID. The live 
 
 An optional path can publish approved Memory segments through Google Docs and send later text edits instead of re-uploading each full Markdown segment. The first migration is still a full upload. This uses the signed-in Docs editor's **private, undocumented web save endpoint**, not the official Google Docs REST API, and may break when Google changes its editor. It is not enabled by default. Review the [Mongolian setup, byte-count scope and recovery limitations](docs/google-docs-incremental-sync.mn.md) before enabling it.
 
+The sync uses the archive's existing Google sign-in in a private headless Brave process. It runs with the desktop browser closed and opens no desktop tabs. For a wheel installation that omits development dependencies, install the `docs` extra to provide Playwright.
+
 ## MCP with Codex and OpenCode
 
 Codex uses **one local plugin** for its Stop hook and the memory MCP server. Nothing is published to a plugin directory. Follow the [local installation instructions](docs/local-hooks.md) on the computer where Codex runs. OpenCode uses its own session-idle integration and [MCP configuration](docs/agent-instructions.md). Both capture only the session that fired the event, into the initialized archive. A configured notebook and enabled automatic sync allow the capture to wake the publication worker. Use the explicit import commands above for older sessions.
@@ -147,7 +152,7 @@ Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the 
 
 | What you do | What happens |
 | --- | --- |
-| Click **Select all chats** in the popup | Selects the current eligible chats in the active account's workspace, including chats outside the visible sidebar. Choose a workspace if several are available. **Clear selection** removes the workspace's saved choices. |
+| Click **Select all chats** in the popup | Selects the current eligible chats in the active account's workspace, including chats outside the visible sidebar. Choose a workspace if several are available. **Clear workspace selection** removes the workspace's saved choices. |
 | Check a project in the sidebar | Saves the project ID immediately. At sync, its eligible chats are included, even when the project was collapsed or a chat was not visible. Gemini offers chats only. |
 | Check the **Recents** heading on ChatGPT | Includes all ordinary Recent chats in that account on each sync, including newly added ones. Pinned, project, GPT, locked and archived chats are excluded from this group. Turning it off keeps individual selections. |
 | Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |
@@ -170,4 +175,4 @@ If a previously published source disappears remotely, sync records the missing s
 
 Run `ai-memory cleanup-legacy` to review superseded NotebookLM copies from an older archive. To remove specific copies, run `ai-memory cleanup-legacy --delete SOURCE_ID [...]` with the IDs from that preview. The command rechecks the current replacements before deleting.
 
-The current implementation supports Codex and OpenCode local adapters plus the three web providers. Other local agents, full historical web coverage, long-running Google auth stability, 150k/300k/450k retrieval benchmarks, and real Mongolian retrieval quality remain unverified. See [donor audit](docs/donor-audit.md), [validation](docs/validation.md), and [third-party notices](THIRD_PARTY_NOTICES.md).
+The current implementation supports Codex and OpenCode local adapters plus the three web providers. Other local agents, full historical web coverage, long-running Google auth stability, large-source retrieval benchmarks, and real Mongolian retrieval quality remain unverified. See [donor audit](docs/donor-audit.md), [validation](docs/validation.md), and [third-party notices](THIRD_PARTY_NOTICES.md).

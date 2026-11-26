@@ -83,8 +83,7 @@ def parser():
         action="store_true",
         help="Enable 30-day Markdown archiving and compact eligible NotebookLM sources",
     )
-    web_docs = sub.add_parser("docs-web-enable", help="Publish through linked Google Docs in Brave")
-    web_docs.add_argument("--session", type=int, help="Existing Playwriter Brave session")
+    sub.add_parser("docs-web-enable", help="Publish through linked Google Docs in the background")
     sub.add_parser("source-names", help="Apply readable labels to NotebookLM sources")
     cleanup = sub.add_parser("cleanup-legacy", help="Review superseded sources from older archives")
     cleanup.add_argument(
@@ -161,7 +160,7 @@ async def _run_automatic_sync(engine):
 
 
 async def sync_archive(
-    store, *, progress=None, all_chats=False, automatic=False, archive_cold=False
+    store, *, progress=None, all_chats=False, automatic=False, archive_cold=False, docs_client=None
 ):
     from .archive_lock import archive_lock
     from .cold_archive import ENABLED, NEXT_CHECK
@@ -188,7 +187,7 @@ async def sync_archive(
             store.set_setting(NEXT_CHECK, 0)
         storage = store.get_setting("storage_path")
         adapter = None
-        docs_client = None
+        owns_docs_client = docs_client is None
         try:
             approved_count = 0
             if all_chats:
@@ -197,10 +196,10 @@ async def sync_archive(
                         "UPDATE conversations SET consent=1 WHERE consent=0"
                     ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
-            if session := store.get_setting(DOCS_SETTING):
-                from .web_docs_transport import WebDocsTransport
+            if store.get_setting(DOCS_SETTING) and docs_client is None:
+                from .web_docs_background import BackgroundDocsTransport
 
-                docs_client = WebDocsTransport(session)
+                docs_client = BackgroundDocsTransport(storage)
             engine = SyncEngine(
                 store,
                 SegmentBuilder(store),
@@ -226,7 +225,7 @@ async def sync_archive(
             store.set_setting("sync_preflight_errors", [{"reason": failure_code(error)}])
             raise
         finally:
-            if docs_client is not None:
+            if owns_docs_client and docs_client is not None:
                 with suppress(Exception):
                     await docs_client.release()
             if adapter is not None:
@@ -388,26 +387,25 @@ def execute(args, *, progress=None):
     with archive as store:
         if args.command == "docs-web-enable":
             from .archive_lock import archive_lock
-            from .web_docs_publication import DOCS_SETTING, enable_web_docs
-            from .web_docs_transport import DocsWebError, WebDocsTransport, new_brave_session
+            from .web_docs_background import BACKGROUND_SESSION, BackgroundDocsTransport
+            from .web_docs_publication import enable_web_docs
+            from .web_docs_transport import DocsWebError
 
-            async def connected_session():
-                session = args.session or store.get_setting(DOCS_SETTING)
-                if session:
-                    try:
-                        await WebDocsTransport(session).call("ping")
-                    except DocsWebError as error:
-                        if args.session or error.code == "docs_web_auth_required":
-                            raise
-                    else:
-                        return session
-                session = await new_brave_session()
-                await WebDocsTransport(session).call("ping")
-                return session
+            async def check_docs():
+                client = BackgroundDocsTransport(store.get_setting("storage_path"))
+                try:
+                    if (await client.call("ping")).get("status") != "ready":
+                        raise DocsWebError("docs_web_unavailable")
+                finally:
+                    await client.release()
 
-            session = asyncio.run(connected_session())
             with archive_lock(store.path):
-                enable_web_docs(store, session)
+                if not store.get_setting("notebook_id"):
+                    raise PublicInputError(
+                        "Bind the existing NotebookLM notebook before enabling Google Docs"
+                    )
+                asyncio.run(check_docs())
+                enable_web_docs(store, BACKGROUND_SESSION)
             return {"docs_web_enabled": True, "status": store.status()}
         if args.command == "init":
             if args.notebook_id:

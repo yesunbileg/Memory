@@ -12,7 +12,7 @@ const address = `${origin}/document/d/${id}/save?sid=synthetic`;
 const command = [{ ty: 'mlti', mts: [{ ty: 'is', ibi: 1, s: 'new' }] }];
 const input = { action: 'write', id, transaction: 'tx-1', before: 'old-hash', after: 'new-hash', commands: command, recover: false };
 
-function makeBrowser({ hash = input.before, revision = 7, recovery = false, pending = null, failRead = false, ack = 'normal', cache = true, cachedHash = input.before } = {}) {
+function makeBrowser({ hash = input.before, revision = 7, recovery = false, pending = null, failRead = false, ack = 'normal', cache = true, cachedHash = input.before, bootstrapTimeout = false, signedOut = false } = {}) {
   const stats = { reads: 0, posts: [], closed: 0 };
   const remote = { hash, revision };
   const state = { memoryWebDocs: {} };
@@ -35,10 +35,19 @@ function makeBrowser({ hash = input.before, revision = 7, recovery = false, pend
       let closed = false;
       return {
         addInitScript: async () => {},
-        waitForRequest: async () => ({ url: () => `${origin}/document/d/${id}/docos/p/uc?id=${id}&sid=synthetic&token=synthetic` }),
-        goto: async () => {}, waitForLoadState: async () => {},
+        waitForRequest: async () => {
+          if (bootstrapTimeout) {
+            bootstrapTimeout = false;
+            throw Object.assign(new Error("Synthetic editor bootstrap stalled"), { name: "TimeoutError" });
+          }
+          return { url: () => `${origin}/document/d/${id}/docos/p/uc?id=${id}&sid=synthetic&token=synthetic` };
+        },
+        goto: async () => signedOut ? { status: () => 401 } : undefined,
+        url: () => signedOut ? "https://accounts.google.com/signin" : origin,
+        waitForLoadState: async () => {},
         locator: () => ({ waitFor: async () => {} }),
-        evaluate: async () => {
+        evaluate: async (fn, args) => {
+          if (args?.body) return item.page.evaluate(fn, args);
           stats.reads++;
           if (failRead) throw new Error('model unavailable');
           return { ...remote };
@@ -101,6 +110,29 @@ test('normal write: fresh read precedes exactly one POST and ACK advances cache'
   assert.equal(b.item.revision, 8);
   assert.equal(b.item.pending, null);
   assert.equal(result.bytes, Buffer.byteLength(b.stats.posts[0]));
+});
+
+test('a stalled editor bootstrap retries the read, then sends only one write', async () => {
+  const b = makeBrowser({ bootstrapTimeout: true, cache: false });
+  assert.equal((await b.run()).status, 'submitted');
+  assert.equal(b.stats.reads, 2);
+  assert.equal(b.stats.posts.length, 1);
+  assert.equal(b.stats.closed, 2);
+});
+
+test('read-only model checks do not wait for an editing session to open', async () => {
+  const b = makeBrowser({ bootstrapTimeout: true });
+  assert.deepEqual(await b.run('check'), { hash: input.before, revision: 7 });
+  assert.equal(b.stats.reads, 1);
+  assert.equal(b.stats.closed, 1);
+});
+
+test('a signed-out editor reports authentication before fetching or saving the model', async () => {
+  const b = makeBrowser({ signedOut: true });
+  assert.deepEqual(await b.run('check'), { status: 'auth_required' });
+  assert.equal(b.stats.reads, 0);
+  assert.equal(b.stats.posts.length, 0);
+  assert.equal(b.stats.closed, 1);
 });
 
 test('lost ACK after commit: matching fresh hash reconciles without POST', async () => {

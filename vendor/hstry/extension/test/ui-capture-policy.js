@@ -38,39 +38,47 @@ const run = (props = {}) => ({
   selection: { skipped: 1 },
   ...props,
 });
-assert.match(
-  captureOutcome({ claude: run() }, { claude: true }),
-  /2 new.*1 updated.*4 unchanged.*1 skipped/,
-);
-assert.match(
+assert.deepEqual(captureOutcome({ claude: run() }, { claude: true }), {
+  label: 'Done',
+  counts: '2 new · 1 updated · 4 unchanged · 1 skipped',
+  actions: '',
+});
+assert.deepEqual(
   captureOutcome(
     { claude: run({ lastErrorCode: 'not_logged_in' }), chatgpt: run() },
     { claude: true, chatgpt: true },
   ),
-  /Partial.*Claude.*sign in/i,
+  {
+    label: 'Partial sync',
+    counts: '4 new · 2 updated · 8 unchanged · 2 skipped',
+    actions: 'Sign in · Claude',
+  },
 );
-assert.match(
+assert.deepEqual(
   captureOutcome(
-    { claude: run({ lastErrorCode: 'not_logged_in', progress: {} }) },
+    { claude: run({ lastErrorCode: 'not_logged_in', progress: {}, selection: null }) },
     { claude: true },
   ),
-  /Claude.*sign in/i,
+  { label: 'Sync incomplete', counts: '', actions: 'Sign in · Claude' },
 );
-assert.match(
+assert.deepEqual(
   captureOutcome(
     { gemini: run({ progress: { phase: 'complete', created: 0, updated: 0, unchanged: 0 } }) },
     { gemini: true },
   ),
-  /No matching chats/,
+  { label: 'No matching chats', counts: '1 skipped', actions: '' },
 );
-assert.match(captureOutcome({ claude: run({ running: true }) }, { claude: true }), /Capturing/);
-assert.equal(captureOutcome({ claude: run() }, { claude: true }, 21), '');
-assert.match(
+assert.equal(
+  captureOutcome({ claude: run({ running: true }) }, { claude: true }).label,
+  'Capturing selected chats…',
+);
+assert.equal(captureOutcome({ claude: run() }, { claude: true }, 21), null);
+assert.deepEqual(
   captureOutcome(
     { chatgpt: run({ progress: { phase: 'complete', alreadyCurrent: 74 } }) },
     { chatgpt: true },
   ),
-  /^Up to date.*74 unchanged/,
+  { label: 'Up to date', counts: '74 unchanged · 1 skipped', actions: '' },
 );
 const progress = {
   chatgpt: run({

@@ -9,7 +9,8 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read, fetch } 
   let listener;
   const sends = [],
     touches = [],
-    observers = [];
+    observers = [],
+    sheets = [];
   const window = new EventTarget();
   window.top = framed ? {} : window;
   window.innerWidth = 1024;
@@ -21,15 +22,24 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read, fetch } 
     body: { append: (node) => mounted.add(node) },
     querySelectorAll: () => [],
     createElement: () => {
-      const note = {
+      const attrs = {};
+      const element = {
         dataset: {},
         textContent: '',
-        setAttribute() {},
+        setAttribute(name, value) {
+          attrs[name] = String(value);
+        },
+        getAttribute(name) {
+          return attrs[name] ?? null;
+        },
+        removeAttribute(name) {
+          delete attrs[name];
+        },
         remove() {
-          mounted.delete(note);
+          mounted.delete(element);
         },
       };
-      return note;
+      return element;
     },
   });
   const sender = { id: 'extension123', url: 'chrome-extension://extension123/popup.html' };
@@ -61,7 +71,9 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read, fetch } 
     setTimeout,
     clearTimeout,
     CSSStyleSheet: class {
-      replaceSync() {}
+      replaceSync(text) {
+        sheets.push(text);
+      }
     },
     document: read
       ? doc
@@ -101,6 +113,7 @@ function fixture({ href = 'https://chatgpt.com/', framed = false, read, fetch } 
     sends,
     observers,
     touches,
+    sheets,
     registered: !!listener,
     sender,
     mounted,
@@ -254,6 +267,54 @@ test('an unverified open chat does not hide verified sidebar rows', async () => 
   );
 });
 
+test('a mounted compact Claude drawer gets controls when it becomes visible', async () => {
+  const id = '44444444-4444-4444-8444-444444444444';
+  const f = fixture({
+    href: 'https://claude.ai/new',
+    read: async (request) => ({ ok: true, token: 'proof', items: request.items }),
+  });
+  const drawer = {
+    closest: (selector) =>
+      selector.includes('[role="dialog"]') && !selector.includes(':not(aside > #frame-peek-popover')
+        ? drawer
+        : null,
+    matches: (selector) => selector.includes('[role="dialog"]'),
+    querySelector: () => null,
+  };
+  let opened = false;
+  const row = {
+    isConnected: true,
+    parentElement: f.doc.body,
+    textContent: 'A compact sidebar chat',
+    checkVisibility: () => opened,
+    closest: (selector) => drawer.closest(selector),
+    matches: () => true,
+    getBoundingClientRect: () => ({ left: 0, right: 200, width: 200, height: 30 }),
+    getAttribute: (name) => (name === 'href' ? '/chat/' + id : null),
+    setAttribute() {},
+    style: { setProperty() {} },
+    after(box) {
+      this.nextElementSibling = box;
+      f.mounted.add(box);
+    },
+  };
+  const create = f.doc.createElement;
+  f.doc.createElement = (tag) => ({ ...create(tag), style: { setProperty() {} } });
+  f.doc.querySelectorAll = (selector) => (selector.includes('a[href') ? [row] : []);
+  assert.equal((await f.message({ type: 'SET_PAGE_LIST_MODE', enabled: true })).enabled, true);
+  assert.equal([...f.mounted].filter((element) => element.type === 'checkbox').length, 0);
+
+  opened = true;
+  f.observers[0].notify([{ target: drawer, type: 'attributes', attributeName: 'hidden' }]);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(
+    [...f.mounted]
+      .filter((element) => element.type === 'checkbox')
+      .map((box) => box.dataset.memorySyncId),
+    [id],
+  );
+});
+
 test('a ChatGPT project button with the native row attributes is verified and gets a checkbox', async () => {
   const id = 'g-p-11111111111141118111111111111111';
   const projectAttrs = {
@@ -292,6 +353,65 @@ test('a ChatGPT project button with the native row attributes is verified and ge
   const box = [...f.mounted].find((element) => element.type === 'checkbox');
   assert.equal(box?.dataset.memorySyncId, id);
   assert.equal(box?.dataset.memorySyncKind, 'project');
+});
+
+test('included-through-group rows get a visible legend, tooltip and a separated 24px target', async () => {
+  const id = '55555555-5555-4555-8555-555555555555';
+  const f = fixture({
+    read: async (request) => ({
+      ok: true,
+      token: 'proof',
+      items: request.items.map((item) => ({ ...item, checked: false, inherited: true })),
+    }),
+  });
+  const row = {
+    isConnected: true,
+    parentElement: f.doc.body,
+    textContent: 'An inherited chat',
+    checkVisibility: () => true,
+    closest: () => null,
+    matches: () => true,
+    getBoundingClientRect: () => ({ left: 0, right: 200, width: 200, height: 30 }),
+    getAttribute: (name) => (name === 'href' ? '/c/' + id : null),
+    setAttribute() {},
+    style: { setProperty() {} },
+    after(box) {
+      this.nextElementSibling = box;
+      f.mounted.add(box);
+    },
+  };
+  const create = f.doc.createElement;
+  f.doc.createElement = (tag) => ({ ...create(tag), style: { setProperty() {} } });
+  f.doc.querySelectorAll = (selector) => (selector.includes('a[href') ? [row] : []);
+  assert.equal((await f.message({ type: 'SET_PAGE_LIST_MODE', enabled: true })).enabled, true);
+
+  const box = [...f.mounted].find((element) => element.type === 'checkbox');
+  assert.equal(box?.indeterminate, true);
+  assert.match(box.title, /Included through a selected group/);
+  assert.match(box.getAttribute('aria-label'), /Included through a selected group/);
+  const note = [...f.mounted].find(
+    (element) => element.dataset && 'memoryPickerNote' in element.dataset,
+  );
+  assert.match(note?.textContent, /Dash = included via a project or Recents/);
+
+  const css = f.sheets.join('\n');
+  const target = css.match(/input\[data-memory-sync-id\]\{([^}]*)\}/)?.[1] || '';
+  for (const property of [
+    'width:24px!important',
+    'height:24px!important',
+    'min-width:24px!important',
+    'min-height:24px!important',
+    'transform:translate(8px,-50%)!important',
+    'box-shadow:0 0 0 1px',
+  ]) {
+    assert.ok(target.includes(property), property);
+  }
+  assert.match(css, /\[data-memory-sync-row\]\{[^}]*padding-inline-start:44px!important/);
+  assert.match(
+    css,
+    /input\[data-memory-sync-id\]:dir\(rtl\)\{[^}]*right:anchor\(right\)[^}]*translate\(-8px,-50%\)/,
+  );
+  assert.match(css, /input\[data-memory-sync-id\]:focus-visible\{[^}]*outline:2px/);
 });
 
 test('turning mode off cancels an outstanding metadata read and closes its late proof', async () => {

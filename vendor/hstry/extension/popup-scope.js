@@ -114,16 +114,18 @@ function writePageScope(provider, principalId, edit, verify) {
       else entries.delete(principalId);
       const saved = normalize({ entries: [...entries.values()] }, provider);
       await verify();
-      if (!legacy && JSON.stringify(saved) === JSON.stringify(scope)) return;
-      try {
-        await chrome.storage.local.set({
-          providerSyncScopes: { ...providerSyncScopes, [provider]: saved },
-          // All v1 owners and their untouched restrictions were copied. A removed ID cannot reappear on fallback.
-          ...(legacy ? { chatgptSyncList: { version: 1, entries: [] } } : {}),
-        });
-      } catch {
-        fail('storage_unavailable');
+      if (legacy || JSON.stringify(saved) !== JSON.stringify(scope)) {
+        try {
+          await chrome.storage.local.set({
+            providerSyncScopes: { ...providerSyncScopes, [provider]: saved },
+            // All v1 owners and their untouched restrictions were copied. A removed ID cannot reappear on fallback.
+            ...(legacy ? { chatgptSyncList: { version: 1, entries: [] } } : {}),
+          });
+        } catch {
+          fail('storage_unavailable');
+        }
       }
+      return hasScopeItems(old) ? old : null;
     });
   writes = work;
   return work;
@@ -166,6 +168,18 @@ export function setBulkPageItems(provider, principalId, items, canonical, verify
       const next = { ...old, conversationIds: [...keep(old.conversationIds), ...items] };
       if (next.legacyConversationIds) next.legacyConversationIds = keep(next.legacyConversationIds);
       return next;
+    },
+    verify,
+  );
+}
+
+export function restoreBulkPageItems(provider, previous, verify) {
+  return writePageScope(
+    provider,
+    previous.principalId,
+    (current) => {
+      if (hasScopeItems(current)) fail('selection_changed');
+      return previous;
     },
     verify,
   );

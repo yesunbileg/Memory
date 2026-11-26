@@ -7,15 +7,18 @@ from uuid import uuid4
 from . import source_names
 from .diagnostics import PublicInputError, failure_code
 from .privacy import MASKING_POLICY, snapshot_sha256
+from .web_docs_background import BACKGROUND_SESSION
 from .web_docs_journal import INDEX_RECEIPT_PREFIX, DocumentJournal, split_document
-from .web_docs_transport import DocsWebError, WebDocsTransport
+from .web_docs_transport import DocsWebError
 
 DOCS_SETTING = "docs_web_session"
 
 
 def enable_web_docs(store, session):
     """Stage the cutover while the existing NotebookLM sources remain available."""
-    WebDocsTransport(session)
+    if session != BACKGROUND_SESSION and (type(session) is not int or session < 1):
+        raise ValueError("Invalid legacy Docs setting")
+    session = BACKGROUND_SESSION
     db = store.connection
     if not store.get_setting("notebook_id"):
         raise PublicInputError("Bind the existing NotebookLM notebook before enabling Google Docs")
@@ -62,7 +65,7 @@ def enable_web_docs(store, session):
                     AND j.revision=segments.revision AND j.failure_phase='google_docs_cutover'))
             AND NOT EXISTS (SELECT 1 FROM sync_jobs j WHERE j.segment_id=segments.id
                 AND j.stage='missing')""")
-        db.execute("INSERT INTO settings VALUES(?,?)", (DOCS_SETTING, str(session)))
+        db.execute("INSERT INTO settings VALUES(?,?)", (DOCS_SETTING, json.dumps(session)))
 
 
 def docs_status(store):
@@ -211,7 +214,16 @@ class DocsPublisher:
                         "UPDATE google_docs_parts SET creating=1 WHERE segment_id=? AND part=?",
                         (segment_id, number),
                     )
-                document_id = await self.client.create(title)
+                try:
+                    document_id = await self.client.create(title)
+                except DocsWebError as error:
+                    if error.definitely_not_sent:
+                        with self.db:
+                            self.db.execute(
+                                "UPDATE google_docs_parts SET creating=0 WHERE segment_id=? AND part=?",
+                                (segment_id, number),
+                            )
+                    raise
             with self.db:
                 self.db.execute(
                     "UPDATE google_docs_parts SET document_id=? WHERE segment_id=? AND part=?",
@@ -304,7 +316,13 @@ class DocsPublisher:
                     )
             raise
 
-    async def publish(self, segment_id, text):
+    async def recheck_index(self, part):
+        if not part["indexed_hash"]:
+            raise DocsWebError("docs_web_uncertain")
+        receipt = self._receipt(part["document_id"], part["indexed_hash"])
+        await self.notebook.refresh_document(part["source_id"], receipt)
+
+    async def publish(self, segment_id, text, *, replaceable=()):
         parts = split_document(text)
         inventory = await self.notebook.list_sources()
         existing = self.db.execute(
@@ -313,21 +331,41 @@ class DocsPublisher:
         active = [row for row in existing if row["part"] < len(parts)]
         registered = {item["id"]: item for item in inventory}
         attached = {item.get("drive_document_id") for item in inventory}
-        covered = 0
+        covered = set()
         for row in active:
             document_id, source_id = row["document_id"], row["source_id"]
             if source_id:
                 item = registered.get(source_id)
-                if item is None or item.get("drive_document_id", document_id) != document_id:
+                if item is None:
+                    with self.db:
+                        cleared = self.db.execute(
+                            """UPDATE google_docs_parts SET source_id=NULL,linking=0,indexed_hash=NULL
+                               WHERE source_id=? AND NOT EXISTS (
+                                   SELECT 1 FROM source_receipts WHERE source_id=?
+                                   UNION ALL SELECT 1 FROM source_map WHERE source_id=?)""",
+                            (source_id, source_id, source_id),
+                        ).rowcount
+                    if not cleared:
+                        raise DocsWebError("remote_missing")
+                    source_id = None
+                elif item.get("drive_document_id", document_id) != document_id:
                     raise DocsWebError("remote_missing")
-                covered += 1
+            if source_id:
+                covered.add(source_id)
             elif document_id and document_id in attached:
-                if sum(item.get("drive_document_id") == document_id for item in inventory) != 1:
+                matches = [
+                    item["id"] for item in inventory if item.get("drive_document_id") == document_id
+                ]
+                if len(matches) != 1:
                     raise DocsWebError("docs_web_link_uncertain")
-                covered += 1
-        new_slots = len(parts) - covered
-        if len(inventory) + new_slots > 50:
+                covered.add(matches[0])
+        new_slots = len(parts) - len(covered)
+        total = len(inventory) + new_slots
+        if total > 50:
             raise DocsWebError("SourceQuota")
+        if new_slots and total == 50:
+            if not set(replaceable).intersection(registered).difference(covered):
+                raise DocsWebError("SpareSlotNeeded")
         archive_id = self.store.archive_instance_id()[:12]
         with self.db:
             self.db.execute(

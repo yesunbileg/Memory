@@ -134,9 +134,30 @@ test('popup selects every verified current chat and clears only its own workspac
     mem.providerSyncScopes.claude,
     scope(entry(owner, [], [child, ordinary, unseen]), entry(other, [], [different])),
   );
-  assert.equal((await bulk('clear')).count, 0);
+  const cleared = await bulk('clear');
+  assert.equal(cleared.count, 0);
+  assert.match(cleared.undoToken, /^[a-f0-9-]{36}$/);
   assert.deepEqual(mem.providerSyncScopes.claude, scope(entry(other, [], [different])));
+  assert.equal((await bulk('undo', { token: cleared.undoToken }, from())).ok, false);
+  assert.equal((await bulk('undo', { token: cleared.undoToken })).ok, true);
+  assert.deepEqual(
+    mem.providerSyncScopes.claude,
+    scope(entry(owner, [], [child, ordinary, unseen]), entry(other, [], [different])),
+  );
+  assert.equal((await bulk('undo', { token: cleared.undoToken })).code, 'catalog_expired');
   assert.equal(calls.native, 0);
+});
+
+test('undo clear preserves newer workspace selections and requires the same account', async () => {
+  mem.providerSyncScopes = { claude: scope(entry(owner, [project], [child])) };
+  const { undoToken } = await bulk('clear');
+  const undo = { token: undoToken };
+  principals = [other];
+  assert.equal((await bulk('undo', undo)).code, 'principal_changed');
+  principals = [owner];
+  mem.providerSyncScopes = { claude: scope(entry(owner, [], [ordinary])) };
+  assert.equal((await bulk('undo', undo)).code, 'selection_changed');
+  assert.deepEqual(mem.providerSyncScopes.claude, scope(entry(owner, [], [ordinary])));
 });
 
 test('bulk selection asks for a workspace and rejects account changes, incomplete lists and page callers', async () => {

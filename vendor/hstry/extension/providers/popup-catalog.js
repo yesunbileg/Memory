@@ -1,7 +1,7 @@
 // Popup discovery is metadata-only. Durable capture state includes IDs and acknowledged update times.
 import { fetchJson, NotLoggedInError } from '../lib/common.js';
 import { createSelectionSummary, classifyConversation } from './selection.js';
-import { drainSelected } from './queue.js';
+import { discoveryPages, drainSelected, summaryItem } from './queue.js';
 import { hasScopeItems } from '../popup-scope.js';
 
 const cap = 10000;
@@ -77,9 +77,62 @@ export function memberships(item) {
 
 const identity = (ps) => JSON.stringify(ps.map((p) => p.principalId).sort());
 
+// Catalog eligibility needs the existence of a label, not its private text.
+// Keep the same allow/deny rules when replaying an already verified page.
+function captureSummary(item) {
+  const result = summaryItem(item, false, false);
+  if (!result) return result;
+  for (const field of ['id', 'conversation_id'])
+    if (item[field] != null) result[field] = nativeId(item[field]) ? item[field] : false;
+  for (const field of ['title', 'name', 'short_name'])
+    if (label(item[field])) result[field] = 'Listed item';
+  if (label(item.display?.name, item.display?.title)) result.display = { name: 'Listed item' };
+  if (unavailable(item)) result.is_hidden = true;
+  for (const data of [item, item.metadata]) {
+    if (!data) continue;
+    const target = data === item ? result : (result.metadata = summaryItem(data, false, false));
+    if (!target) continue;
+    for (const field of ['project_id', 'project_uuid', 'folder_id', 'folder_uuid'])
+      if (data[field] != null && !nativeId(data[field])) target[field] = false;
+    for (const field of ['project', 'folder'])
+      for (const key of ['id', 'uuid'])
+        if (data[field]?.[key] != null && !nativeId(data[field][key]))
+          (target[field] ??= {})[key] = false;
+  }
+  if (item.gizmo?.gizmo) {
+    result.gizmo = {
+      ...(unavailable(item.gizmo) && { is_hidden: true }),
+      ...(label(item.gizmo.display?.name, item.gizmo.display?.title) && {
+        display: { name: 'Listed item' },
+      }),
+      ...(label(item.gizmo.title) && { title: 'Listed item' }),
+      gizmo: captureSummary(item.gizmo.gizmo),
+    };
+  }
+  return result;
+}
+
+function capturePage(page) {
+  if (Array.isArray(page)) return page.map(captureSummary);
+  if (!page || typeof page !== 'object') return null;
+  const result = {};
+  for (const field of ['items', 'data', 'chat_conversations'])
+    if (Object.hasOwn(page, field))
+      result[field] = Array.isArray(page[field]) ? page[field].map(captureSummary) : null;
+  for (const field of ['cursor', 'total', 'has_more', 'next_cursor', 'next_offset'])
+    if (Object.hasOwn(page, field)) {
+      const value = page[field];
+      result[field] =
+        value === null || ['number', 'boolean', 'string'].includes(typeof value) ? value : false;
+    }
+  return result;
+}
+
+const fetchPage = (spec, signal) => (url, init) =>
+  fetchJson(url, { ...init, cache: 'no-store', signal }, { retries: 0, fetcher: spec.fetcher });
+
 // One reader and one total budget per popup action. Do not retry a vanished account.
-async function gather(spec, selected, guard, signal) {
-  const principals = await spec.principals();
+async function gather(spec, principals, selected, guard, load, pause) {
   const include = (p) =>
     selected === undefined ||
     selected.some((e) => e.principalId === p.principalId && hasScopeItems(e));
@@ -91,12 +144,13 @@ async function gather(spec, selected, guard, signal) {
   const read = async (url, init = {}) => {
     await guard();
     if (++pages > 200) throw invalid();
-    return fetchJson(
-      url,
-      { ...init, cache: 'no-store', signal },
-      { retries: 0, fetcher: spec.fetcher },
-    );
+    return load(url, init);
   };
+  const required = (e) =>
+    e === pause ||
+    ['selection_changed', 'storage_unavailable', 'sync_stopped', 'principal_changed'].includes(
+      e?.code,
+    );
   for (const p of principals.filter(include)) {
     const blocked = new Set(),
       projects = new Map(),
@@ -182,8 +236,13 @@ async function gather(spec, selected, guard, signal) {
       // A failed membership page cannot grant access to that project via Recents.
       let membershipComplete = true;
       const verifiedMember = new Set();
-      const required = (e) =>
-        ['selection_changed', 'storage_unavailable', 'sync_stopped'].includes(e?.code);
+      const chosenProjectsCoverDirect = () =>
+        [...direct].every(
+          (id) =>
+            !skipped.has(id) &&
+            verifiedMember.has(id) &&
+            wantedProjects.has(convs.get(id)?.projectId),
+        );
       // Independent chat selections may require searching the remaining projects. Give whole
       // projects the page budget first, even when the provider orders them last.
       const projectOrder = scope
@@ -195,6 +254,13 @@ async function gather(spec, selected, guard, signal) {
           ]
         : projects.keys();
       for (const id of projectOrder) {
+        if (
+          scope &&
+          !scope.includeRecents &&
+          !wantedProjects.has(id) &&
+          chosenProjectsCoverDirect()
+        )
+          break;
         if (!projects.has(id)) continue;
         try {
           const seen = [];
@@ -210,7 +276,7 @@ async function gather(spec, selected, guard, signal) {
           entryIncomplete = true;
         }
       }
-      if (!scope || direct.size || scope.includeRecents) {
+      if (!scope || scope.includeRecents || !chosenProjectsCoverDirect()) {
         try {
           for await (const item of spec.chats(p, read)) add(item);
         } catch (err) {
@@ -241,8 +307,7 @@ async function gather(spec, selected, guard, signal) {
         legacyOrdinary,
       });
     } catch (error) {
-      if (['selection_changed', 'storage_unavailable', 'sync_stopped'].includes(error?.code))
-        throw error;
+      if (required(error)) throw error;
       // An inaccessible organization cannot supply titles or queue entries. Other
       // organizations remain usable only after fresh principal verification below.
       if (error instanceof NotLoggedInError) denied = true;
@@ -258,7 +323,13 @@ async function gather(spec, selected, guard, signal) {
 
 export async function listPopupCatalog(spec) {
   try {
-    const { groups, incomplete } = await gather(spec, undefined, async () => {});
+    const { groups, incomplete } = await gather(
+      spec,
+      await spec.principals(),
+      undefined,
+      async () => {},
+      fetchPage(spec),
+    );
     return { entries: groups.map((g) => g.catalog), ...(incomplete ? { incomplete: true } : {}) };
   } catch {
     throw invalid();
@@ -307,9 +378,40 @@ export async function syncPopupScope(
   const chosen = selectedScope.entries.filter(hasScopeItems);
   if (!chosen.length) return stop(null);
   await report({ phase: 'discovering', selection });
-  const { groups, incomplete, principals } = await gather(spec, chosen, guard, signal);
-  if (!groups.length) return stop('The selected account or its catalog is unavailable.');
+  const principals = await spec.principals();
   const signature = JSON.stringify([identity(principals), chosen]);
+  const verify = async () => {
+    await guard();
+    if (identity(principals) !== identity(await spec.principals())) throw changed();
+    await guard();
+  };
+  const load = fetchPage(spec, signal);
+  const pager = discoveryPages({
+    state,
+    signature,
+    guard,
+    checkpoint,
+    report,
+    selection,
+    verify,
+    canResume: true,
+    load: async (url, init) => capturePage(await load(url, init)),
+  });
+  let groups, incomplete;
+  try {
+    ({ groups, incomplete } = await gather(
+      spec,
+      principals,
+      chosen,
+      guard,
+      pager.read,
+      pager.pause,
+    ));
+  } catch (error) {
+    if (error !== pager.pause) throw error;
+    return pager.continuation();
+  }
+  if (!groups.length) return stop('The selected account or its catalog is unavailable.');
   const prior = state.pending?.signature === signature ? state.pending : null;
   const now = Date.now(),
     run = {
@@ -431,9 +533,7 @@ export async function syncPopupScope(
       return spec.parse(detail, id, p);
     },
     push: async (...args) => {
-      await guard();
-      if (identity(principals) !== identity(await spec.principals())) throw changed();
-      await guard();
+      await verify();
       return push(...args);
     },
   });

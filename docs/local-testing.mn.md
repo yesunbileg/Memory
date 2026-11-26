@@ -5,7 +5,7 @@
 ## 1. Кодоо шинэчлэх
 
 ```bash
-cd /mnt/work/Documents/AI-CONVARSATION
+cd /mnt/work/Documents/Memory
 git switch main
 git pull --ff-only
 uv sync --frozen --extra login
@@ -43,7 +43,7 @@ ZIP хэрэгтэй бол:
 .venv/bin/ai-memory --db data/conversations.sqlite connect --extension-id YOUR_EXTENSION_ID --browser brave
 ```
 
-Linux дээр ажиллана. `YOUR_EXTENSION_ID`-ийн оронд Extensions хуудаст харуулсан 32 үсэгтэй ID-г оруулна. Хөтөчдөө тааруулж `brave`, `chrome` эсвэл `chromium` сонгоно. Хэрэгслийн мөрийн **AI Memory** дүрс → **Settings** дотор командын хэвлэсэн `connection_file` замыг сонго. Хөтөч локал програмыг өөрөө асаана. Terminal-ийг нээлттэй байлгах шаардлагагүй. Хуучин bearer файлтай бол шинэ файл үүсгэж дахин холбоно. [Дэлгэрэнгүй](native-pairing.md).
+Linux дээр ажиллана. `YOUR_EXTENSION_ID`-ийн оронд Extensions хуудаст харуулсан 32 үсэгтэй ID-г оруулна. Хөтөчдөө тааруулж `brave`, `chrome` эсвэл `chromium` сонгоно. Хэрэгслийн мөрийн **AI Memory** дүрсийг дарахад бүртгүүлсэн архив автоматаар холбогдоно. Холбогдохгүй бол **Settings → Check connection** дарна. Өөр архив сонгохдоо **Connect a different archive manually**-г ашиглана. Хөтөч локал програмыг өөрөө асаана. Terminal-ийг нээлттэй байлгах шаардлагагүй. Хуучин bearer файлтай бол шинэ файл үүсгэж дахин холбоно. [Дэлгэрэнгүй](native-pairing.md).
 
 ## 4. Сайтын жагсаалтын сонголтыг шалгах
 

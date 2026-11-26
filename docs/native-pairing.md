@@ -20,4 +20,6 @@ Each browser profile keeps its own capture namespace. Checkpoints also include a
 
 Discovery checkpoints retain only required listing metadata. Each worker slice fetches at most four new list pages and reads details for up to ten selected conversations. Previously acknowledged work is not a new import. If a worker stops during an individual Gemini detail, it rereads that one detail before releasing it to the archive. Partial turns are never committed out of order. A receipt or storage failure retains the old completed watermark. Byte-sized native packets are atomic; an oversized conversation with stable native message IDs may span multiple packets. Earlier acknowledged packets may survive a later failure and are idempotently replayed.
 
+ChatGPT and Claude captures are stored under the verified combination of user and workspace or organization. If an older record has the same conversation ID and only a workspace or organization, the archive preserves that record and its approval. A new capture whose owner cannot be matched to that record is saved separately and waits for upload approval.
+
 Protocol reference: [Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).

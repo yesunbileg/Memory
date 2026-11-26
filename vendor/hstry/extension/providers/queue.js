@@ -143,7 +143,7 @@ const fields = new Set([
   'update_time',
 ]);
 const scalar = (v) => v === null || ['boolean', 'number', 'string'].includes(typeof v);
-function summaryItem(item, withMetadata = true, withGizmo = true) {
+export function summaryItem(item, withMetadata = true, withGizmo = true) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
   const result = {};
   for (const [k, v] of Object.entries(item)) {
@@ -173,12 +173,36 @@ function projectSummary(data) {
   return result;
 }
 
-function discoveryPages({ state, signature, canResume, guard, checkpoint, report, selection }) {
+export function discoveryPages({
+  state,
+  signature,
+  canResume,
+  guard,
+  checkpoint,
+  report,
+  selection,
+  load = async (url, init) => projectSummary(await fetchJson(url, init)),
+  verify,
+}) {
   const cache =
     canResume && state.discovery?.signature === signature
       ? structuredClone(state.discovery)
       : { signature, pages: {}, started: Date.now() };
-  const storeState = () => ({ ...state, pending: undefined, discovery: cache });
+  const storeState = () => ({
+    ...state,
+    ...(verify ? {} : { pending: undefined }),
+    discovery: cache,
+  });
+  const persist = async (next) => {
+    await guard();
+    try {
+      await checkpoint(next);
+    } catch (error) {
+      throw Object.assign(new Error('Discovery state not saved'), {
+        code: error?.code ?? 'storage_unavailable',
+      });
+    }
+  };
   let count = 0;
   const pause = new Error('Discovery continuation');
   return {
@@ -189,18 +213,9 @@ function discoveryPages({ state, signature, canResume, guard, checkpoint, report
       const key = JSON.stringify([init?.headers?.['chatgpt-account-id'] ?? null, String(url)]);
       if (Object.hasOwn(cache.pages, key)) return cache.pages[key];
       if (count++ >= 4) throw pause;
-      const value = projectSummary(await fetchJson(url, init));
+      const value = await load(url, init);
       cache.pages[key] = value;
-      if (canResume) {
-        await guard();
-        try {
-          await checkpoint(storeState());
-        } catch (error) {
-          throw Object.assign(new Error('Discovery state not saved'), {
-            code: error?.code ?? 'storage_unavailable',
-          });
-        }
-      }
+      if (canResume && !verify) await persist(storeState());
       return value;
     },
     async continuation() {
@@ -208,6 +223,10 @@ function discoveryPages({ state, signature, canResume, guard, checkpoint, report
         ? null
         : 'Account identity is unavailable. Discovery is incomplete and cannot safely resume.';
       const next = canResume ? storeState() : state;
+      if (verify && canResume) {
+        await verify();
+        await persist(next);
+      }
       await report({ phase: canResume ? 'queued' : 'attention', selection, selectionWarning });
       return { state: next, conversations: 0, hasMore: canResume, selection, selectionWarning };
     },

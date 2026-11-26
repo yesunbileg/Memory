@@ -43,10 +43,11 @@
     gemini: 'a[href*="/app/"]',
   };
   const css = [
-    '[data-memory-sync-row]{anchor-name:var(--ai-memory-picker-anchor)!important;padding-inline-start:2.25rem!important}',
+    '[data-memory-sync-row]{anchor-name:var(--ai-memory-picker-anchor)!important;padding-inline-start:44px!important}',
     '[data-memory-sync-row]:has(+input[data-memory-sync-id]:checked):not([aria-current=page]){background-color:rgba(66,127,117,.12);border-radius:.5rem}',
-    'input[data-memory-sync-id]{appearance:auto!important;position:absolute!important;position-anchor:var(--ai-memory-picker-anchor)!important;position-visibility:anchors-visible;inset:auto!important;top:anchor(center)!important;left:anchor(left)!important;transform:translate(.5rem,-50%)!important;z-index:2!important;width:1rem!important;height:1rem!important;box-sizing:border-box!important;margin:0!important;padding:0!important;cursor:pointer!important;accent-color:#3c756f!important}',
-    'input[data-memory-sync-id]:dir(rtl){left:auto!important;right:anchor(right)!important;transform:translate(-.5rem,-50%)!important}',
+    '[data-memory-sync-row]:has(+input[data-memory-sync-id]:indeterminate):not([aria-current=page]){background-color:rgba(90,114,109,.08);border-radius:.5rem}',
+    'input[data-memory-sync-id]{appearance:auto!important;position:absolute!important;position-anchor:var(--ai-memory-picker-anchor)!important;position-visibility:anchors-visible;inset:auto!important;top:anchor(center)!important;left:anchor(left)!important;transform:translate(8px,-50%)!important;z-index:2!important;width:24px!important;height:24px!important;min-width:24px!important;min-height:24px!important;box-sizing:border-box!important;margin:0!important;padding:0!important;cursor:pointer!important;accent-color:#3c756f!important;border-radius:4px!important;background-color:rgba(60,117,111,.08)!important;box-shadow:0 0 0 1px rgba(60,117,111,.42)!important}',
+    'input[data-memory-sync-id]:dir(rtl){left:auto!important;right:anchor(right)!important;transform:translate(-8px,-50%)!important}',
     'input[data-memory-sync-id]:indeterminate{accent-color:#5a726d!important}',
     '[data-memory-sync-row=recents]:has(+input[data-memory-sync-id]:checked){padding-inline-end:2.25rem!important}',
     '[data-memory-sync-row=recents]:has(+input[data-memory-sync-id]:checked)::after{content:"All" / "";position:absolute;position-anchor:var(--ai-memory-picker-anchor);position-visibility:anchors-visible;top:anchor(center);right:anchor(right);transform:translate(-.6rem,-50%);color:inherit;opacity:.78;font:500 .75rem/1 system-ui,sans-serif;pointer-events:none}',
@@ -176,8 +177,13 @@
     if (current && denied.has(key(current))) throw unavailable();
     return { rows, current };
   }
-  function note(s, text = '') {
-    if (s.note.textContent !== text) s.note.textContent = text;
+  function note(s, text = s.noteStatus) {
+    s.noteStatus = text;
+    const legend = [...s.controls.values()].some((c) => c.box.indeterminate)
+      ? 'Dash = included via a project or Recents.'
+      : '';
+    const value = [text, legend].filter(Boolean).join(' ');
+    if (s.note.textContent !== value) s.note.textContent = value;
   }
   function detach(s, row, c) {
     c.box.remove();
@@ -247,6 +253,7 @@
       c.box.setAttribute('aria-label', ident + '. ' + help);
       c.box.title = ident + ' — ' + help;
     }
+    note(s);
   }
   function stop(s) {
     if (!s || active !== s) return;
@@ -449,6 +456,7 @@
       pending: new Set(),
       chain: Promise.resolve(),
       error: '',
+      noteStatus: '',
       note: document.createElement('div'),
       sheet: new CSSStyleSheet(),
     };
@@ -505,6 +513,7 @@
         options,
       );
       const target = selectors[s.provider] + ',' + nav + ',' + modal;
+      const excluded = s.provider === 'claude' ? claudeOutside : outside;
       s.observer = new MutationObserver((records) => {
         if (active !== s) return;
         for (const r of records) {
@@ -521,7 +530,7 @@
             stop(s);
             return;
           }
-          if (s.scheduled || el.closest(outside)) continue;
+          if (s.scheduled || el.closest(excluded)) continue;
           if (r.type === 'attributes') {
             const layout = r.attributeName === 'class' || r.attributeName === 'style';
             if (
@@ -541,7 +550,7 @@
                 nodes.some(
                   (n) =>
                     n.nodeType === 1 &&
-                    !n.matches(outside) &&
+                    !n.matches(excluded) &&
                     (n.matches(target) || n.querySelector(target)),
                 ))
             ) {

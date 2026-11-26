@@ -49,6 +49,13 @@ SYNC_PHASES = {
     "cleanup": "Баталгаажуулж, хуучин хувилбарыг цэвэрлэж байна",
 }
 AUTO_SYNC_RETRY_DELAY = 60
+ASK_ERROR_MESSAGES = {
+    "archive_missing": "Архив байхгүй байна. /setup ажиллуулж архив болон NotebookLM-ээ тохируулна уу.",
+    "not_configured": "NotebookLM тохируулаагүй байна. /setup ажиллуулна уу.",
+    "auth_required": "NotebookLM-ийн нэвтрэлт дууссан. /login ажиллуулна уу.",
+    "no_synced_sources": "NotebookLM-д ашиглах баталгаажсан эх сурвалж алга. /dashboard дээр синкийн төлөвийг шалгана уу.",
+    "unverified_sources": "Эх сурвалжийг баталгаажуулж чадсангүй.",
+}
 
 
 def sync_phase_text(activity: dict) -> str:
@@ -62,7 +69,7 @@ def sync_failure_text(failure: dict) -> str:
     label = {
         "docs_web_not_sent": "Google Docs-д бичих хүсэлт эхлээгүй",
         "docs_web_uncertain": "Google Docs-ийн бичилт баталгаажихыг хүлээж байна",
-        "docs_web_auth_required": "Brave дээр Google Docs-д нэвтрэх шаардлагатай",
+        "docs_web_auth_required": "Google нэвтрэлтээ /login командаар шинэчилнэ үү",
         "remote_missing": "NotebookLM-д эх сурвалж олдсонгүй",
         "not_ready": "NotebookLM эхээ индексэлж дуусаагүй",
     }.get(reason, f"Синк саатсан · {reason or 'operation_failed'}")
@@ -186,17 +193,6 @@ class Chat:
         return self.nb == "done" or (self.nb == "running" and self.parts[0] == self.parts[1] > 0)
 
 
-@dataclass
-class Sess:
-    id: str
-    kind: str  # ask | chat
-    title: str
-    ts: float
-    chat_id: str | None = None
-    msgs: list[dict] = field(default_factory=list)
-    cite: int = 0
-
-
 # ───────────────── командууд ─────────────────
 @dataclass
 class Cmd:
@@ -211,14 +207,6 @@ class Cmd:
 COMMANDS = [
     Cmd("dashboard", "Хяналтын самбар", "Receiver, NotebookLM, pipeline, үйл явдал", "Санах ой"),
     Cmd("chats", "Чатуудын архив", "Архивын чат хайж унших", "Санах ой", ("archive",)),
-    Cmd(
-        "resume",
-        "Яриаг үргэлжлүүлэх",
-        "Энэ ажиллуулалтын асуулт, уншсан чатууд",
-        "Санах ой",
-        ("sessions",),
-    ),
-    Cmd("new", "Шинэ асуулт", "Нүүр хуудас руу очно", "Санах ой", (), "ctrl+n"),
     Cmd("sources", "Ишлэлүүд", "Хариултын эх мессежийг нээх", "Санах ой", (), "ctrl+o"),
     Cmd("chatgpt", "ChatGPT чатууд", "ChatGPT-ийн чатуудын tab", "Provider"),
     Cmd("claude", "Claude чатууд", "Claude-ийн чатуудын tab", "Provider"),
@@ -661,7 +649,7 @@ class JobDialog(ModalScreen):
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
         if event.button.id == "job-stop":
-            self.app.cmd_stop()
+            self.app.stop_job()
         elif event.button.id == "job-login":
             self.dismiss(None)
             self.app.call_after_refresh(lambda: self.app.open_notebook_form("login"))
@@ -1028,8 +1016,8 @@ class Prompt(Vertical):
     # — харагдац —
     def refresh_meta(self) -> None:
         app = self.app
-        self.query_one(".source-hint", Hint).display = self.id == "p-sess" and bool(
-            app.session_citations()
+        self.query_one(".source-hint", Hint).display = self.id == "p-home" and bool(
+            app.ask_citations()
         )
 
     def refresh_status(self) -> None:
@@ -1156,22 +1144,20 @@ class Prompt(Vertical):
 
 # ───────────────── tab bar ─────────────────
 class Tab(Static):
-    def __init__(self, sid: str | None, title: str, active: bool, icon: str = "") -> None:
+    def __init__(self, route: str, title: str, active: bool) -> None:
         label = Text(no_wrap=True, overflow="ellipsis")
-        if icon:
-            label.append(icon + " ", style=rgb(TEXT if active else MUTED))
         label.append(title, style=("bold " if active else "") + rgb(TEXT if active else MUTED))
         super().__init__(label, classes="tab" + (" active" if active else ""))
-        self.sid = sid
+        self.route = route
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
         if event.button == 1:
-            self.app.nav_tab(self.sid)
+            self.app.nav_tab(self.route)
             self.app.call_after_refresh(self.app._refocus)
 
 
-# ───────────────── session-ийн блокууд ─────────────────
+# ───────────────── мессежийн блокууд ─────────────────
 class UserBlock(Static):
     def __init__(
         self, body: RenderableType, color=BLUE, cited: bool = False, label: Text | None = None
@@ -1385,10 +1371,15 @@ class Mem(App):
     #statusbar > #sb-fill { width: 1fr; margin-right: 0; }
     #statusbar.compact > #sb-prov, #statusbar.compact > #sb-ver { display: none; }
 
-    #home { align: center middle; }
-    #logo { width: 100%; max-width: 75; height: auto; margin-bottom: 1; text-align: center; }
+    #home { height: 1fr; }
+    #ask-main { width: 1fr; align-horizontal: center; }
+    #home.empty #ask-main { align-vertical: middle; }
+    #home.empty #msgs, #home.empty #sidebar { display: none; }
+    #logo { display: none; width: 100%; max-width: 75; height: auto; margin-bottom: 1; text-align: center; }
+    #home.empty #logo { display: block; }
     #notice { width: 100%; max-width: 75; height: auto; max-height: 2; margin-bottom: 1; text-align: center; }
-    #p-home { width: 100%; max-width: 75; height: auto; }
+    #p-home { padding: 0 2; }
+    #home.empty #p-home { max-width: 75; padding: 0; }
 
     .prompt { height: auto; }
     .pbox { height: auto; background: #1c1c1c; border-left: heavy #5c9cf5; padding: 1 2 0 2; }
@@ -1408,10 +1399,7 @@ class Mem(App):
     .phints { width: auto; height: 1; }
     .phints > Hint { width: auto; margin-left: 2; }
 
-    #session { height: 1fr; }
-    #sess-main { width: 1fr; }
     #msgs { height: 1fr; padding: 0 2; }
-    #p-sess { padding: 0 2; }
     #sidebar { width: 40; height: 100%; background: #141414; padding: 1 2; }
     #views.narrow #sidebar { display: none; }
     .ublock { background: #141414; padding: 1 2; margin-top: 1; height: auto; }
@@ -1497,7 +1485,6 @@ class Mem(App):
     """
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+p", "palette", show=False, priority=True),
-        Binding("ctrl+n", "new", show=False, priority=True),
         Binding("ctrl+o", "sources", show=False, priority=True),
         Binding("ctrl+w", "close_current", show=False, priority=True),
         Binding("ctrl+x", "stop", show=False, priority=True),
@@ -1534,21 +1521,22 @@ class Mem(App):
         self.archive_stamp = None
         self.archive_lock = asyncio.Lock()
         self.auto_sync = False
-        self.background_sync = self.backend.background_sync_enabled()
+        self.auto_sync_preference: bool | None = None
+        self.sync_timer_active = False
         self.auto_sync_due: float | None = None
         self.auto_retry_after = 0.0
         self.reader_key: tuple[str, int, Citation | None] | None = None
-        self.ask_workers: dict[str, Any] = {}
+        self.ask_messages: list[dict] = []
+        self.ask_worker = None
+        self.ask_block: AiBlock | None = None
+        self.ask_reply_scroll = False
         self.job_worker = None
-        self.sessions: dict[str, Sess] = {}
         self.cur_prov = "ChatGPT"
         self.sel: dict[str, str] = {}
         self.pfilter = "all"
         self.cite_id: str | None = None
         self.citation: Citation | None = None
-        self.viewed: dict[str, float] = {}
         self.route, self.prev_route = "home", "home"
-        self.cur_sid: str | None = None
         self.job: Job | None = None
         self.spin = 0
         self.quit_armed = 0.0
@@ -1612,6 +1600,7 @@ class Mem(App):
                 self.archive_status = snapshot["status"]
                 self.sync_activity = snapshot.get("sync_activity") or {}
                 self.auto_sync = snapshot.get("auto_sync", False)
+                self.auto_sync_preference = snapshot["auto_sync_preference"]
                 self.auto_sync_due = snapshot.get("auto_sync_due")
                 self.last_notebook_check = snapshot.get("notebook_identity", {})
                 if (
@@ -1653,7 +1642,7 @@ class Mem(App):
     def poll_auto_sync(self) -> None:
         if (
             not self.auto_sync
-            or self.background_sync
+            or self.sync_timer_active
             or self.auto_sync_due is None
             or self.auto_sync_due > time.time()
             or time.monotonic() < self.auto_retry_after
@@ -1708,14 +1697,12 @@ class Mem(App):
     def compose(self) -> ComposeResult:
         yield HorizontalScroll(id="tabs")
         with ContentSwitcher(initial="home", id="views"):
-            with Vertical(id="home"):
-                yield Static(Text(""), id="logo")
-                yield Click(Text(""), self.run_notice, id="notice")
-                yield Prompt("p-home")
-            with Horizontal(id="session"):
-                with Vertical(id="sess-main"):
+            with Horizontal(id="home", classes="empty"):
+                with Vertical(id="ask-main"):
+                    yield Static(Text(""), id="logo")
+                    yield Click(Text(""), self.run_notice, id="notice")
                     yield VerticalScroll(id="msgs")
-                    yield Prompt("p-sess")
+                    yield Prompt("p-home")
                 yield Static(Text(""), id="sidebar")
             with Vertical(id="prov"):
                 with Horizontal(id="prov-body"):
@@ -1759,6 +1746,7 @@ class Mem(App):
         self.q("#plist", ChatList).on_select = self.on_list_pick
 
     async def load_initial_status(self) -> None:
+        self.sync_timer_active = await asyncio.to_thread(self.backend.background_sync_timer_active)
         if await self.refresh_archive(force=True):
             self.poll_notebook()
 
@@ -1781,10 +1769,8 @@ class Mem(App):
         if not isinstance(self.screen, ModalScreen) and (active_job or self.spin % 12 == 0):
             for p in self.prompts:
                 p.refresh_status()
-        if self.route == "session" and self.spin % 3 == 0:
-            sess = self.cur_sess()
-            if sess and sess.id in self.ask_workers:
-                self.refresh_tail(sess)
+        if self.route == "home" and self.spin % 3 == 0 and self.ask_worker and self.ask_block:
+            self.ask_block.update(self.ai_text(self.ask_messages[-1]))
 
     def poll_notebook(self) -> None:
         if (
@@ -1807,13 +1793,16 @@ class Mem(App):
         self.run_worker(self.refresh_connection_status(), group="connection-status")
 
     async def refresh_connection_status(self) -> None:
+        timer_active = await asyncio.to_thread(self.backend.background_sync_timer_active)
         try:
             connection = await asyncio.to_thread(self.backend.connection, probe=True)
         except BackendError:
-            return
-        if connection != self.connection_status:
+            connection = self.connection_status
+        if connection != self.connection_status or timer_active != self.sync_timer_active:
             self.connection_status = connection
+            self.sync_timer_active = timer_active
             self.refresh_all()
+            self.poll_auto_sync()
 
     async def refresh_notebook_status(self) -> None:
         try:
@@ -1845,9 +1834,7 @@ class Mem(App):
             self._focus_prompt()
 
     def _focus_prompt(self) -> None:
-        pid = {"home": "#p-home", "session": "#p-sess", "dash": "#p-dash", "prov": "#p-prov"}[
-            self.route
-        ]
+        pid = {"home": "#p-home", "dash": "#p-dash", "prov": "#p-prov"}[self.route]
         try:
             self.q(pid, Prompt).focus_input()
         except NoMatches:
@@ -1865,43 +1852,28 @@ class Mem(App):
         self.popup.hide()
         self._refocus()
         self.refresh_all()
+        if route == "home" and self.ask_reply_scroll:
+            self.call_after_refresh(self.show_ask_reply)
 
-    def nav_tab(self, sid: str | None) -> None:
-        if sid is None:
-            self.go("home")
-        elif sid == "dash":
-            self.go("dash")
-        elif sid == "archive":
+    def nav_tab(self, route: str) -> None:
+        if route in {"home", "dash"}:
+            self.go(route)
+        elif route == "archive":
             self.cmd_chats()
-        elif sid == "flow":
+        elif route == "flow":
             self.cmd_flow()
-        elif sid == "browse":
+        elif route == "browse":
             self.browse_providers()
-        elif sid.startswith("prov:"):
-            self.open_provider(sid[5:])
-
-    def open_session(self, sid: str) -> None:
-        if sid not in self.sessions:
-            return
-        self.cur_sid = sid
-        self.go("session")
-        self.render_session()
+        elif route.startswith("prov:"):
+            self.open_provider(route[5:])
 
     def action_close_current(self) -> None:
         if self.route == "dash":
             self.on_escape()
 
-    def action_new(self) -> None:
-        self.go("home")
-
     def on_escape(self) -> None:
         if self.route == "dash":
-            if self.prev_route == "session" and self.cur_sid:
-                self.open_session(self.cur_sid)
-            else:
-                self.go(self.prev_route if self.prev_route != "dash" else "home")
-        elif self.route == "prov" and self.prev_route == "session" and self.cur_sid:
-            self.open_session(self.cur_sid)
+            self.go(self.prev_route if self.prev_route != "dash" else "home")
         elif self.route != "home":
             self.go("home")
 
@@ -1909,7 +1881,7 @@ class Mem(App):
         if self.route == "prov" and self.size.width < 100:
             self.prov_move(direction * 8)
             return
-        selector = {"session": "#msgs", "dash": "#d-body", "prov": "#pmsgs"}.get(self.route)
+        selector = {"home": "#msgs", "dash": "#d-body", "prov": "#pmsgs"}.get(self.route)
         if selector:
             scroll = self.q(selector, VerticalScroll)
             if direction < 0:
@@ -1925,17 +1897,13 @@ class Mem(App):
             self.quit_armed = now
             self.toast("Гарахын тулд ctrl+c-г дахин дарна уу", "warning")
 
-    def cur_sess(self) -> Sess | None:
-        return self.sessions.get(self.cur_sid or "")
-
-    def session_citations(self) -> list[Citation]:
-        session = self.cur_sess() if self.route == "session" else None
-        if not session:
+    def ask_citations(self) -> list[Citation]:
+        if self.route != "home":
             return []
         return list(
             dict.fromkeys(
                 citation
-                for message in reversed(session.msgs)
+                for message in reversed(self.ask_messages)
                 for citation in message.get("sources", ())
                 if citation.message_id or citation.passage
             )
@@ -1948,7 +1916,7 @@ class Mem(App):
         self.refresh_tabs()
         self.refresh_home()
         self.refresh_statusbar()
-        if self.route == "session":
+        if self.route == "home" and self.ask_messages:
             self.refresh_sidebar()
         if self.route == "dash":
             self.refresh_dash()
@@ -1967,7 +1935,7 @@ class Mem(App):
         bar = self.q("#tabs")
         bar.remove_children()
         ws = [
-            Tab(None, "Шинэ", self.route == "home", "+"),
+            Tab("home", "Асуух", self.route == "home"),
             Tab("archive", "Архив", False),
             Tab("dash", "Төлөв", self.route == "dash"),
             Tab("flow", "Урсгал", False),
@@ -1986,11 +1954,11 @@ class Mem(App):
         if self.archive_loading or self.archive_error_code == "archive_busy":
             return "", ""
         if self.archive_error_code == "archive_missing":
-            return "setup", "NotebookLM болон архив тохируулах"
+            return "setup", "/setup · NotebookLM болон архив тохируулах"
         if self.archive_error:
             return "dashboard", self.archive_error
         if not self.archive_status.get("notebook_configured"):
-            return "setup", "NotebookLM холбох"
+            return "setup", "/setup · NotebookLM холбох"
         if self.sync_activity or (self.job and self.job.status in {"running", "stopping"}):
             return "", ""
         error = self.notebook_status.get("error") or {}
@@ -2065,7 +2033,7 @@ class Mem(App):
             return "NotebookLM тохируулсан · /check", CYAN
         if self.archive_loading:
             return "NotebookLM тохиргоо уншиж байна", MUTED
-        return "NotebookLM тохируулаагүй", MUTED
+        return "NotebookLM тохируулаагүй · /setup", MUTED
 
     def refresh_statusbar(self) -> None:
         label, color = self.connection_label()
@@ -2076,31 +2044,32 @@ class Mem(App):
         )
         self.q("#sb-prov", Click).update(tx(f"{len(self.providers)} provider", MUTED))
         active = self.job and self.job.automatic and self.job.status in {"running", "stopping"}
-        label = "Auto …" if active else "Auto ON" if self.auto_sync else "Auto OFF"
-        self.q("#sb-auto", Static).update(
-            tx(label, BLUE if active else GREEN if self.auto_sync else MUTED)
-        )
+        if active or self.sync_activity.get("automatic"):
+            auto, auto_color = "Auto …", BLUE
+        elif self.archive_loading or (
+            self.archive_error and self.archive_error_code != "archive_missing"
+        ):
+            auto, auto_color = "Auto ?", MUTED
+        elif not self.archive_status.get("notebook_configured") or self.archive_error:
+            auto, auto_color = "Auto /setup", YELLOW
+        elif self.auto_sync:
+            auto, auto_color = "Auto ON", GREEN
+        else:
+            auto, auto_color = "Auto OFF", MUTED
+        self.q("#sb-auto", Static).update(tx(auto, auto_color))
 
     def refresh_sidebar(self) -> None:
-        s, st = self.cur_sess(), self.stats()
+        st = self.stats()
         t = Text()
-        if s:
-            t.append(clip(s.title, 34) + "\n\n", style="bold " + rgb(TEXT))
-            t.append("▾ ", style=rgb(MUTED))
-            t.append("Эх сурвалж\n" if s.kind == "ask" else "Чат\n", style="bold " + rgb(TEXT))
-            if s.kind == "ask":
-                srcs = [x for m in s.msgs if m["role"] == "ai" for x in m.get("sources", [])]
-                for citation in srcs[-6:]:
-                    ok = bool(citation.message_id)
-                    t.append("  " + ("✔ " if ok else "○ "), style=rgb(GREEN if ok else MUTED))
-                    t.append(clip(citation.label, 30) + "\n", style=rgb(TEXT if ok else MUTED))
-                if not srcs:
-                    t.append("  одоохондоо алга\n", style=rgb(MUTED))
-            else:
-                c = self.chat(s.chat_id or "")
-                if c:
-                    t.append("  " + c.ai + "\n", style=rgb(PROV.get(c.ai, TEXT)))
-                    t.append(f"  {c.message_count} мессеж\n", style=rgb(MUTED))
+        t.append("▾ ", style=rgb(MUTED))
+        t.append("Эх сурвалж\n", style="bold " + rgb(TEXT))
+        sources = [source for msg in self.ask_messages for source in msg["sources"]]
+        for citation in sources[-6:]:
+            ok = bool(citation.message_id)
+            t.append("  " + ("✔ " if ok else "○ "), style=rgb(GREEN if ok else MUTED))
+            t.append(clip(citation.label, 30) + "\n", style=rgb(TEXT if ok else MUTED))
+        if not sources:
+            t.append("  одоохондоо алга\n", style=rgb(MUTED))
         t.append("\n▾ ", style=rgb(MUTED))
         t.append("Sync\n", style="bold " + rgb(TEXT))
         t.append(f"  Локал       {st['local']}/{st['total']}\n", style=rgb(TEXT))
@@ -2159,8 +2128,16 @@ class Mem(App):
                 ],
             ]
         )
-        when = "mem хаалттай үед ч ажиллана" if self.background_sync else "mem нээлттэй үед"
-        auto = f"асаалттай · {when}" if self.auto_sync else "унтраалттай"
+        preference = "асаалттай" if self.auto_sync_preference else "унтраалттай"
+        if self.archive_error_code == "archive_missing":
+            auto = "Автомат синк · /setup"
+        elif self.archive_loading or self.archive_error:
+            auto = "Автомат синкийн тохиргоо тодорхойгүй"
+        elif not self.archive_status.get("notebook_configured"):
+            auto = f"Автомат синкийн тохиргоо {preference} · /setup"
+        else:
+            auto = f"Автомат синк {preference}"
+        timer = "идэвхтэй" if self.sync_timer_active else "илрээгүй"
         saved = self.archive_status.get("conversations", 0)
         ready = self.archive_status.get("ready_conversations", 0)
         pending = self.archive_status.get("pending_conversations", 0)
@@ -2172,7 +2149,13 @@ class Mem(App):
                 tx(f"NotebookLM-д бэлэн · {ready}", GREEN),
                 tx(f"Хүлээгдэж буй чат · {pending}", YELLOW),
                 *([tx(f"Мессежгүй чат · {empty}", MUTED)] if empty > 0 else []),
-                tx(f"Автомат синк {auto}", MUTED),
+                tx(auto, MUTED),
+                tx(f"Нэмэлт systemd таймер · {timer}", MUTED),
+                *(
+                    [tx("Чат хадгалахад mem хаалттай байсан ч синк эхэлж болно.", MUTED)]
+                    if self.auto_sync and not self.archive_error
+                    else []
+                ),
             ]
         )
         col = {"OK": GREEN, "INFO": CYAN, "WARN": ORANGE, "ERR": RED, "NEW": PURPLE}
@@ -2201,14 +2184,16 @@ class Mem(App):
         ):
             self.q(sel, Static).update(content)
 
-    # ───── session render ─────
+    # ───── NotebookLM хариулт ─────
     def ai_text(self, msg: dict) -> RenderableType:
-        if msg.get("pending"):
+        if msg["pending"]:
             frame = SPIN[self.spin % len(SPIN)]
-            elapsed = int(time.monotonic() - msg["started"])
+            started = msg["started"]
+            elapsed = int(time.monotonic() - started) if started is not None else 0
+            action = "Зогсоож байна…" if msg["stopping"] else "Ctrl+X"
             return Text.assemble(
                 (frame + " ", rgb(BLUE)),
-                (f"NotebookLM · {elapsed}с · Ctrl+X", rgb(MUTED)),
+                (f"NotebookLM · {elapsed}с · {action}", rgb(MUTED)),
             )
         footer = tx(f"NotebookLM · {msg.get('took', 0):.1f}с", MUTED)
         if code := msg.get("error_code"):
@@ -2221,27 +2206,13 @@ class Mem(App):
             warnings.append(tx("Хуучин хувилбарын эх сурвалж ашигласан", YELLOW, True))
         return Group(*warnings, message_markdown(msg["text"]), Text(), footer)
 
-    def render_session(self) -> None:
-        s = self.cur_sess()
-        box = self.q("#msgs", VerticalScroll)
-        box.remove_children()
-        if not s:
+    def show_ask_reply(self) -> None:
+        if self.route != "home" or not self.ask_reply_scroll or self.ask_block is None:
             return
-        ws: list[Any] = []
-        for m in s.msgs:
-            if m["role"] == "user":
-                ws.append(UserBlock(m["text"], BLUE))
-            else:
-                ws.append(AiBlock(self.ai_text(m)))
-                if not m.get("pending"):
-                    for citation in m.get("sources", []):
-                        ws.append(SourceRow(citation))
-        box.mount(*ws)
-        prompt = self.q("#p-sess", Prompt)
-        prompt.refresh_meta()
-        prompt.refresh_status()
-        self.call_after_refresh(lambda: box.scroll_end(animate=False))
-        self.refresh_sidebar()
+        self.q("#msgs", VerticalScroll).scroll_to(
+            y=self.ask_block.virtual_region.y, animate=False, immediate=True
+        )
+        self.ask_reply_scroll = False
 
     # ───── provider tab: чатуудын жагсаалт + уншигч ─────
     def chat_widgets(self, c: Chat, cite: int = 0) -> tuple[list[Any], Any]:
@@ -2380,7 +2351,6 @@ class Mem(App):
 
     def on_list_pick(self, cid: str, click: bool) -> None:
         self.sel[self.cur_prov] = cid
-        self.viewed[cid] = time.time()
         if self.cite_id != cid:
             self.cite_id = None
         self.show_chat(cid, dialog=click and self.size.width < 100)
@@ -2426,72 +2396,77 @@ class Mem(App):
         hints.append(Hint("/chats", "архив", self.cmd_chats))
         return [head, Horizontal(*hints, classes="chactions")]
 
-    def refresh_tail(self, sess: Sess) -> None:
-        if self.route == "session" and self.cur_sid == sess.id:
-            blocks = list(self.q("#msgs").query(AiBlock))
-            if blocks:
-                blocks[-1].update(self.ai_text(sess.msgs[-1]))
-
     # ───── асуулт ─────
     def ask(self, text: str) -> None:
-        s = self.cur_sess() if self.route == "session" else None
-        if s and s.id in self.ask_workers:
+        if self.ask_worker is not None:
             self.toast("Энэ асуулт боловсруулагдаж байна · ctrl+x", "warning")
             return
-        if not s or s.kind != "ask":
-            sid = f"s{len(self.sessions) + 1}"
-            s = Sess(sid, "ask", clip(text, 40), time.time())
-            self.sessions[sid] = s
-        s.ts = time.time()
-        s.msgs.append({"role": "user", "text": text})
         msg = {
-            "role": "ai",
             "text": "",
             "pending": True,
+            "stopping": False,
             "sources": [],
-            "took": 0.0,
-            "started": time.monotonic(),
+            "started": None,
         }
-        s.msgs.append(msg)
-        self.open_session(s.id)
-        self.ask_workers[s.id] = self.run_worker(self._answer(s, msg, text), group="answers")
+        self.ask_messages.append(msg)
+        self.ask_block = AiBlock(self.ai_text(msg))
+        self.ask_reply_scroll = False
+        self.q("#home").remove_class("empty")
+        box = self.q("#msgs", VerticalScroll)
+        box.mount(UserBlock(text, BLUE), self.ask_block)
+        self.go("home")
+        self.call_after_refresh(self.show_pending_question, msg)
+        self.ask_worker = self.run_worker(self._answer(msg, text), group="answers")
 
-    async def _answer(self, s: Sess, msg: dict, text: str) -> None:
-        t0 = time.monotonic()
+    def show_pending_question(self, msg: dict) -> None:
+        if msg["pending"] and self.route == "home":
+            self.q("#msgs", VerticalScroll).scroll_end(animate=False, immediate=True)
+
+    async def _answer(self, msg: dict, text: str) -> None:
+        msg["started"] = t0 = time.monotonic()
         citations = []
         kind = "INFO"
         try:
+            if msg["stopping"]:
+                raise asyncio.CancelledError
+            if self.archive_error_code == "archive_missing":
+                raise BackendError(ASK_ERROR_MESSAGES["archive_missing"], code="archive_missing")
+            if (
+                not self.archive_loading
+                and not self.archive_error
+                and not self.archive_status.get("notebook_configured")
+            ):
+                raise BackendError(ASK_ERROR_MESSAGES["not_configured"], code="not_configured")
             result = await self.backend.call("ask", question=text)
             if error := result.get("error"):
-                body = error.get("message") or "NotebookLM хариулж чадсангүй."
-                if error.get("code") == "auth_required":
-                    body = "NotebookLM-ийн нэвтрэлт дууссан. /login ажиллуул."
-                    self.notebook_status = {"configured": True, "connected": False, "error": error}
-                elif error.get("code") == "no_synced_sources":
-                    body = "NotebookLM-д ашиглах баталгаажсан эх сурвалж алга. Синкийн төлөвийг шалгана уу."
-                elif error.get("code") == "unverified_sources":
-                    body = "Эх сурвалжийг баталгаажуулж чадсангүй."
-                msg["error_code"] = error.get("code")
-                kind = "ERR"
-            else:
-                body = result.get("answer") or "NotebookLM хоосон хариу өглөө."
-                citations = result.get("citations", [])
-                msg["uncited"] = not result.get("sources")
+                code = error.get("code") or "operation_failed"
+                if code == "auth_required":
+                    self.update_notebook_status(result)
+                raise BackendError(
+                    error.get("message") or "NotebookLM хариулж чадсангүй.", code=code
+                )
+            body = result.get("answer") or "NotebookLM хоосон хариу өглөө."
+            citations = result.get("citations", [])
+            msg["uncited"] = not result.get("sources")
         except BackendError as error:
-            body = str(error)
+            body = ASK_ERROR_MESSAGES.get(error.code, str(error))
             msg["error_code"] = error.code
             kind = "ERR"
         except asyncio.CancelledError:
             body = "Асуултыг зогсоосон."
             kind = "WARN"
         finally:
-            self.ask_workers.pop(s.id, None)
+            self.ask_worker = None
         msg.update(text=body, pending=False, sources=citations, took=time.monotonic() - t0)
         if self._exit or not self.is_running:
             return
         self.note(kind, "NotebookLM асуулт")
-        if self.route == "session" and self.cur_sid == s.id:
-            self.render_session()
+        if self.ask_block is not None:
+            self.ask_block.update(self.ai_text(msg))
+        if citations:
+            self.q("#msgs").mount(*(SourceRow(citation) for citation in citations))
+        self.ask_reply_scroll = True
+        self.call_after_refresh(self.show_ask_reply)
         self.refresh_all()
 
     # ───── командууд ─────
@@ -2549,7 +2524,7 @@ class Mem(App):
                     else "ишилсэн хэсэг"
                 ),
             )
-            for citation in self.session_citations()
+            for citation in self.ask_citations()
         ]
 
     def open_citation(self, citation: Citation) -> None:
@@ -2572,9 +2547,6 @@ class Mem(App):
                 self.call_after_refresh(lambda: self.open_citation(citation))
 
         self.dialog(DialogSelect("Мессежийн ишлэлүүд", self.source_options), done)
-
-    def cmd_new(self, args: str = "") -> None:
-        self.go("home")
 
     def cmd_exit(self, args: str = "") -> None:
         self.exit()
@@ -2654,64 +2626,9 @@ class Mem(App):
         self.sel[c.ai] = cid
         self.pfilter = "all"
         self.cite_id, self.citation = (cid, cite) if cite else (None, None)
-        self.viewed[cid] = time.time()
         self.go("prov")
         if self.size.width < 100:
             self.show_chat(cid, dialog=True)
-
-    # — resume —
-    def resume_options(self) -> list[Opt]:
-        items: list[tuple[float, Opt]] = []
-        for s in self.sessions.values():
-            cat, hm = when_label(s.ts)
-            items.append(
-                (s.ts, Opt(("ask", s.id), s.title, "асуулт", MUTED, cat, hm, MUTED, ("▸", BLUE)))
-            )
-        for cid, ts in self.viewed.items():
-            c = self.chat(cid)
-            if c:
-                cat, hm = when_label(ts)
-                items.append(
-                    (
-                        ts,
-                        Opt(
-                            ("chat", cid),
-                            c.title,
-                            f"чат · {c.ai}",
-                            MUTED,
-                            cat,
-                            hm,
-                            MUTED,
-                            ("●", PROV.get(c.ai, TEXT)),
-                        ),
-                    )
-                )
-        return [o for _, o in sorted(items, key=lambda x: -x[0])]
-
-    def cmd_resume(self, args: str = "") -> None:
-        def done(res: Any) -> None:
-            if res and res[0] == "pick":
-                kind, ident = res[1]
-                self.call_after_refresh(
-                    lambda: self.open_session(ident) if kind == "ask" else self.open_chat(ident)
-                )
-
-        self.dialog(
-            DialogSelect(
-                "Үргэлжлүүлэх",
-                self.resume_options,
-                size=70,
-                placeholder="Яриа хайх",
-                hints=[
-                    (
-                        "↵",
-                        "нээх",
-                        lambda d: d.shown and d.dismiss(("pick", d.shown[d.active].value)),
-                    )
-                ],
-            ),
-            done,
-        )
 
     # — provider —
     def provider_options(self, *, selected_only: bool = False) -> list[Opt]:
@@ -2927,7 +2844,10 @@ class Mem(App):
         if self.archive_loading:
             self.toast("Архив уншиж байна…", "warning")
             return
-        enabled = mode == "on" if mode else not self.auto_sync
+        if self.archive_error_code == "archive_missing":
+            self.toast(ASK_ERROR_MESSAGES["archive_missing"], "warning")
+            return
+        enabled = mode == "on" if mode else not self.auto_sync_preference
         self.run_worker(self.set_auto_sync(enabled), group="auto-setting")
 
     async def set_auto_sync(self, enabled: bool) -> None:
@@ -2936,8 +2856,6 @@ class Mem(App):
         except BackendError as error:
             self.toast(str(error), "error")
             return
-        self.auto_sync = enabled
-        self.background_sync = await asyncio.to_thread(self.backend.background_sync_enabled)
         self.auto_retry_after = 0.0
         if (
             not enabled
@@ -2948,12 +2866,13 @@ class Mem(App):
         ):
             self.job.status = "stopping" if self.job.steps else "cancelled"
             self.job_worker.cancel()
-        if enabled:
-            when = "mem хаалттай үед ч" if self.background_sync else "mem нээлттэй үед"
-            self.toast(f"Auto sync асаалттай · {when} ажиллана")
+        if not await self.refresh_archive(force=True):
+            self.toast("Auto sync тохиргоог хадгаллаа")
+        elif not self.archive_status.get("notebook_configured"):
+            preference = "асаалттай" if enabled else "унтраалттай"
+            self.toast(f"Auto sync тохиргоо {preference} · NotebookLM-ээ /setup-аар холбоно уу")
         else:
-            self.toast("Auto sync унтраалаа")
-        await self.refresh_archive(force=True)
+            self.toast("Auto sync асаалттай" if enabled else "Auto sync унтраалттай")
 
     def start_job(self, kind: str, args: str | dict[str, str] = "") -> None:
         if self.job and self.job.status in ("running", "stopping"):
@@ -2982,6 +2901,18 @@ class Mem(App):
         self.action_stop()
 
     def action_stop(self) -> None:
+        if self.ask_worker is not None:
+            msg = self.ask_messages[-1]
+            if not msg["stopping"]:
+                msg["stopping"] = True
+                if msg["started"] is not None:
+                    self.ask_worker.cancel()
+                if self.ask_block is not None:
+                    self.ask_block.update(self.ai_text(msg))
+            return
+        self.stop_job()
+
+    def stop_job(self) -> None:
         if self.job and self.job.status == "stopping":
             return
         if self.job and self.job.status == "running" and self.job_worker:
@@ -2996,22 +2927,6 @@ class Mem(App):
             return
         if self.sync_activity.get("automatic"):
             self.cmd_auto("off")
-            return
-        if self.ask_workers:
-            sid = (
-                self.cur_sid
-                if self.cur_sid in self.ask_workers
-                else next(reversed(self.ask_workers))
-            )
-            worker = self.ask_workers[sid]
-            if worker.is_running:
-                worker.cancel()
-            else:
-                self.ask_workers.pop(sid)
-                self.sessions[sid].msgs[-1].update(text="Асуултыг зогсоосон.", pending=False)
-                worker.cancel()
-                if self.route == "session" and self.cur_sid == sid:
-                    self.render_session()
             return
         self.toast("Зогсоох ажил алга")
 
@@ -3084,7 +2999,7 @@ class Mem(App):
                 local_step.state, local_step.detail = "done", f"{len(self.chats)} чат"
             if error := result.get("error"):
                 if error.get("code") == "docs_web_auth_required":
-                    error = {**error, "message": "Brave-д Google Docs-д нэвтэрч дахин холбоорой."}
+                    error = {**error, "message": "Google нэвтрэлтээ /login командаар шинэчлээрэй."}
                 raise BackendError(
                     error.get("message", "Ажил амжилтгүй."),
                     code=error.get("code", "operation_failed"),
@@ -3126,7 +3041,7 @@ class Mem(App):
                         raise BackendError(message, code="auth_required")
                     if "docs_web_auth_required" in reasons:
                         raise BackendError(
-                            "Brave-д Google Docs-д нэвтэрч /docs-connect ажиллуулна уу.",
+                            "Google нэвтрэлтээ /login командаар шинэчлээд дахин синк хийнэ үү.",
                             code="docs_web_auth_required",
                         )
                     docs_recovery = {
@@ -3203,7 +3118,6 @@ class Mem(App):
                 ("ctrl+p", "командын цонх"),
                 ("ctrl+o", "хариултын ишлэл нээх"),
                 ("PgUp / PgDn", "унших хэсгийг гүйлгэх"),
-                ("ctrl+n", "шинэ асуулт"),
                 ("ctrl+x", "идэвхтэй ажил зогсоох"),
                 ("↑ ↓", "provider tab дээр чат сонгох"),
                 ("ctrl+w", "Төлөвөөс буцах"),

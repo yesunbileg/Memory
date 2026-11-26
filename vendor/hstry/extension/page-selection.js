@@ -1,7 +1,13 @@
 // Only the extension's top-frame content script can request this broker. The website UI
 // gets back state for its own visible rows, not the catalog, titles, accounts or messages.
 import './page-picker-routes.js';
-import { readPageScope, setBulkPageItems, setPageItem, validOwner } from './popup-scope.js';
+import {
+  readPageScope,
+  restoreBulkPageItems,
+  setBulkPageItems,
+  setPageItem,
+  validOwner,
+} from './popup-scope.js';
 
 const LIMIT = 10000,
   TTL = 15 * 60 * 1000;
@@ -21,6 +27,7 @@ const only = (o, fields) =>
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const proofKey = (id) => 'pagePicker_' + id;
 const bulkKey = (id) => 'popupBulk_' + id;
+const undoKey = (id) => 'popupUndo_' + id;
 const queues = new Map();
 
 function normalizedId(provider, kind, id) {
@@ -319,10 +326,13 @@ export async function bulkPageSelection(message, providers) {
     tabId < 0 ||
     typeof url !== 'string' ||
     !own(providers, provider) ||
-    !['select', 'clear'].includes(action) ||
-    own(message, 'token') !== own(message, 'index') ||
-    (token !== undefined &&
-      (typeof token !== 'string' || !tokenPattern.test(token) || !Number.isInteger(index)))
+    !['select', 'clear', 'undo'].includes(action) ||
+    (token !== undefined && (typeof token !== 'string' || !tokenPattern.test(token))) ||
+    (action === 'undo'
+      ? token === undefined || index !== undefined
+      : token === undefined
+        ? index !== undefined
+        : !Number.isInteger(index))
   )
     fail('selection_invalid');
   return inTabOrder(tabId, () => changeBulkItems(message, providers[provider]));
@@ -332,10 +342,29 @@ async function changeBulkItems({ tabId, provider, action, token, index, url }, a
   const ctx = await activeBulkTab(tabId, provider);
   if (ctx.url !== url) fail('principal_changed');
   const storeKey = bulkKey(tabId);
+  const receiptKey = undoKey(tabId);
   const verifyTarget = async (proof) => {
     await verify(ctx, adapter, proof);
     if ((await activeBulkTab(tabId, provider)).url !== ctx.url) fail('principal_changed');
   };
+  const refreshSidebar = () =>
+    chrome.tabs
+      .sendMessage?.(tabId, { type: 'REFRESH_PAGE_SELECTION' }, { frameId: 0 })
+      .catch(() => {});
+  if (action === 'undo') {
+    const receipt = (await chrome.storage.session.get(receiptKey).catch(storageError))[receiptKey];
+    if (
+      receipt?.token !== token ||
+      receipt.provider !== provider ||
+      receipt.url !== url ||
+      receipt.expires <= Date.now()
+    )
+      fail('catalog_expired');
+    await restoreBulkPageItems(provider, receipt.previous, () => verifyTarget(receipt));
+    await chrome.storage.session.remove(receiptKey).catch(() => {});
+    refreshSidebar();
+    return { ok: true, title: receipt.title };
+  }
   let proof, entry;
   if (token !== undefined) {
     proof = (await chrome.storage.session.get(storeKey).catch(storageError))[storeKey];
@@ -377,12 +406,33 @@ async function changeBulkItems({ tabId, provider, action, token, index, url }, a
     action === 'clear'
       ? null
       : [...new Map(entry.conversations.map(([id]) => [canonical(id), id])).values()];
-  await setBulkPageItems(provider, entry.owner, items, canonical, () => verifyTarget(proof));
+  const previous = await setBulkPageItems(provider, entry.owner, items, canonical, () =>
+    verifyTarget(proof),
+  );
+  const title = entry.title || '';
+  let undoToken;
+  // Only the extension worker keeps the previous IDs. The popup gets an opaque receipt
+  // for this tab, provider and signed-in workspace.
+  if (action === 'clear' && previous) {
+    const receipt = {
+      token: crypto.randomUUID(),
+      provider,
+      url,
+      title,
+      expires: Date.now() + TTL,
+      entries: proof.entries.map(({ owner }) => ({ owner })),
+      previous,
+    };
+    try {
+      await chrome.storage.session.set({ [receiptKey]: receipt });
+      undoToken = receipt.token;
+    } catch {
+      // The clear already succeeded. Omit Undo if browser session storage failed.
+    }
+  } else await chrome.storage.session.remove(receiptKey).catch(() => {});
   if (token !== undefined) await chrome.storage.session.remove(storeKey).catch(() => {});
-  chrome.tabs
-    .sendMessage?.(tabId, { type: 'REFRESH_PAGE_SELECTION' }, { frameId: 0 })
-    .catch(() => {});
-  return { ok: true, count: items?.length ?? 0, title: entry.title || '' };
+  refreshSidebar();
+  return { ok: true, count: items?.length ?? 0, title, ...(undoToken && { undoToken }) };
 }
 
 export function forgetPageTab(tabId) {
@@ -392,6 +442,7 @@ export function forgetPageTab(tabId) {
       Promise.all([
         chrome.storage.session.remove(proofKey(tabId)),
         chrome.storage.session.remove(bulkKey(tabId)),
+        chrome.storage.session.remove(undoKey(tabId)),
       ]),
     );
   queues.set(tabId, work);

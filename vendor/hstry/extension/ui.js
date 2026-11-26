@@ -440,12 +440,13 @@ export function captureOutcome(status, providers, since = 0) {
   const runs = Object.entries(status).filter(
     ([id, entry]) => providers[id] && entry?.lastRunMs && entry.lastRunMs >= since,
   );
-  if (!runs.length) return '';
-  if (runs.some(([, entry]) => entry.running)) return 'Capturing selected chats…';
-  if (runs.some(([, entry]) => entry.continuationPending))
-    return 'More selected chats are queued for the next batch.';
+  if (!runs.length) return null;
+  if (runs.some(([, entry]) => entry.running)) return { label: 'Capturing selected chats…' };
+  if (runs.some(([, entry]) => entry.continuationPending)) return { label: 'Next batch queued' };
   const totals = { created: 0, updated: 0, unchanged: 0, alreadyCurrent: 0, skipped: 0 };
   const problems = [];
+  const missingTabs = [];
+  let missingTabCount = 0;
   let stopped = false;
   let complete = 0;
   for (const [id, entry] of runs) {
@@ -455,24 +456,36 @@ export function captureOutcome(status, providers, since = 0) {
     if (entry.lastErrorCode === 'sync_stopped') stopped = true;
     else if (entry.lastErrorCode || entry.lastError || entry.selectionWarning) {
       const name = PROVIDERS[id]?.name ?? 'Website';
-      problems.push(
-        entry.lastErrorCode === 'not_logged_in'
-          ? `${name}: sign in and retry`
-          : entry.progress?.accountsUnavailable
-            ? `${name}: open a signed-in tab for ${entry.progress.accountsUnavailable} saved account${entry.progress.accountsUnavailable === 1 ? '' : 's'}`
-            : entry.selectionWarning
-              ? `${name}: some selected chats could not be verified`
-              : `${name}: ${friendlyError('', entry.lastErrorCode)}`,
-      );
+      const unavailable = entry.progress?.accountsUnavailable ?? 0;
+      if (entry.lastErrorCode === 'not_logged_in') problems.push(`Sign in · ${name}`);
+      else if (unavailable > 0) {
+        missingTabCount += unavailable;
+        missingTabs.push(unavailable === 1 ? name : `${name} (${unavailable} accounts)`);
+      } else if (entry.selectionWarning) problems.push(`Unverified chats · ${name}`);
+      else problems.push(`${name} · ${friendlyError('', entry.lastErrorCode)}`);
     } else complete++;
   }
+  if (missingTabCount) {
+    const tab = missingTabCount === 1 ? 'tab' : 'tabs';
+    problems.unshift(`Open signed-in ${tab} · ${missingTabs.join(', ')}`);
+  }
   const { created, updated, unchanged, alreadyCurrent, skipped } = totals;
-  const counts = `${created} new · ${updated} updated · ${unchanged + alreadyCurrent} unchanged · ${skipped} skipped`;
-  if (stopped)
-    return ['Sync stopped.', ...problems.map((problem) => problem + '.'), counts + '.'].join(' ');
-  if (problems.length)
-    return `${complete || created + updated + unchanged + alreadyCurrent > 0 ? 'Partial capture' : 'Capture needs attention'} — ${problems.join('. ')}. ${counts}.`;
-  return `${created + updated + unchanged ? 'Saved locally' : alreadyCurrent ? 'Up to date' : 'No matching chats'} — ${counts}.`;
+  const current = unchanged + alreadyCurrent;
+  const counts = [
+    created > 0 && `${created} new`,
+    updated > 0 && `${updated} updated`,
+    current > 0 && `${current} unchanged`,
+    skipped > 0 && `${skipped} skipped`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  let label = 'No matching chats';
+  if (stopped) label = 'Sync stopped';
+  else if (problems.length)
+    label = complete || created + updated + current > 0 ? 'Partial sync' : 'Sync incomplete';
+  else if (created + updated > 0) label = 'Done';
+  else if (current > 0) label = 'Up to date';
+  return { label, counts, actions: problems.join('\n') };
 }
 
 export function enterToggles(input) {

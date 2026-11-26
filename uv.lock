@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+docs = [
+    { name = "playwright" },
+]
 login = [
     { name = "notebooklm-py", extra = ["cookies"] },
 ]
@@ -35,8 +38,9 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.26,<2" },
     { name = "notebooklm-py", specifier = "==0.8.6" },
     { name = "notebooklm-py", extras = ["cookies"], marker = "extra == 'login'", specifier = "==0.8.6" },
+    { name = "playwright", marker = "extra == 'docs'", specifier = "==1.62.0" },
 ]
-provides-extras = ["login"]
+provides-extras = ["login", "docs"]
 
 [package.metadata.requires-dev]
 dev = [

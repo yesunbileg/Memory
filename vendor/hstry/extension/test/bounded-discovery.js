@@ -76,3 +76,130 @@ assert.deepEqual(seen, [0, 1, 2, 3]);
 const gemNext = await runGemini(saved.at(-1));
 assert.equal(gemNext.hasMore, false);
 assert.deepEqual(seen, [0, 1, 2, 3, 4, 5]);
+
+for (const [provider, sync] of [
+  ['ChatGPT', syncChatGPT],
+  ['Claude', syncClaude],
+]) {
+  const gpt = provider === 'ChatGPT';
+  const workspace = 'fixture-workspace';
+  const principalId = JSON.stringify(['fixture-user', workspace]);
+  const pages = [],
+    accepted = [];
+  globalThis.fetch = async (url) => {
+    const { pathname, searchParams } = new URL(url);
+    if (pathname === '/api/auth/session')
+      return Response.json({
+        user: { id: 'fixture-user' },
+        account: { id: workspace },
+        accessToken: 'private fixture token',
+      });
+    if (pathname.includes('/accounts/check/'))
+      return Response.json({ accounts: { one: { account: { account_id: workspace } } } });
+    if (pathname === '/api/account')
+      return Response.json({
+        uuid: 'fixture-user',
+        memberships: [{ organization: { uuid: workspace } }],
+      });
+    if (pathname === '/api/organizations') return Response.json([{ uuid: workspace }]);
+    if (pathname.endsWith('/sidebar') || pathname.endsWith('/projects')) {
+      pages.push('projects');
+      return Response.json(gpt ? { items: [] } : []);
+    }
+    if (pathname.endsWith('/conversations') || pathname.endsWith('/chat_conversations_v2')) {
+      const offset = Number(searchParams.get('offset'));
+      pages.push(offset);
+      const rows = Array.from({ length: Math.min(50, 251 - offset) }, (_, i) => {
+        const id = 'fixture-' + (offset + i);
+        return gpt
+          ? { id, title: 'private listing title' }
+          : { uuid: id, name: 'private listing title' };
+      });
+      return Response.json(gpt ? { items: rows, total: 251 } : rows);
+    }
+    assert.match(pathname, /\/fixture-250$/);
+    const message = {
+      id: 'm',
+      author: { role: 'user' },
+      content: { content_type: 'text', parts: ['fixture'] },
+    };
+    return Response.json(
+      gpt
+        ? { id: 'fixture-250', current_node: 'm', mapping: { m: { id: 'm', message } } }
+        : { uuid: 'fixture-250', chat_messages: [{ uuid: 'm', sender: 'human', text: 'fixture' }] },
+    );
+  };
+  const runSelected = (state) =>
+    sync({
+      state,
+      selectedScope: {
+        entries: [{ principalId, projectIds: [], conversationIds: ['fixture-250'] }],
+      },
+      checkpoint: async (saved) => {
+        assert.doesNotMatch(JSON.stringify(saved), /private listing title|private fixture token/);
+      },
+      push: async (_source, _adapter, batch) => {
+        accepted.push(...batch.map((chat) => chat.externalId));
+        return batch.length;
+      },
+    });
+  const first = await runSelected({});
+  assert.equal(first.hasMore, true, provider + ' must yield during selected discovery');
+  assert.deepEqual(pages, ['projects', 0, 50, 100]);
+  assert.deepEqual(accepted, []);
+  const second = await runSelected(first.state);
+  assert.equal(second.hasMore, false);
+  assert.deepEqual(pages, ['projects', 0, 50, 100, 150, 200, 250]);
+  assert.deepEqual(accepted, ['fixture-250']);
+  assert.equal(second.state.discovery, undefined);
+}
+
+const { geminiPrincipalIds } = await import('../providers/gemini.js');
+const selectedPages = [];
+globalThis.fetch = async (url, init) => {
+  const u = new URL(url);
+  if (u.pathname === '/app')
+    return new Response('<script>{"SNlM0e":"fixture-at","FdrFJe":"fixture-sid"}</script>');
+  const id = u.searchParams.get('rpcids');
+  const [raw, cursor = 0] = JSON.parse(JSON.parse(init.body.get('f.req'))[0][0][1]);
+  let result;
+  if (id === 'MaZiqc') {
+    selectedPages.push(cursor);
+    result = [
+      null,
+      cursor < 5 ? cursor + 1 : null,
+      [['c_fixture-' + cursor, cursor === 5 ? 'Selected title' : 'private listing title']],
+    ];
+  } else {
+    assert.equal(id, 'hNvQHb');
+    assert.equal(raw, 'c_fixture-5');
+    result = [[['turn', null, [['fixture']]]], null];
+  }
+  return new Response(")]}'\n" + JSON.stringify([['wrb.fr', id, JSON.stringify(result)]]));
+};
+const [selectedGeminiPrincipal] = await geminiPrincipalIds();
+const runSelectedGemini = (state) =>
+  syncGemini({
+    state,
+    selectedScope: {
+      entries: [
+        { principalId: selectedGeminiPrincipal, projectIds: [], conversationIds: ['fixture-5'] },
+      ],
+    },
+    checkpoint: async (saved) =>
+      assert.doesNotMatch(JSON.stringify(saved), /private listing title|fixture-at|fixture-sid/),
+    push: async (_source, _adapter, batch) => {
+      assert.deepEqual(
+        batch.map((chat) => [chat.externalId, chat.title]),
+        [['fixture-5', 'Selected title']],
+      );
+      return batch.length;
+    },
+  });
+const firstSelectedGemini = await runSelectedGemini({});
+assert.equal(firstSelectedGemini.hasMore, true, 'Gemini must yield during selected discovery');
+assert.deepEqual(selectedPages, [0, 1, 2, 3]);
+const secondSelectedGemini = await runSelectedGemini(firstSelectedGemini.state);
+assert.equal(secondSelectedGemini.conversations, 1);
+assert.equal(secondSelectedGemini.hasMore, false);
+assert.deepEqual(selectedPages, [0, 1, 2, 3, 4, 5]);

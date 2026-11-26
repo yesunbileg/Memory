@@ -165,6 +165,65 @@ def test_account_isolation_uses_provider_native_account_not_short_source_id(runn
 
 
 @pytest.mark.parametrize(
+    ("adapter", "account_field"), [("chatgpt-web", "accountId"), ("claude-web", "orgId")]
+)
+@pytest.mark.parametrize("legacy_approved", [True, False])
+def test_verified_browser_principals_keep_legacy_identity_and_consent_separate(
+    running_server, adapter, account_field, legacy_approved
+):
+    from ai_memory.store import Store
+
+    server, database = running_server
+
+    def packet(text, user=None, external_id="shared-test-chat"):
+        data = payload(text)
+        data["source"] = data["adapter"] = adapter
+        chat = data["conversations"][0]
+        chat["externalId"] = external_id
+        chat["metadata"] = {account_field: "fixture-workspace"}
+        if user is not None:
+            chat["metadata"]["capturePrincipal"] = [user, "fixture-workspace"]
+        return data
+
+    assert request(server, data=packet("legacy"))[0] == 200
+    legacy_id = archived(database)[0]["id"]
+    if not legacy_approved:
+        with Store(database) as store:
+            store.revoke_many([legacy_id])
+
+    for user in ("fixture-user-a", "fixture-user-b"):
+        status, _, receipt = request(server, data=packet(user, user))
+        assert status == 200
+        assert json.loads(receipt)["created"] == 1
+
+    by_text = {entry["messages"][0]["text"]: entry for entry in archived(database)}
+    assert by_text["legacy"]["id"] == legacy_id
+    assert by_text["legacy"]["consent"] is legacy_approved
+    for user in ("fixture-user-a", "fixture-user-b"):
+        assert by_text[user]["consent"] is False
+        assert request(server, data=packet(user, user))[0] == 200
+    assert len(archived(database)) == 3
+
+    assert request(server, data=packet("ordinary", "fixture-user-a", "another-chat"))[0] == 200
+    ordinary = next(row for row in archived(database) if row["external_id"] == "another-chat")
+    assert ordinary["consent"] is True
+    with Store(database) as store:
+        store.revoke_many([ordinary["id"]])
+    assert request(server, data=packet("updated", "fixture-user-a", "another-chat"))[0] == 200
+    ordinary = next(row for row in archived(database) if row["external_id"] == "another-chat")
+    assert ordinary["messages"][0]["text"] == "updated"
+    assert ordinary["consent"] is False
+
+
+def test_verified_browser_principal_requires_matching_native_workspace(running_server):
+    server, database = running_server
+    data = payload()
+    data["conversations"][0]["metadata"]["capturePrincipal"] = ["fixture-user", "other-workspace"]
+    assert request(server, data=data)[0] == 400
+    assert archived(database) == []
+
+
+@pytest.mark.parametrize(
     "authorization",
     ["", "Bearer wrong", "Basic synthetic-ingest-token", "Bearer synthetic-ingest-token-extra"],
 )

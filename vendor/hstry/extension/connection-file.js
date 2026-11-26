@@ -76,6 +76,11 @@ export function connectionPresentation(result) {
       'Check connection',
       'Check that browser storage is available, then try again.',
     ],
+    untrusted_sender: [
+      'Open the toolbar popup',
+      'Open AI Memory from the toolbar',
+      'Use the AI Memory icon in the browser toolbar to check the local archive.',
+    ],
   };
   const [title, label, detail] = messages[result?.code] ?? messages.offline;
   return { tone: result?.code === 'missing_token' ? 'idle' : 'error', title, label, detail };

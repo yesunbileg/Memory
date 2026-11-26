@@ -185,7 +185,8 @@ async def pair_and_enable(toolbar, worker, archive_id):
       details.open=true; input.value='not JSON'; q('#verify-json').click();}""")
     await wait_for(
         lambda: toolbar.ui(
-            "()=>!!q('#pair-status').textContent && !q('#pair-status').textContent.includes('Verifying')"
+            "()=>q('#connection-json').getAttribute('aria-invalid')==='true'"
+            " && !!q('#json-status').textContent && q('#connection-json').value==='not JSON'"
         ),
         "invalid pairing did not report an error",
     )
@@ -419,6 +420,10 @@ async def exercise(context, worker, driver, archive_id, db):
             await no_capture(worker, db)
             await toolbar.click("#bulk-clear")
             await expect_scope(worker, provider)
+            await toolbar.click("#bulk-undo")
+            await expect_scope(worker, provider, chats=[CLAUDE, CLAUDE_MEMBER, RECENT_ONLY])
+            await toolbar.click("#bulk-clear")
+            await expect_scope(worker, provider)
             await site.locator("aside").evaluate("el=>el.hidden=false")
         await toolbar.toggle(True)
         individual = box(site, item)
@@ -442,6 +447,13 @@ async def exercise(context, worker, driver, archive_id, db):
     await worker.evaluate("qa.late=true")
     await toolbar.open(site)
     assert_layout(await toolbar.ui(f"()=>({LAYOUT})(d)"))
+    await wait_for(
+        lambda: toolbar.ui(
+            """()=>['ChatGPT','Claude','Gemini'].every(name=>q('#sync-scope').textContent.includes(name))
+            && q('#schedule').textContent==='Auto-sync paused' && !q('#sync-scope').hidden"""
+        ),
+        "the ready popup did not show all three saved providers",
+    )
     started = await worker.evaluate("Date.now()")
     await toolbar.click("#sync")
     await wait_for(
@@ -502,7 +514,7 @@ async def exercise(context, worker, driver, archive_id, db):
     await toolbar.click("#sync")
     await wait_for(
         lambda: toolbar.ui(
-            "()=>q('#sync').textContent==='Sync now' && q('#notice').textContent.includes('Sync stopped.')"
+            "()=>q('#sync').textContent==='Sync now' && q('#notice-label').textContent==='Sync stopped'"
         ),
         "stop did not return the toolbar to an idle state",
     )
@@ -510,6 +522,19 @@ async def exercise(context, worker, driver, archive_id, db):
     status = (await state(worker, "status"))["chatgpt"]
     assert status["progress"]["phase"] == "cancelled" and not status["continuationPending"]
     assert fixture_message(db, STANDALONE) == "Updated GPT message"
+    await toolbar.click("#settings")
+    await toolbar.ui("""()=>{
+      q('#provider-status').closest('details').open=true;
+      q('#provider-status button').focus();
+    }""")
+    await worker.evaluate("""()=>chrome.storage.local.set({
+      activityLog:[{provider:'chatgpt',outcome:'success',timestampMs:Date.now()}]
+    })""")
+    await wait_for(
+        lambda: toolbar.ui("()=>q('#activity').textContent.includes('ChatGPT · success')"),
+        "the popup did not render the activity update",
+    )
+    assert await toolbar.ui("()=>d.activeElement===q('#provider-status button')")
     assert not unexpected_navigation, unexpected_navigation
     opened = await driver.evaluate("window.newTabIds")
     assert not opened, ("extension opened a new tab", opened)

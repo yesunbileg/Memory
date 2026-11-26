@@ -12,6 +12,7 @@ dependencies = ["notebooklm-py==0.8.6", "mcp>=1.26,<2"]
 
 [project.optional-dependencies]
 login = ["notebooklm-py[cookies]==0.8.6"]
+docs = ["playwright==1.62.0"]
 
 [project.scripts]
 ai-memory = "ai_memory.cli:main"
@@ -35,6 +36,7 @@ asyncio_default_fixture_loop_scope = "function"
 include = [
     "/src/ai_memory/*.py",
     "/src/ai_memory/web_docs_driver.js",
+    "/src/ai_memory/web_docs_background.cjs",
     "/vendor/hstry/adapters/codex/adapter.ts",
     "/vendor/hstry/adapters/opencode/adapter.ts",
     "/vendor/hstry/adapters/types/first-message.ts",

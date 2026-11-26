@@ -180,7 +180,7 @@ function extractMessage(msg, index) {
   };
 }
 
-function toParsedConversation(detail, orgId) {
+function toParsedConversation(detail, orgId, capturePrincipal) {
   if (
     typeof detail?.uuid !== 'string' ||
     !detail.uuid ||
@@ -208,6 +208,7 @@ function toParsedConversation(detail, orgId) {
     metadata: {
       url: `${BASE}/chat/${detail.uuid}`,
       orgId,
+      ...(capturePrincipal && { capturePrincipal }),
     },
   };
 }
@@ -232,6 +233,7 @@ async function popupPrincipals(context, signal) {
     .map((o) => ({
       id: o.id,
       principalId: JSON.stringify([userId, o.id]),
+      capturePrincipal: [userId, o.id],
       title: o.name,
       sourceId: orgs.length > 1 ? `claude-web-${shortId(o.id)}` : 'claude-web',
     }));
@@ -260,7 +262,7 @@ const popup = (context, signal) => {
       read(
         `${BASE}/api/organizations/${encodeURIComponent(p.id)}/chat_conversations/${encodeURIComponent(id)}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual`,
       ),
-    parse: (detail, id, p) => toParsedConversation(detail, p.id),
+    parse: (detail, id, p) => toParsedConversation(detail, p.id, p.capturePrincipal),
   };
 };
 export const listClaudeCatalog = (context) => listPopupCatalog(popup(context));

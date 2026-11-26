@@ -28,6 +28,7 @@ let settings = normalizeSettings(),
   status = {},
   activity = [],
   connected = false,
+  connectionCode = null,
   checking = 0,
   pairTicket = 0,
   storageTicket = 0;
@@ -39,37 +40,133 @@ let syncPending = false,
   notice = '',
   writes = Promise.resolve();
 let progressTimer;
+const syncDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+const rescanRows = Object.fromEntries(
+  providers.map((provider) => {
+    const row = create('div', 'row');
+    const description = create('span', 'copy');
+    const detail = create('small');
+    const button = create('button', '', 'Rescan');
+    description.append(create('strong', '', names[provider]), detail);
+    button.setAttribute('aria-label', 'Rescan saved ' + names[provider] + ' items');
+    button.addEventListener('click', () => {
+      if (button.getAttribute('aria-disabled') !== 'true') return requestSync(provider);
+    });
+    row.append(description, button);
+    el('provider-status').append(row);
+    return [provider, { detail, button }];
+  }),
+);
+
+function setText(id, value) {
+  const node = el(id);
+  if (node.textContent !== value) node.textContent = value;
+}
 
 function setSettings(open) {
   el('settings-panel').hidden = !open;
   el('list-panel').hidden = open;
   el('settings').setAttribute('aria-expanded', String(open));
   el('settings').textContent = open ? 'Done' : 'Settings';
+  renderSyncPlan();
 }
 el('settings').addEventListener('click', () => setSettings(el('settings-panel').hidden));
+el('connection-action').addEventListener('click', () => {
+  setSettings(true);
+  if (connectionCode === 'archive_changed') el('manual-connection').open = true;
+  else if (['offline', 'missing_token', 'legacy_pairing', 'unauthorized'].includes(connectionCode))
+    el('automatic-connection').open = true;
+  el('retry').focus();
+});
 function updateCommand() {
   const family = el('browser-family').value || 'brave';
   el('setup-command').textContent =
     'ai-memory connect --extension-id ' + chrome.runtime.id + ' --browser ' + family;
+  setText('copy-status', '');
 }
 el('browser-family').addEventListener('change', updateCommand);
+el('copy-command').addEventListener('click', async () => {
+  const command = el('setup-command');
+  try {
+    await navigator.clipboard.writeText(command.textContent);
+    setText('copy-status', 'Command copied.');
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(command);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    setText('copy-status', 'Command selected. Copy it with your browser shortcut.');
+  }
+});
 el('version').textContent = 'AI Memory ' + chrome.runtime.getManifest().version;
 updateCommand();
 
+function describeScope(provider) {
+  let chats = 0,
+    projects = 0,
+    recents = false;
+  for (const entry of scopes[provider].entries) {
+    chats += entry.conversationIds.length;
+    projects += entry.projectIds.length;
+    recents ||= entry.includeRecents === true;
+  }
+  const items = [
+    chats && `${chats} ${chats === 1 ? 'chat' : 'chats'}`,
+    projects && `${projects} ${projects === 1 ? 'project' : 'projects'}`,
+    recents && 'all Recents',
+  ];
+  return `${names[provider]} · ${items.filter(Boolean).join(', ')}`;
+}
+
+function renderSyncPlan() {
+  const selected = providers.filter((provider) => nonempty(scopes[provider]));
+  const enabled = selected.filter((provider) => settings.providers[provider]);
+  const settingsOpen = !el('settings-panel').hidden;
+  el('connection-action').hidden =
+    connected || !connectionCode || connectionCode === 'untrusted_sender' || settingsOpen;
+  const hint = !connected
+    ? ''
+    : enabled.length
+      ? ''
+      : selected.length
+        ? 'Enable sync for ' +
+          selected.map((provider) => names[provider]).join(', ') +
+          (settingsOpen ? '.' : ' in Settings.')
+        : settingsOpen
+          ? 'Close Settings to choose chats.'
+          : bulkPage
+            ? 'Select chats below or use the sidebar checkboxes.'
+            : 'Open ChatGPT, Claude, or Gemini to select chats.';
+  setText('plan-hint', hint);
+  el('plan-hint').hidden = !hint;
+  const canSync = connected && enabled.length > 0;
+  setText('sync-scope', canSync ? enabled.map(describeScope).join('\n') : '');
+  el('sync-scope').hidden = !canSync;
+  setText(
+    'schedule',
+    canSync
+      ? settings.autoPaused
+        ? 'Auto-sync paused'
+        : `Auto-sync every ${settings.intervalMinutes} min`
+      : '',
+  );
+  el('schedule').hidden = !canSync;
+  return enabled;
+}
+
 function summary() {
-  const enabled = providers.filter((p) => settings.providers[p] && nonempty(scopes[p]));
+  const enabled = renderSyncPlan();
   const runs = statusForPairing(status, settings);
   const progress = captureProgress(runs, settings.providers);
   clearTimeout(progressTimer);
   if (progress?.refreshAt) progressTimer = setTimeout(summary, progress.refreshAt - Date.now());
   const stopping = stopPending || Object.values(runs).some((entry) => entry.stopRequested);
   stopAvailable = Boolean(progress);
-  el('provider-status').replaceChildren();
-  for (const p of providers) {
-    const state = runs[p],
-      row = create('div', 'row'),
-      desc = create('span', 'copy');
-    const detail = state?.stopRequested
+  for (const [provider, { detail, button }] of Object.entries(rescanRows)) {
+    const state = runs[provider];
+    const text = state?.stopRequested
       ? 'Stopping…'
       : state?.running
         ? 'Syncing…'
@@ -80,13 +177,11 @@ function summary() {
             : state?.lastRunMs
               ? 'Last checked ' + new Date(state.lastRunMs).toLocaleTimeString()
               : 'No run for this archive.';
-    desc.append(create('strong', '', names[p]), create('small', '', detail));
-    const btn = create('button', '', 'Rescan');
-    btn.setAttribute('aria-label', 'Rescan saved ' + names[p] + ' items');
-    btn.disabled = !connected || !enabled.includes(p) || stopAvailable || syncPending || stopping;
-    btn.addEventListener('click', () => requestSync(p));
-    row.append(desc, btn);
-    el('provider-status').append(row);
+    if (detail.textContent !== text) detail.textContent = text;
+    button.setAttribute(
+      'aria-disabled',
+      String(!connected || !enabled.includes(provider) || stopAvailable || syncPending || stopping),
+    );
   }
   el('sync').disabled =
     stopping || (!stopAvailable && (!connected || !enabled.length || syncPending));
@@ -97,27 +192,31 @@ function summary() {
       : syncPending
         ? 'Syncing…'
         : 'Sync now';
-  el('schedule').textContent = settings.autoPaused
-    ? 'Automatic sync paused'
-    : 'Automatic sync every ' + settings.intervalMinutes + 'm';
-  el('plan-hint').hidden = connected && enabled.length > 0;
-  el('plan-hint').textContent = !connected
-    ? 'Connect your archive in Settings to sync.'
-    : providers.some((p) => nonempty(scopes[p]))
-      ? 'Enable the selected provider in Settings to sync.'
-      : 'Select all chats below or use the sidebar checkboxes.';
   const bar = el('sync-progress');
   bar.hidden = !progress && !syncPending;
   if (progress?.max) {
     bar.max = progress.max;
     bar.value = progress.value;
   } else bar.removeAttribute('value');
-  el('notice').textContent =
-    stopError ||
-    (stopPending ? 'Stopping sync…' : '') ||
-    progress?.text ||
-    captureOutcome(runs, settings.providers, syncSince) ||
-    notice;
+  const pending = stopError || (stopPending ? 'Stopping sync…' : '') || progress?.text;
+  const outcome = pending ? null : captureOutcome(runs, settings.providers, syncSince);
+  const lastRun =
+    !syncSince && typeof outcome?.counts === 'string'
+      ? Math.max(
+          0,
+          ...providers
+            .filter((provider) => settings.providers[provider])
+            .map((provider) => runs[provider]?.lastRunMs)
+            .filter(Number.isFinite),
+        )
+      : 0;
+  const lines = {
+    'last-sync': lastRun > 0 ? `Last sync · ${syncDate.format(lastRun)}` : '',
+    'notice-label': pending || outcome?.label || notice,
+    'notice-counts': outcome?.counts ? ' · ' + outcome.counts : '',
+    'notice-actions': outcome?.actions || '',
+  };
+  for (const [id, text] of Object.entries(lines)) setText(id, text);
   renderBulk();
 }
 async function readStorage() {
@@ -136,6 +235,8 @@ async function readStorage() {
     stopError = '';
     notice = '';
     connected = false;
+    connectionCode = null;
+    setText('api-title', 'Checking connection…');
   }
   settings = next;
   status = data.status || {};
@@ -179,9 +280,10 @@ function preference(input, update) {
     if (!patch) return;
     try {
       await writeSettings(patch);
+      setText('preferences-status', '');
     } catch {
       await readStorage();
-      el('pair-status').textContent = 'Could not save this setting. Try again.';
+      setText('preferences-status', 'Could not save this setting. Try again.');
     }
   });
 }
@@ -210,7 +312,8 @@ preference(el('interval'), () => {
 async function check() {
   const ticket = ++checking,
     expected = settings;
-  el('retry').disabled = true;
+  el('retry').setAttribute('aria-disabled', 'true');
+  setText('api-title', 'Checking connection…');
   let result;
   try {
     result = await send({ type: 'checkApi' });
@@ -220,31 +323,56 @@ async function check() {
   if (ticket !== checking || !sameConnection(expected, settings)) return;
   const info = connectionPresentation(result);
   connected = result?.ok === true;
-  el('api-title').textContent = connected ? 'Local archive connected' : info.label;
+  connectionCode = connected ? null : result?.code || 'offline';
+  setText(
+    'api-title',
+    connected
+      ? 'Local archive connected'
+      : info.label === 'Offline'
+        ? 'Archive offline'
+        : info.label,
+  );
   el('api-detail').textContent = info.detail;
-  el('retry').disabled = false;
+  el('retry').setAttribute('aria-disabled', 'false');
   summary();
 }
-el('retry').addEventListener('click', check);
+el('retry').addEventListener('click', () => {
+  if (el('retry').getAttribute('aria-disabled') !== 'true') return check();
+});
 el('connection-file').addEventListener('change', (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
   event.target.value = '';
-  return pair(() => {
+  return pair('file', () => {
     if (file.size > 16384) throw Error('Choose a valid AI Memory connection file.');
     return file.text();
   });
 });
 el('verify-json').addEventListener('click', () => {
-  const input = el('connection-json'),
-    text = input.value;
-  input.value = '';
-  return pair(() => text);
+  const text = el('connection-json').value;
+  return pair('json', () => text, text);
 });
-async function pair(read) {
+let pairingField = null;
+el('connection-json').addEventListener('input', () => {
+  if (pairingField === 'json') {
+    ++pairTicket;
+    pairingField = null;
+  }
+  el('connection-json').removeAttribute('aria-invalid');
+  el('json-status').removeAttribute('data-error');
+  setText('json-status', '');
+});
+async function pair(field, read, submitted) {
   const ticket = ++pairTicket,
     expected = settings;
-  el('pair-status').textContent = 'Verifying local archive…';
+  pairingField = field;
+  for (const kind of ['file', 'json']) {
+    el('connection-' + kind).removeAttribute('aria-invalid');
+    el(kind + '-status').removeAttribute('data-error');
+    setText(kind + '-status', '');
+  }
+  const feedback = field + '-status';
+  setText(feedback, 'Verifying local archive…');
   try {
     const candidate = parseConnectionFile(await read());
     const reply = await send({ type: 'verifyPairing', candidate });
@@ -257,13 +385,25 @@ async function pair(read) {
         : null,
     );
     if (ticket !== pairTicket) return;
-    el('pair-status').textContent = wrote
-      ? 'Connection verified and saved.'
-      : 'Connection changed. Choose the file again.';
+    setText(
+      feedback,
+      wrote
+        ? 'Connection verified and saved.'
+        : 'Connection changed. Verify this connection again.',
+    );
+    if (wrote && field === 'json' && el('connection-json').value === submitted)
+      el('connection-json').value = '';
     if (wrote) await check();
   } catch (error) {
-    if (ticket === pairTicket)
-      el('pair-status').textContent = error.message || 'Could not connect to this archive.';
+    if (ticket === pairTicket) {
+      const input = el('connection-' + field);
+      input.setAttribute('aria-invalid', 'true');
+      el(feedback).setAttribute('data-error', 'true');
+      setText(feedback, error.message || 'Could not connect to this archive.');
+      if (field === 'json' && document.activeElement === el('verify-json')) input.focus();
+    }
+  } finally {
+    if (ticket === pairTicket) pairingField = null;
   }
 }
 
@@ -275,6 +415,7 @@ let bulkPage = null,
   bulkBusy = false,
   bulkChoice = null,
   bulkResult = null,
+  bulkUndo = null,
   bulkNotice = '';
 async function activePage() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -292,9 +433,11 @@ function setBulkPage(page) {
   if (!sameTab(next, bulkPage)) {
     bulkChoice = null;
     bulkResult = null;
+    bulkUndo = null;
     bulkNotice = '';
   }
   bulkPage = next;
+  renderSyncPlan();
   renderBulk();
 }
 
@@ -310,23 +453,36 @@ function renderBulk() {
   workspace.disabled = bulkBusy;
   el('bulk-select').disabled = bulkBusy || (bulkChoice?.action === 'select' && !workspace.value);
   el('bulk-clear').disabled = bulkBusy || (bulkChoice?.action === 'clear' && !workspace.value);
-  el('bulk-status').textContent = bulkNotice;
-  el('bulk-enable').hidden = !bulkResult?.count || settings.providers[provider];
+  const target = bulkChoice?.action === 'clear' ? workspace.selectedOptions?.[0]?.textContent : '';
+  el('bulk-clear').setAttribute(
+    'aria-label',
+    target && workspace.value
+      ? `Clear workspace selection for ${target}`
+      : 'Clear workspace selection',
+  );
+  el('bulk-undo').hidden = !bulkUndo;
+  el('bulk-undo').disabled = bulkBusy;
+  setText('bulk-status', bulkNotice);
+  el('bulk-enable').hidden = !nonempty(scopes[provider]) || settings.providers[provider];
   el('bulk-enable').disabled = bulkBusy;
   el('bulk-enable').textContent = `Enable ${names[provider]} sync`;
 }
 
 async function changeBulk(action) {
-  if (!bulkPage || bulkBusy) return;
+  if (!bulkPage || bulkBusy || (action === 'undo' && !bulkUndo)) return;
   const page = bulkPage;
   const { tabId, provider } = page;
   const workspace = el('bulk-workspace');
-  const choice =
-    bulkChoice?.action === action && workspace.value
-      ? { token: bulkChoice.token, index: Number(workspace.value) }
-      : {};
+  const origin = el('bulk-' + action);
+  const hadFocus = document.activeElement === origin;
+  let focusAfter = origin;
+  let choice = {};
+  if (action === 'undo') choice = { token: bulkUndo };
+  else if (bulkChoice?.action === action && workspace.value)
+    choice = { token: bulkChoice.token, index: Number(workspace.value) };
   bulkBusy = true;
   bulkChoice = null;
+  if (action !== 'undo') bulkUndo = null;
   bulkNotice = action === 'select' ? 'Checking available chats…' : 'Checking the workspace…';
   renderBulk();
   try {
@@ -343,7 +499,17 @@ async function changeBulk(action) {
     const latest = await activePage();
     if (!sameTab(page, latest)) return setBulkPage(latest);
     if (!reply?.ok) {
-      bulkNotice = reply?.error || 'Could not update the selection. Try again.';
+      if (
+        action === 'undo' &&
+        ['catalog_expired', 'selection_changed', 'principal_changed'].includes(reply?.code)
+      ) {
+        bulkUndo = null;
+        focusAfter = el('bulk-clear');
+      }
+      bulkNotice =
+        reply?.code === 'catalog_expired' && action === 'undo'
+          ? 'Undo expired.'
+          : reply?.error || 'Could not update the selection. Try again.';
     } else if (Array.isArray(reply.choices)) {
       bulkChoice = { token: reply.token, action };
       const placeholder = create('option', '', 'Choose a workspace');
@@ -357,16 +523,25 @@ async function changeBulk(action) {
         }),
       );
       workspace.value = '';
+      focusAfter = workspace;
       bulkNotice =
         action === 'select'
           ? 'Choose a workspace, then select all chats.'
           : 'Choose a workspace, then clear its selection.';
     } else {
       bulkResult = reply;
-      bulkNotice =
-        action === 'clear'
-          ? 'Selection cleared.'
-          : `${reply.count} ${reply.count === 1 ? 'chat' : 'chats'} selected.`;
+      const target = reply.title || names[provider] + ' workspace';
+      if (action === 'clear') {
+        bulkUndo = reply.undoToken || null;
+        bulkNotice = `Selection cleared · ${target}`;
+        if (bulkUndo) focusAfter = el('bulk-undo');
+      } else if (action === 'undo') {
+        bulkUndo = null;
+        bulkNotice = `Selection restored · ${target}`;
+        focusAfter = el('bulk-clear');
+      } else {
+        bulkNotice = `${reply.count} ${reply.count === 1 ? 'chat' : 'chats'} selected.`;
+      }
       await readStorage();
     }
   } catch {
@@ -374,11 +549,19 @@ async function changeBulk(action) {
   } finally {
     bulkBusy = false;
     renderBulk();
+    if (
+      hadFocus &&
+      sameTab(page, bulkPage) &&
+      !el('list-panel').hidden &&
+      (document.activeElement === origin || document.activeElement === document.body)
+    )
+      focusAfter.focus();
   }
 }
 
 el('bulk-select').addEventListener('click', () => changeBulk('select'));
 el('bulk-clear').addEventListener('click', () => changeBulk('clear'));
+el('bulk-undo').addEventListener('click', () => changeBulk('undo'));
 el('bulk-workspace').addEventListener('change', renderBulk);
 el('bulk-enable').addEventListener('click', async () => {
   if (!bulkPage || bulkBusy) return;
@@ -408,7 +591,7 @@ async function updateListMode(toggle = false) {
   button.setAttribute('aria-busy', 'true');
   let page,
     next = null;
-  let hint = 'Open ChatGPT, Claude, or Gemini in this tab to use list mode.';
+  let hint = 'List mode is unavailable on this tab.';
   try {
     page = await activePage();
     if (page) {

@@ -1,10 +1,10 @@
-// Loaded only by the dedicated Test Mode Playwriter session.
+// Loaded only by the dedicated headless Brave audit worker.
 if (auditInput.action === "start") {
   const phases = {};
   const settling = new Set();
   function statsFor(phase) {
     return phases[phase] ??= {
-      requests: 0, failed: 0, measured: 0, unavailable: 0, finished: 0,
+      elapsedMs: 0, requests: 0, failed: 0, measured: 0, unavailable: 0, finished: 0,
       requestBody: 0, responseBody: 0, requestHeaders: 0, responseHeaders: 0,
       observedRequestBodyBytes: 0, observedFailedBodyBytes: 0, unknownRequestBodies: 0,
       saves: 0, saveBytes: 0, unknownSaveBodies: 0, unchangedMarkerSent: false,
@@ -14,7 +14,12 @@ if (auditInput.action === "start") {
     };
   }
   const audit = {
-    phase: "setup", phases, settling,
+    phase: "setup", phases, settling, phaseStart: Date.now(),
+    finishPhase() {
+      const now = Date.now();
+      statsFor(this.phase).elapsedMs += now - this.phaseStart;
+      this.phaseStart = now;
+    },
     async watch(page) {
       const active = new Map();
       page.on("request", request => {
@@ -65,7 +70,7 @@ if (auditInput.action === "start") {
         task.finally(() => settling.delete(task));
       });
       try {
-        const cdp = await getCDPSession({page});
+        const cdp = await context.newCDPSession(page);
         const transfers = new Map();
         cdp.on("Network.requestWillBeSent", e => {
           const previous = transfers.get(e.requestId);
@@ -103,12 +108,20 @@ if (auditInput.action === "start") {
       }
     },
   };
+  statsFor(audit.phase);
+  audit.statsFor = statsFor;
   state.memoryDocsAudit = audit;
 } else if (auditInput.action === "phase") {
-  state.memoryDocsAudit.phase = auditInput.phase;
+  const audit = state.memoryDocsAudit;
+  audit.finishPhase();
+  audit.phase = auditInput.phase;
+  audit.statsFor(audit.phase);
 } else if (auditInput.action === "report") {
   const audit = state.memoryDocsAudit;
   await Promise.allSettled([...audit.settling]);
-  console.log("AUDIT_METRICS=" + JSON.stringify(audit.phases));
+  audit.finishPhase();
+  console.log("AI_MEMORY_DOCS_RESULT=" + JSON.stringify({status: "ok", metrics: audit.phases}));
   if (auditInput.stop) delete state.memoryDocsAudit;
 }
+
+if (auditInput.action !== "report") console.log('AI_MEMORY_DOCS_RESULT={"status":"ok"}');

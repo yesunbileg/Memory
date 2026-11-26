@@ -238,7 +238,7 @@ def _missing(db, mapping):
 
 
 def observe_inventory(store, sources):
-    """Record only provider-confirmed inventory observations, never on network failure."""
+    """Record provider-confirmed observations and return segments that need a readiness check."""
     db = store.connection
     now = time.time()
     available = {s["id"]: bool(s.get("ready")) for s in sources}
@@ -263,6 +263,7 @@ def observe_inventory(store, sources):
             JOIN source_map m ON m.segment_id=p.segment_id AND m.revision=d.ready_revision
             JOIN segments s ON s.id=p.segment_id
             WHERE s.state!='retired' AND p.part>0 AND p.part<d.part_count AND p.source_id IS NOT NULL"""
+    unready = set()
     with db:
         for mapping in db.execute(mapped).fetchall():
             source_id = mapping["source_id"]
@@ -277,3 +278,6 @@ def observe_inventory(store, sources):
             )
             if state == "missing":
                 _missing(db, mapping)
+            elif state == "unready":
+                unready.add(mapping["segment_id"])
+    return unready

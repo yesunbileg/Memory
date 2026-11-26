@@ -16,8 +16,9 @@ from audit_docs import browser_audit
 from ai_memory.privacy import snapshot_sha256
 from ai_memory.private_io import write_private_text
 from ai_memory.store import Store
+from ai_memory.web_docs_background import BackgroundDocsTransport
 from ai_memory.web_docs_journal import DocumentJournal
-from ai_memory.web_docs_transport import DocsWebError, WebDocsTransport
+from ai_memory.web_docs_transport import DocsWebError
 
 MARKER = "TESTMODEUNCHANGEDSENTINEL"
 ADDITION = "\nThe verified web sync compass code is ArcticMallow for sailors."
@@ -37,15 +38,18 @@ def save(folder, state):
 
 
 async def run(args):
+    async with BackgroundDocsTransport(args.storage) as docs:
+        await run_benchmark(args, docs)
+
+
+async def run_benchmark(args, docs):
     folder = args.output.resolve()
     if args.action == "init":
         folder.mkdir(mode=0o700, parents=True, exist_ok=False)
-        state = {"session": args.session, "run": uuid4().hex[:12], "documents": {}}
+        state = {"run": uuid4().hex[:12], "documents": {}}
         save(folder, state)
     else:
         state = json.loads((folder / "benchmark.json").read_text())
-        assert state["session"] == args.session
-    docs = WebDocsTransport(args.session)
     if args.action == "init":
         assert (await docs.call("ping"))["status"] == "ready"
         if args.previous:
@@ -117,24 +121,24 @@ async def run(args):
         if args.action == "append":
             assert "append" not in entry
             await docs.call("close", id=doc)
-            await browser_audit(args.session, "start", marker=MARKER)
+            await browser_audit(docs, "start", marker=MARKER)
             try:
-                await browser_audit(args.session, "phase", phase="cold_open")
+                await browser_audit(docs, "phase", phase="cold_open")
                 prepared = await docs.call("prepare", id=doc, known=snapshot_sha256(content))
                 assert prepared.get("status") == "ready"
-                await browser_audit(args.session, "phase", phase="append")
+                await browser_audit(docs, "phase", phase="append")
                 begin = time.monotonic()
                 count = await journal.sync(content + ADDITION)
                 seconds = round(time.monotonic() - begin, 2)
                 # Exercise both independent reads used by DocsPublisher. NotebookLM
                 # transfer and indexing are measured separately by audit_docs.py.
                 for phase in ("verify_before_index", "verify_before_publication"):
-                    await browser_audit(args.session, "phase", phase=phase)
+                    await browser_audit(docs, "phase", phase=phase)
                     await journal.verify_remote(content + ADDITION)
-                await browser_audit(args.session, "phase", phase="unchanged")
+                await browser_audit(docs, "phase", phase="unchanged")
                 unchanged = await journal.sync(content + ADDITION)
             finally:
-                traffic = await browser_audit(args.session, "report", stop=True)
+                traffic = await browser_audit(docs, "report", stop=True)
             append = traffic.get("append", {})
             idle = traffic.get("unchanged", {})
             entry["append"] = {
@@ -145,7 +149,7 @@ async def run(args):
                 and append.get("unknownSaveBodies") == 0
                 and not append.get("unchangedMarkerSent")
                 and unchanged == 0
-                and idle.get("saves", 0) == 0
+                and idle.get("saves") == 0
                 else "FAIL",
                 "bytes": count,
                 "seconds": seconds,
@@ -174,7 +178,7 @@ async def run(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--session", type=int, required=True)
+    p.add_argument("--storage", type=Path, help="Existing archive Google login")
     p.add_argument(
         "action", choices=["init", "create", "seed", "restore_seed", "append", "verify", "close"]
     )

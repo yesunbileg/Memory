@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import re
 import subprocess
 import sys
 import tempfile
@@ -26,10 +25,10 @@ from ai_memory.privacy import snapshot_sha256
 from ai_memory.private_io import write_private_text
 from ai_memory.publication import allowed_sources
 from ai_memory.store import Store
+from ai_memory.web_docs_background import BACKGROUND_SESSION, BackgroundDocsTransport
 from ai_memory.web_docs_journal import INDEX_RECEIPT_PREFIX, DocumentJournal, split_document
 from ai_memory.web_docs_protocol import editor_commands
 from ai_memory.web_docs_publication import enable_web_docs
-from ai_memory.web_docs_transport import WebDocsTransport, new_brave_session
 from ai_memory.web_text_delta import text_edits
 
 MARKER = "UNCHANGEDFIELDLOGSENTINEL"
@@ -146,37 +145,20 @@ class Evidence:
                 pending.clear()
 
 
-async def browser_audit(session, action, **options):
+async def browser_audit(docs, action, **options):
     program = Path(__file__).with_name("audit_browser.js").read_text()
     with tempfile.TemporaryDirectory(prefix="memory-audit-meter-") as tmp:
         path = Path(tmp) / "meter.js"
         params = {"action": action, **options}
         write_private_text(path, f"const auditInput = {json.dumps(params)};\n" + program)
-        proc = await asyncio.create_subprocess_exec(
-            "playwriter",
-            "-s",
-            str(session),
-            "--timeout",
-            "15000",
-            "-f",
-            str(path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), 25)
-        except (TimeoutError, asyncio.CancelledError):
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            raise
-    if proc.returncode:
+        stdout, status = await docs._run_script(path)
+    prefix = "AI_MEMORY_DOCS_RESULT="
+    if status or not stdout.startswith(prefix):
         raise RuntimeError("audit_meter_unavailable")
-    if action == "report":
-        match = re.search(rb"(?m)^(?:\[log\] )?AUDIT_METRICS=(\{[^\r\n]*\})", stdout)
-        if not match:
-            raise RuntimeError("audit_meter_unavailable")
-        return json.loads(match[1])
+    result = json.loads(stdout[len(prefix) :])
+    if result.get("status") != "ok":
+        raise RuntimeError("audit_meter_unavailable")
+    return result.get("metrics", {})
 
 
 def capture(db, path, session_id, seed, sentence=None):
@@ -249,9 +231,9 @@ def check_restore(store, folder, report):
     report.verify("backup_restore", before == after and after["quick_check"] == "ok", **after)
 
 
-async def publication_cycle(store, report, name):
+async def publication_cycle(store, report, name, docs):
     begin = time.monotonic()
-    result = await sync_archive(store)
+    result = await sync_archive(store, docs_client=docs)
     blockers = [item.get("reason", "unknown") for item in result["blocked"]]
     status = result["status"]["sync_status"]
     passed = not blockers and status == "up_to_date"
@@ -300,7 +282,7 @@ async def check_mirror_repair(store, docs, report, phase, pair, sentence):
         recovering=False,
     )
     await phase("repair")
-    if not await publication_cycle(store, report, "repair_publication"):
+    if not await publication_cycle(store, report, "repair_publication", docs):
         report.record("mirror_repair", "BLOCKED", reason="repair_not_verified")
         return
     restored = journal._load()["text"]
@@ -331,7 +313,7 @@ async def trace(store, folder, notebook, docs, report, phase, *, repair=False):
     chat = store.connection.execute("SELECT id FROM conversations").fetchone()[0]
     store.approve(chat)
     await phase("seed")
-    seeded = await publication_cycle(store, report, "seed_publication")
+    seeded = await publication_cycle(store, report, "seed_publication", docs)
     first = source_pair(store)
     capture(store.path, origin, run_id, seed, sentence)
     capture(store.path, origin, run_id, seed, sentence)
@@ -348,7 +330,7 @@ async def trace(store, folder, notebook, docs, report, phase, *, repair=False):
         sqlite_sha256=snapshot_sha256(rows[-1]["text"]),
     )
     await phase("append")
-    published = await publication_cycle(store, report, "append_publication")
+    published = await publication_cycle(store, report, "append_publication", docs)
     pair = source_pair(store)
     row = store.connection.execute(
         """SELECT o.snapshot,o.revision,p.written_hash FROM google_docs_parts p
@@ -421,7 +403,7 @@ async def trace(store, folder, notebook, docs, report, phase, *, repair=False):
             report.record("mirror_repair", "BLOCKED", reason="no_verified_publication")
     await phase("unchanged")
     if published:
-        await publication_cycle(store, report, "unchanged_publication")
+        await publication_cycle(store, report, "unchanged_publication", docs)
     else:
         report.record("unchanged_publication", "BLOCKED", reason="no_verified_publication")
     if pair.get("document_id"):
@@ -436,9 +418,13 @@ async def run(args):
     report = Evidence(folder)
     notebook = NotebookLMAdapter(args.notebook_id, args.storage)
     db = folder / "audit.sqlite"
-    session = args.session or await new_brave_session()
-    docs = WebDocsTransport(session)
+    docs = BackgroundDocsTransport(args.storage)
     metering = False
+    async with docs:
+        return await run_audit(args, folder, report, notebook, db, docs, metering)
+
+
+async def run_audit(args, folder, report, notebook, db, docs, metering):
     with report.measure_notebook(), Store(db) as store:
         store.set_setting("tui_auto_sync", False)
         try:
@@ -451,8 +437,8 @@ async def run(args):
             store.set_setting("notebook_id", args.notebook_id)
             if args.storage:
                 store.set_setting("storage_path", str(args.storage.expanduser().resolve()))
-            enable_web_docs(store, session)
-            await browser_audit(session, "start", marker=MARKER)
+            enable_web_docs(store, BACKGROUND_SESSION)
+            await browser_audit(docs, "start", marker=MARKER)
             metering = True
             report.record(
                 "setup", "PASS", empty_notebook=True, auto=False, notebook_id=args.notebook_id
@@ -460,12 +446,12 @@ async def run(args):
 
             async def phase(name):
                 report.phase = name
-                await browser_audit(session, "phase", phase=name)
+                await browser_audit(docs, "phase", phase=name)
 
             seeded, published, stable = await trace(
                 store, folder, notebook, docs, report, phase, repair=args.repair
             )
-            traffic = await browser_audit(session, "report")
+            traffic = await browser_audit(docs, "report")
             append = traffic.get("append", {})
             idle = traffic.get("unchanged", {})
             if seeded and published:
@@ -480,8 +466,8 @@ async def run(args):
                 report.verify(
                     "no_change",
                     stable
-                    and idle.get("saves", 0) == 0
-                    and idle.get("saveBytes", 0) == 0
+                    and idle.get("saves") == 0
+                    and idle.get("saveBytes") == 0
                     and report.checks["unchanged_publication"]["status"] == "PASS",
                     stable_ids=stable,
                 )
@@ -498,10 +484,13 @@ async def run(args):
             )
         finally:
             if metering:
-                traffic = await browser_audit(session, "report", stop=True)
-                write_private_text(
-                    folder / "browser-bytes.json", json.dumps(traffic, indent=2) + "\n"
-                )
+                try:
+                    traffic = await browser_audit(docs, "report", stop=True)
+                    write_private_text(
+                        folder / "browser-bytes.json", json.dumps(traffic, indent=2) + "\n"
+                    )
+                except Exception as exc:
+                    report.record("browser_meter", "FAIL", reason=failure_code(exc))
             await notebook.close()
             check_restore(store, folder, report)
     return all(c["status"] == "PASS" for c in report.checks.values())
@@ -513,9 +502,6 @@ def main():
     p.add_argument("--notebook-id", required=True, help="Empty, dedicated live test notebook")
     p.add_argument(
         "--storage", type=Path, help="Existing NotebookLM SDK login used by the test account"
-    )
-    p.add_argument(
-        "--session", type=int, help="Dedicated Brave Playwriter session (default: create)"
     )
     p.add_argument(
         "--repair", action="store_true", help="Verify repair of the synthetic Google Doc"

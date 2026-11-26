@@ -747,6 +747,7 @@ chrome.tabs?.onRemoved?.addListener(forgetPageTab);
 const pageErrors = {
   untrusted_sender: 'Open a supported chat page to use list mode.',
   selection_invalid: 'This row cannot be changed. Refresh list mode and try again.',
+  selection_changed: 'This workspace has new selections. Undo is no longer available.',
   catalog_expired: 'List mode expired. Refresh the checkboxes and try again.',
   principal_changed:
     'The active account or workspace changed. Refresh list mode in the intended account.',

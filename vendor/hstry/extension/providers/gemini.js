@@ -164,14 +164,26 @@ export async function geminiPrincipalIds(context, { signal } = {}) {
 
 // Only the list RPC is allowed here. Older responses expose a cursor; newer
 // ones may cap a plain [limit] window without returning any continuation.
-async function catalogSummaries(session, context, guard = async () => {}, signal) {
-  const rows = new Map(),
-    seen = new Set();
+async function catalogSummaries(session, context, guard = async () => {}, signal, selected) {
+  const previous = selected?.previous;
+  const rows = new Map((previous?.summaries ?? []).map((row) => [row.id, row])),
+    seen = new Set(previous?.seen);
   const limits = [200, 1000, 5000];
-  let stage = 0,
-    cursor = null;
-  for (let page = 0; page < 25; page++) {
+  let stage = previous?.stage ?? 0,
+    cursor = previous?.cursor ?? null;
+  const start = previous?.pages ?? 0;
+  for (let page = start; page < 25; page++) {
     await guard();
+    if (selected && page - start === 4) {
+      await selected.save({
+        summaries: [...rows.values()],
+        seen: [...seen],
+        pages: page,
+        stage,
+        cursor,
+      });
+      return { queued: true };
+    }
     try {
       const limit = limits[stage];
       const response = await batchExecute(
@@ -186,15 +198,20 @@ async function catalogSummaries(session, context, guard = async () => {}, signal
         if (!Array.isArray(item) || typeof item[0] !== 'string') throw Error();
         const id = item[0].replace(/^c_/, '');
         if (!/^[a-zA-Z0-9_-]{1,256}$/.test(id)) throw Error();
-        rows.set(id, {
+        rows.set(
           id,
-          rawId: item[0],
-          title:
-            typeof item[1] === 'string' && item[1]
-              ? item[1].slice(0, 500)
-              : 'Untitled conversation',
-          updatedAt: toMs(item[5]?.[0]),
-        });
+          selected && !selected.wanted.has(id)
+            ? { id }
+            : {
+                id,
+                rawId: item[0],
+                title:
+                  typeof item[1] === 'string' && item[1]
+                    ? item[1].slice(0, 500)
+                    : 'Untitled conversation',
+                updatedAt: toMs(item[5]?.[0]),
+              },
+        );
         if (rows.size > 5000) throw Error();
       }
       const next = response[1] ?? null;
@@ -498,7 +515,20 @@ export async function syncGemini({
   let discoveryState = { lastSyncMs, sessionFingerprint: fingerprint, ...scopeState };
   const resuming = Array.isArray(pending?.summaries);
   const discovery = explicit
-    ? await catalogSummaries(session, tabContext, guard, signal)
+    ? await catalogSummaries(session, tabContext, guard, signal, {
+        wanted,
+        previous: previousDiscovery,
+        save: async (progress) => {
+          await verifySession();
+          discoveryState = {
+            ...discoveryState,
+            ...(pending && { pending }),
+            discovery: { ...progress, runStartedMs },
+          };
+          await guard();
+          await checkpoint(discoveryState);
+        },
+      })
     : resuming
       ? { summaries: pending.summaries, incomplete: Boolean(pending.discoveryIncomplete) }
       : await listChats(

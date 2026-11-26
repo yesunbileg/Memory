@@ -429,11 +429,30 @@ class SyncEngine:
             if self._pending_snapshot_changed(job["id"]):
                 raise SnapshotError("Pending segment changed before Google Docs publication")
         publisher = DocsPublisher(self.store, self.adapter, self.docs_client, self._emit_progress)
+        plan = self.store.get_setting(cold_archive.PLAN)
+        quota_predecessors = list(old)
+        if plan and segment in plan["children"]:
+            for parent in plan["parents"]:
+                quota_predecessors.extend(self._old_sources(parent))
+        replaceable = [
+            source_id
+            for source_id in dict.fromkeys(quota_predecessors)
+            if self._owns(source_id)
+            and not db.execute(
+                "SELECT 1 FROM retained_sources WHERE source_id=?", (source_id,)
+            ).fetchone()
+        ]
         try:
-            sources = await publisher.publish(segment, text)
+            sources = await publisher.publish(
+                segment,
+                text,
+                replaceable=replaceable,
+            )
         except DocsWebError as error:
             if error.code == "SourceQuota":
                 raise SourceQuota(str(error)) from None
+            if error.code == "SpareSlotNeeded":
+                raise SpareSlotNeeded(str(error)) from None
             raise
         finally:
             self.docs_write_payload_bytes += publisher.write_payload_bytes
@@ -478,40 +497,41 @@ class SyncEngine:
         # Keep the failed ID until its replacement is verified.
         self._carry_old_sources(mapping["segment_id"], [mapping["source_id"]])
 
+    def _queue_unready_sources(self, segment_ids):
+        if not segment_ids:
+            return
+        # Any part can make the publication unavailable. The job stays anchored
+        # to its primary mapping so cleanup checks the complete revision.
+        db = self.store.connection
+        with db:
+            for mapping in db.execute(
+                "SELECT * FROM source_map WHERE segment_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(segment_ids)),),
+            ).fetchall():
+                db.execute(
+                    """INSERT OR IGNORE INTO sync_jobs
+                    (segment_id,revision,title,stage,new_source_id)
+                    VALUES(?,?,?,'cleanup',?)""",
+                    (
+                        mapping["segment_id"],
+                        mapping["revision"],
+                        f"{mapping['segment_id']}-r{mapping['revision']}-check.md",
+                        mapping["source_id"],
+                    ),
+                )
+                db.execute(
+                    """UPDATE sync_jobs SET stage='cleanup',new_source_id=?,
+                    error=NULL,attempts=0,next_attempt=0
+                    WHERE segment_id=? AND revision=? AND stage='done'""",
+                    (mapping["source_id"], mapping["segment_id"], mapping["revision"]),
+                )
+
     async def _reconcile_mapped_sources(self):
-        mappings = self.store.connection.execute(
-            "SELECT * FROM source_map ORDER BY segment_id"
-        ).fetchall()
-        if not mappings:
+        if not self.store.connection.execute("SELECT 1 FROM source_map LIMIT 1").fetchone():
             return []
         # An inventory exception is unknown state, never proof of absence.
         sources = {source["id"]: source for source in await self.adapter.list_sources()}
-        observe_inventory(self.store, list(sources.values()))
-        for mapping in mappings:
-            source = sources.get(mapping["source_id"])
-            if source is not None and source.get("ready") is not True:
-                # Readiness retries belong to the persistent queue, including
-                # their backoff. A finished mapping may need checking again even
-                # though its upload-only snapshot was already removed.
-                db = self.store.connection
-                with db:
-                    db.execute(
-                        """INSERT OR IGNORE INTO sync_jobs
-                        (segment_id,revision,title,stage,new_source_id)
-                        VALUES(?,?,?,'cleanup',?)""",
-                        (
-                            mapping["segment_id"],
-                            mapping["revision"],
-                            f"{mapping['segment_id']}-r{mapping['revision']}-check.md",
-                            mapping["source_id"],
-                        ),
-                    )
-                    db.execute(
-                        """UPDATE sync_jobs SET stage='cleanup',new_source_id=?,
-                        error=NULL,attempts=0,next_attempt=0
-                        WHERE segment_id=? AND revision=? AND stage='done'""",
-                        (mapping["source_id"], mapping["segment_id"], mapping["revision"]),
-                    )
+        self._queue_unready_sources(observe_inventory(self.store, list(sources.values())))
         if self.docs_client is not None:
             from .web_docs_publication import DocsPublisher
 
@@ -626,6 +646,18 @@ class SyncEngine:
                 (job_id,),
             ).fetchone()
         )
+
+    def _release_missing_upload(self, job):
+        db = self.store.connection
+        source_id = job["new_source_id"]
+        with db:
+            db.execute(
+                """UPDATE sync_jobs SET stage='pending',new_source_id=NULL,failure_phase=NULL
+                   WHERE id=? AND new_source_id=? AND stage IN ('registered','processing','ready')
+                   AND NOT EXISTS (SELECT 1 FROM source_receipts WHERE source_id=?
+                                   UNION ALL SELECT 1 FROM source_map WHERE source_id=?)""",
+                (job["id"], source_id, source_id, source_id),
+            )
 
     async def _process(self, job) -> bool:
         db = self.store.connection
@@ -761,7 +793,8 @@ class SyncEngine:
                     (source for source in inventory if source["id"] == job["new_source_id"]), None
                 )
                 if observed is None:
-                    raise SnapshotError("Previously ready source disappeared before mapping")
+                    self._release_missing_upload(job)
+                    raise NotebookLMError("NotebookLM source is missing.", "remote_missing")
                 ready = observed.get("ready") is True
             else:
                 ready = False
@@ -772,7 +805,15 @@ class SyncEngine:
                         (job["id"],),
                     )
                 self._emit_progress("readiness", job["segment_id"])
-                await self.adapter.wait_ready(job["new_source_id"])
+                try:
+                    await self.adapter.wait_ready(job["new_source_id"])
+                except NotebookLMError as error:
+                    if error.code == "remote_missing" and all(
+                        source["id"] != job["new_source_id"]
+                        for source in await self.adapter.list_sources()
+                    ):
+                        self._release_missing_upload(job)
+                    raise
                 with db:
                     db.execute(
                         "UPDATE sync_jobs SET stage='ready',error=NULL WHERE id=?", (job["id"],)
@@ -803,43 +844,83 @@ class SyncEngine:
         sources = {s["id"]: s for s in await self.adapter.list_sources()}
         replacement_ids = [job["new_source_id"]]
         plan = self.store.get_setting(cold_archive.PLAN)
-        finishing_archive = bool(plan and plan.get("cleanup") == job["id"])
-        if finishing_archive:
-            verified = cold_archive.ready_replacements(self.store, plan)
-            if not verified or any(not sources.get(sid, {}).get("ready") for sid in verified):
-                raise SnapshotError("Archive replacements must all be ready before cleanup")
-            replacement_ids = sorted(verified)
+        # The keeper's revision can change after a missing-source hold. Its
+        # whole plan still owns the retirement of the predecessor sources.
+        finishing_archive = bool(
+            plan and "cleanup" in plan and plan["children"][0] == job["segment_id"]
+        )
+        previous_cleanup = []
+        docs_parts = {}
         if self.docs_client is not None:
-            replacement_ids.extend(
-                row[0]
+            docs_parts = {
+                row["source_id"]: row
                 for row in db.execute(
-                    """SELECT p.source_id FROM google_docs_parts p
+                    """SELECT p.source_id,p.document_id,p.indexed_hash FROM google_docs_parts p
                     JOIN google_docs_publications d USING(segment_id)
                     WHERE p.segment_id=? AND d.ready_revision=? AND d.updating=0
-                      AND p.part>0 AND p.part<d.part_count ORDER BY p.part""",
+                      AND p.part<d.part_count AND p.source_id IS NOT NULL ORDER BY p.part""",
                     (job["segment_id"], job["revision"]),
                 )
+            }
+            replacement_ids.extend(
+                source_id for source_id in docs_parts if source_id not in replacement_ids
             )
         if any(source_id not in sources for source_id in replacement_ids):
             observe_inventory(self.store, list(sources.values()))
             raise SnapshotError(
                 "Replacement missing; predecessors retained until explicit republish"
             )
+        rechecked = False
         for source_id in replacement_ids:
             if sources[source_id].get("ready") is True:
                 continue
             self._emit_progress("readiness", job["segment_id"])
             try:
-                await self.adapter.wait_ready(source_id)
+                if source_id in docs_parts:
+                    from .web_docs_publication import DocsPublisher
+
+                    publisher = DocsPublisher(
+                        self.store, self.adapter, self.docs_client, self._emit_progress
+                    )
+                    await publisher.recheck_index(docs_parts[source_id])
+                else:
+                    await self.adapter.wait_ready(source_id)
             except Exception as exc:
-                if self.docs_client is None and failure_code(exc) == "processing_failed":
+                if source_id not in docs_parts and failure_code(exc) == "processing_failed":
                     # A confirmed failed replacement is not a valid mapping.
                     # Retain it and every predecessor until a new source is ready.
                     self._requeue_failed_mapping(
                         {"segment_id": job["segment_id"], "source_id": job["new_source_id"]}
                     )
                 raise
+            rechecked = True
             self._emit_progress("cleanup", job["segment_id"])
+        if finishing_archive:
+            if rechecked:
+                sources = {source["id"]: source for source in await self.adapter.list_sources()}
+            self._queue_unready_sources(
+                observe_inventory(self.store, list(sources.values())).intersection(plan["children"])
+            )
+            verified = cold_archive.ready_replacements(self.store, plan)
+            if (
+                not verified
+                or job["new_source_id"] not in verified
+                or not db.execute(
+                    "SELECT 1 FROM source_map WHERE segment_id=? AND revision=? AND source_id=?",
+                    (job["segment_id"], job["revision"], job["new_source_id"]),
+                ).fetchone()
+            ):
+                raise SnapshotError("Archive replacements must all be ready before cleanup")
+            replacement_ids = sorted(verified)
+            previous_cleanup = db.execute(
+                """SELECT id,new_source_id,old_source_ids FROM sync_jobs
+                   WHERE segment_id=? AND id!=? AND (id=? OR stage='cleanup')""",
+                (job["segment_id"], job["id"], plan["cleanup"]),
+            ).fetchall()
+            for previous in previous_cleanup:
+                old_ids.extend(json.loads(previous["old_source_ids"]))
+                if previous["new_source_id"]:
+                    old_ids.append(previous["new_source_id"])
         with db:
             submitted = source_names.submitted_markdown_name(self.store, job)
             actual = sources.get(job["new_source_id"], {}).get("title")
@@ -852,10 +933,10 @@ class SyncEngine:
             )
         if old_ids:
             present = set(sources)
-            for old_id in old_ids:
+            for old_id in dict.fromkeys(old_ids):
                 if (
                     not self._owns(old_id)
-                    or old_id == job["new_source_id"]
+                    or old_id in replacement_ids
                     or db.execute(
                         "SELECT 1 FROM retained_sources WHERE source_id=?", (old_id,)
                     ).fetchone()
@@ -877,6 +958,10 @@ class SyncEngine:
             )
             if finishing_archive:
                 db.executemany(
+                    "UPDATE sync_jobs SET stage='superseded',error=NULL WHERE id=? AND stage='cleanup'",
+                    ((previous["id"],) for previous in previous_cleanup),
+                )
+                db.executemany(
                     "INSERT OR IGNORE INTO segment_parents VALUES(?,?)",
                     ((job["segment_id"], parent) for parent in plan["parents"]),
                 )
@@ -892,7 +977,7 @@ class SyncEngine:
             WHEN EXISTS(SELECT 1 FROM segment_parents p WHERE p.segment_id=j.segment_id) THEN 1 ELSE 2 END,id""").fetchall()
         for job in jobs:
             job = db.execute("SELECT * FROM sync_jobs WHERE id=?", (job["id"],)).fetchone()
-            if job is None or job["stage"] in ("done", "superseded"):
+            if job is None or job["stage"] in ("done", "superseded", "missing"):
                 continue
             if segment_ids is not None and job["segment_id"] not in segment_ids:
                 continue

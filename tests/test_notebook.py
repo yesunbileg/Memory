@@ -351,6 +351,100 @@ def test_terminal_brave_login_saves_only_a_verified_session(tmp_path, monkeypatc
     assert not staged[0].exists()
 
 
+def test_brave_relogin_isolates_two_archives_that_used_default_sdk_storage(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    shared = tmp_path / "shared-sdk-session.json"
+    shared.write_text("standalone notebooklm CLI session")
+    monkeypatch.setattr("notebooklm.paths.get_storage_path", lambda: shared)
+
+    @contextmanager
+    def browser_session(profile, account):
+        assert profile == "Default"
+        staged = tmp_path / "staged-session.json"
+        staged.write_text(account)
+        yield staged
+
+    async def verify(storage, notebook_id, *, account, bound):
+        assert bound and storage.read_text() == account
+        return {
+            "id": notebook_id,
+            "title": "Fixture",
+            "account": account,
+            "role": "owner",
+            "can_write": True,
+            "checked_at": "2026-01-01T00:00:00+00:00",
+        }, []
+
+    monkeypatch.setattr(notebook, "_brave_storage", browser_session)
+    monkeypatch.setattr(notebook, "_inspect_notebook", verify)
+    archives = {
+        notebook_id: tmp_path / f"{notebook_id}.sqlite" for notebook_id in ("first", "second")
+    }
+    for notebook_id, db in archives.items():
+        with Store(db) as store:
+            store.set_setting("notebook_id", notebook_id)
+        notebook.login_from_brave(db, "Default", f"{notebook_id}@example.test")
+
+    auth_files = set()
+    for notebook_id, db in archives.items():
+        with Store(db, existing=True) as store:
+            location = store.get_setting("storage_path")
+            assert location, "this archive would still fall back to the SDK's shared session"
+            path = Path(location)
+            assert path.parent == store.workspace
+            assert path.read_text() == f"{notebook_id}@example.test"
+            assert path.stat().st_mode & 0o777 == 0o600
+            auth_files.add(path)
+    assert len(auth_files) == 2
+    assert shared.read_text() == "standalone notebooklm CLI session"
+
+
+def test_brave_relogin_uses_the_archive_account_and_profile_when_form_is_blank(
+    tmp_path, monkeypatch
+):
+    from contextlib import contextmanager
+
+    from ai_memory import notebook
+    from ai_memory.store import Store
+
+    db = tmp_path / "archive.sqlite"
+    credential = tmp_path / "session.json"
+    credential.write_text("old session")
+    with Store(db) as store:
+        store.set_setting("notebook_id", "bound-notebook")
+        store.set_setting("storage_path", str(credential))
+        store.set_setting("notebook_identity", {"account": "selected@example.test"})
+        store.set_setting("notebook_login_profile", "Profile 2")
+
+    @contextmanager
+    def browser_session(profile, account):
+        assert profile == "Profile 2"
+        assert account == "selected@example.test"
+        staged = tmp_path / "staged-session.json"
+        staged.write_text("fresh session")
+        yield staged
+
+    async def verify(storage, notebook_id, *, account, bound):
+        assert bound and storage.read_text() == "fresh session"
+        return {
+            "id": notebook_id,
+            "title": "Fixture",
+            "account": account,
+            "role": "owner",
+            "can_write": True,
+            "checked_at": "2026-01-01T00:00:00+00:00",
+        }, []
+
+    monkeypatch.setattr(notebook, "_brave_storage", browser_session)
+    monkeypatch.setattr(notebook, "_inspect_notebook", verify)
+    assert notebook.login_from_brave(db)["notebook"]["account"] == "selected@example.test"
+    assert credential.read_text() == "fresh session"
+
+
 def test_brave_notebook_setup_attaches_to_validated_id_and_initializes_archive(
     tmp_path, monkeypatch
 ):

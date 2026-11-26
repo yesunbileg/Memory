@@ -1,4 +1,4 @@
-// Run in an authenticated Playwriter Brave session. Keep private save URLs in this session.
+// Run in an authenticated headless Brave worker. Keep private save URLs in this session.
 const origin = "https://docs.google.com";
 const cache = (state.memoryWebDocs ??= {});
 const creations = (state.memoryWebDocsCreations ??= Object.create(null));
@@ -14,6 +14,18 @@ async function newDocumentPage() {
 function documentId(url) {
   const parsed = new URL(url);
   return parsed.origin === origin && parsed.pathname.match(/^\/document\/(?:u\/\d+\/)?d\/([\w-]+)\/edit$/)?.[1];
+}
+
+function requiresSignIn(page, response) {
+  const current = new URL(page.url());
+  return response?.status() === 401 || current.hostname === "accounts.google.com"
+    || /signin|servicelogin/i.test(current.pathname);
+}
+
+function verifyEditorAccess(page, response) {
+  if (requiresSignIn(page, response)) {
+    throw Object.assign(Error("Google sign-in required"), { name: "DocsAuthRequired" });
+  }
 }
 
 async function closeDocument(id) {
@@ -33,7 +45,17 @@ async function releaseIdlePages() {
   return {status: "released", pending: Object.keys(cache).length};
 }
 
-async function loadDocument(id, includeText = false) {
+async function loadDocument(id, includeText = false, editing = true) {
+  try {
+    return await loadDocumentModel(id, includeText, editing);
+  } catch (error) {
+    if (error?.name !== "TimeoutError") throw error;
+    // A cold editor load may miss the first bootstrap without writing anything.
+    return loadDocumentModel(id, includeText, editing);
+  }
+}
+
+async function loadDocumentModel(id, includeText, editing) {
   const page = await newDocumentPage();
   try {
     await page.addInitScript(() => {
@@ -49,17 +71,17 @@ async function loadDocument(id, includeText = false) {
         },
       });
     });
-    const bootstrap = page.waitForRequest(request => {
+    const bootstrap = editing && page.waitForRequest(request => {
       const url = new URL(request.url());
       return url.origin === origin && url.pathname === `/document/d/${id}/docos/p/uc`
         && url.searchParams.get("id") === id && url.searchParams.has("sid")
         && url.searchParams.has("token");
     }, {timeout: 24000});
-    const [request] = await Promise.all([
-      bootstrap, page.goto(`${origin}/document/d/${id}/edit`, {waitUntil: "commit"}),
-    ]);
+    const navigation = page.goto(`${origin}/document/d/${id}/edit`, {waitUntil: "commit"})
+      .then(response => verifyEditorAccess(page, response));
+    const [request] = await Promise.all([bootstrap, navigation]);
     await page.waitForLoadState("domcontentloaded");
-    await page.locator(".docs-title-input").waitFor({timeout: 24000});
+    if (editing) await page.locator(".docs-title-input").waitFor({timeout: 24000});
     const model = await page.evaluate(async includeText => {
       const chunks = window.__aiMemoryDocsChunks ?? [];
       const revision = Math.max(...chunks.map(chunk => chunk.revision));
@@ -91,6 +113,7 @@ async function loadDocument(id, includeText = false) {
       const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
       return includeText ? {revision, hash, content} : {revision, hash};
     }, includeText);
+    if (!editing) return {page, revision: model.revision, knownHash: model.hash};
     const url = new URL(request.url());
     url.pathname = `/document/d/${id}/save`;
     url.searchParams.delete("reqid");
@@ -110,7 +133,7 @@ async function openDocument(id) {
 }
 
 async function currentModel(id) {
-  const item = await loadDocument(id);
+  const item = await loadDocument(id, false, false);
   try {
     return {hash: item.knownHash, revision: item.revision};
   } finally {
@@ -161,7 +184,7 @@ async function readRepairBase(id) {
   const item = await loadDocument(id, true);
   try {
     // The private file stays inside this invocation's 0700 temporary directory.
-    // Keep manual text out of the Playwriter console and archive journal.
+    // Keep manual text out of the worker output and archive journal.
     require("node:fs").writeFileSync(input.output, item.content, {mode: 0o600, flag: "wx"});
     delete item.content;
     cache[id] = item;
@@ -315,9 +338,7 @@ async function checkAccess() {
       waitUntil: "domcontentloaded", timeout: 20000,
     });
     const current = new URL(page.url());
-    if (current.hostname === "accounts.google.com" || /signin|servicelogin/i.test(current.pathname)) {
-      return {status: "auth_required"};
-    }
+    if (requiresSignIn(page, response)) return {status: "auth_required"};
     if (current.origin !== origin || response?.status() >= 400) {
       return {status: "unavailable"};
     }
@@ -349,8 +370,9 @@ async function execute() {
 try {
   const output = await execute();
   console.log("AI_MEMORY_DOCS_RESULT=" + JSON.stringify(output ?? {}));
-} catch {
-  const status = input.action === "write" ? (saveStarted ? "uncertain" : "not_sent")
+} catch (error) {
+  const status = error?.name === "DocsAuthRequired" && !saveStarted ? "auth_required"
+    : input.action === "write" ? (saveStarted ? "uncertain" : "not_sent")
     : input.action === "title" ? "title_unconfirmed" : "unavailable";
   console.log("AI_MEMORY_DOCS_RESULT=" + JSON.stringify({status}));
 }

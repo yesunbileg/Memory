@@ -1,6 +1,5 @@
 """Use a signed-in Brave editor session to send Google Docs web edits."""
 
-import asyncio
 import json
 import os
 import re
@@ -14,50 +13,13 @@ _RESULT = re.compile(r"(?:^|\n)(?:\[log\] )?AI_MEMORY_DOCS_RESULT=(\{[^\r\n]*\})
 
 
 class DocsWebError(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, *, definitely_not_sent=False):
         super().__init__("Google Docs web sync could not confirm the operation")
         self.code = code
-
-
-async def _start(*arguments):
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "playwriter",
-            *arguments,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError:
-        raise DocsWebError("docs_web_unavailable") from None
-    try:
-        async with asyncio.timeout(52):
-            output, _ = await process.communicate()
-    except (TimeoutError, asyncio.CancelledError):
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
-    return output.decode("utf-8", errors="replace"), process.returncode
-
-
-async def new_brave_session():
-    output, status = await _start("session", "new", "--tab-group", "memorysync")
-    match = re.search(r"Session (\d+) created", output)
-    if status or not match:
-        raise DocsWebError("docs_web_unavailable")
-    # A separate session handles only the temporary windows created for sync.
-    sessions, _ = await _start("session", "list")
-    if not re.search(rf"(?m)^\s*{match[1]}\s+Brave\s", sessions):
-        raise DocsWebError("docs_web_brave_required")
-    return int(match[1])
+        self.definitely_not_sent = definitely_not_sent
 
 
 class WebDocsTransport:
-    def __init__(self, session):
-        if type(session) is not int or session < 1:
-            raise ValueError("A Playwriter Brave session number is required")
-        self.session = session
-
     async def call(self, action, **payload):
         result, _ = await self._operation(action, payload)
         return result
@@ -69,6 +31,9 @@ class WebDocsTransport:
         result, content = await self._operation("read_repair_base", {"id": doc})
         return {**result, "text": content}
 
+    async def _run_script(self, file):
+        raise NotImplementedError("A Docs worker transport is required")
+
     async def _operation(self, action, payload):
         with tempfile.TemporaryDirectory(prefix="ai-memory-docs-web-") as directory:
             file = Path(directory) / "operation.js"
@@ -79,9 +44,7 @@ class WebDocsTransport:
                 run.write(f"const input = {json.dumps({'action': action, **payload})};\n")
                 run.write(_DRIVER.read_text(encoding="utf-8"))
             try:
-                output, status = await _start(
-                    "-s", str(self.session), "--timeout", "48000", "-f", str(file)
-                )
+                output, status = await self._run_script(file)
             except TimeoutError:
                 raise DocsWebError("docs_web_uncertain") from None
             content = None
@@ -93,8 +56,8 @@ class WebDocsTransport:
                     raise DocsWebError("docs_web_uncertain") from None
         matches = _RESULT.findall(output)
         if status or len(matches) != 1:
-            if action == "write" and "extension is not connected" in output:
-                raise DocsWebError("docs_web_not_sent")
+            if action in {"create", "write"} and "extension is not connected" in output:
+                raise DocsWebError("docs_web_not_sent", definitely_not_sent=True)
             raise DocsWebError("docs_web_unavailable")
         try:
             result = json.loads(matches[0])

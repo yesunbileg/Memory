@@ -39,6 +39,9 @@ class Element {
   addEventListener(k, v) {
     this.events[k] = v;
   }
+  focus() {
+    document.activeElement = this;
+  }
   fire(k) {
     if (!(k === 'click' && this.disabled)) return this.events[k]?.({ target: this });
   }
@@ -63,7 +66,13 @@ async function popup({
     messages = [];
   let changed;
   const fixture = { tab };
-  globalThis.document = { getElementById: get, createElement: () => new Element() };
+  const body = new Element();
+  globalThis.document = {
+    getElementById: get,
+    createElement: () => new Element(),
+    body,
+    activeElement: body,
+  };
   globalThis.chrome = {
     storage: {
       local: {
@@ -135,10 +144,17 @@ test('opening the popup is passive and list mode changes only on the active page
 });
 
 test('selecting all chats works with list mode off and reports the saved count', async () => {
+  const data = {};
   const { get, calls, messages } = await popup({
     tab: { id: 23, url: 'https://claude.ai/new' },
-    workerReply: (m) =>
-      m.type === 'changeBulkSelection' ? { ok: true, title: 'Personal', count: 42 } : { ok: false },
+    data,
+    workerReply: (m) => {
+      if (m.type !== 'changeBulkSelection') return { ok: false };
+      data.providerSyncScopes = {
+        claude: { entries: [{ principalId: 'owner', projectIds: [], conversationIds: ['chat'] }] },
+      };
+      return { ok: true, title: 'Personal', count: 42 };
+    },
   });
   assert.equal(get('bulk-controls').hidden, false);
   assert.equal(get('list-mode').getAttribute('aria-pressed'), 'false');
@@ -174,15 +190,38 @@ test('multiple workspaces require an explicit choice before bulk selection', asy
               ],
             },
   });
+  get('bulk-select').focus();
   await get('bulk-select').fire('click');
   assert.equal(get('bulk-workspace-field').hidden, false);
   assert.equal(get('bulk-select').disabled, true);
+  assert.equal(document.activeElement, get('bulk-workspace'));
   get('bulk-workspace').value = '1';
   get('bulk-workspace').fire('change');
   await get('bulk-select').fire('click');
   assert.equal(calls.at(-1).token, 'fixture-token');
   assert.equal(calls.at(-1).index, 1);
   assert.equal(get('bulk-status').textContent, '8 chats selected.');
+});
+
+test('clear names the workspace and focuses Undo, then restores focus to Clear', async () => {
+  const { get, calls } = await popup({
+    tab: { id: 24, url: 'https://claude.ai/new' },
+    workerReply: (m) => {
+      if (m.action === 'clear') return { ok: true, title: 'Team', undoToken: 'fixture-undo' };
+      if (m.action === 'undo') return { ok: true, title: 'Team' };
+      return { ok: true };
+    },
+  });
+  get('bulk-clear').focus();
+  await get('bulk-clear').fire('click');
+  assert.equal(get('bulk-status').textContent, 'Selection cleared · Team');
+  assert.equal(get('bulk-undo').hidden, false);
+  assert.equal(document.activeElement, get('bulk-undo'));
+  await get('bulk-undo').fire('click');
+  assert.equal(calls.at(-1).token, 'fixture-undo');
+  assert.equal(get('bulk-status').textContent, 'Selection restored · Team');
+  assert.equal(get('bulk-undo').hidden, true);
+  assert.equal(document.activeElement, get('bulk-clear'));
 });
 
 test('reopening shows the document’s actual mode; switching active tabs never toggles the other page by accident', async () => {
@@ -215,7 +254,7 @@ test('ineligible tabs do not receive messages, and a page that needs reloading c
     assert.ok(get('list-mode'));
     assert.ok(get('list-mode').disabled);
     assert.equal(messages.length, 0);
-    assert.match(get('mode-status').textContent, /ChatGPT.*Claude.*Gemini/);
+    assert.match(get('mode-status').textContent, /unavailable on this tab/i);
   }
   const { get } = await popup({
     tab: { id: 3, url: 'https://gemini.google.com/app' },
@@ -351,9 +390,12 @@ test('the popup verifies pairing, merges preferences, and syncs only on request 
   finishSlow();
   await slow;
   assert.equal(data.settings.archiveId, archive, 'stale success cannot replace valid pairing');
-  assert.equal(get('connection-json').value, '');
+  assert.equal(JSON.parse(get('connection-json').value).archive_instance_id, 'c'.repeat(32));
+  assert.equal(get('connection-json').getAttribute('aria-invalid'), 'true');
   await paste('d'.repeat(32));
   assert.equal(data.settings.archiveId, 'd'.repeat(32));
+  assert.equal(get('connection-json').value, '');
+  assert.match(get('json-status').textContent, /verified and saved/i);
   assert.equal(data.settings.autoPaused, true);
   assert.equal(data.settings.intervalMinutes, 45);
   get('toggle-claude').checked = true;
@@ -366,13 +408,73 @@ test('the popup verifies pairing, merges preferences, and syncs only on request 
   };
   await changed({ providerSyncScopes: { newValue: data.providerSyncScopes } }, 'local');
   assert.ok(!get('sync').disabled);
+  assert.equal(get('sync-scope').textContent, 'ChatGPT · 1 project');
+  assert.equal(get('schedule').textContent, 'Auto-sync paused');
   assert.ok(!calls.some((m) => m.type === 'syncNow' || m.type === 'fullSyncProvider'));
   await get('sync').fire('click');
   assert.equal(calls.at(-1).type, 'syncNow');
   const chatgptRescan = get('provider-status').children[0].children[1];
   assert.equal(chatgptRescan.getAttribute('aria-label'), 'Rescan saved ChatGPT items');
+  chatgptRescan.focus();
+  await changed({ activityLog: { newValue: [] } }, 'local');
+  assert.equal(get('provider-status').children[0].children[1], chatgptRescan);
+  assert.equal(document.activeElement, chatgptRescan);
   await chatgptRescan.fire('click');
   assert.deepEqual(calls.at(-1), { type: 'fullSyncProvider', provider: 'chatgpt' });
+});
+
+test('offline recovery and last sync are labeled independently', async () => {
+  const archiveId = 'a'.repeat(32);
+  const { get } = await popup({
+    data: {
+      settings: { archiveId, providers: { claude: true } },
+      status: {
+        claude: {
+          captureScope: JSON.stringify([archiveId, 'claude', 'profile', 'browser-local', {}]),
+          lastRunMs: 1_700_000_000_000,
+          progress: { unchanged: 2 },
+        },
+      },
+    },
+    workerReply: () => ({ ok: false, code: 'offline' }),
+  });
+  assert.equal(get('api-title').textContent, 'Archive offline');
+  assert.equal(get('connection-action').hidden, false);
+  assert.match(get('last-sync').textContent, /^Last sync · \S/);
+  assert.equal(get('notice-label').textContent, 'Up to date');
+  await get('connection-action').fire('click');
+  assert.equal(get('settings-panel').hidden, false);
+  assert.equal(get('automatic-connection').open, true);
+  assert.equal(document.activeElement, get('retry'));
+});
+
+test('the empty sync plan points to an eligible tab and lists enabled provider selections', async () => {
+  const archiveId = 'a'.repeat(32);
+  const { get, data, changed } = await popup({
+    tab: { id: 9, url: 'https://example.org/' },
+    data: { settings: { archiveId, providers: { chatgpt: true, claude: true, gemini: false } } },
+    workerReply: () => ({ ok: true }),
+  });
+  assert.match(get('plan-hint').textContent, /^Open ChatGPT, Claude, or Gemini/);
+  assert.equal(get('bulk-controls').hidden, true);
+  assert.equal(get('sync').disabled, true);
+  const entry = (projectIds, conversationIds) => ({
+    principalId: 'owner',
+    projectIds,
+    conversationIds,
+  });
+  data.providerSyncScopes = {
+    chatgpt: { entries: [{ ...entry(['project'], ['a', 'b']), includeRecents: true }] },
+    claude: { entries: [entry([], ['chat'])] },
+    gemini: { entries: [entry([], ['chat'])] },
+  };
+  await changed({ providerSyncScopes: { newValue: data.providerSyncScopes } }, 'local');
+  assert.equal(get('sync').disabled, false);
+  assert.equal(
+    get('sync-scope').textContent,
+    'ChatGPT · 2 chats, 1 project, all Recents\nClaude · 1 chat',
+  );
+  assert.equal(get('schedule').textContent, 'Auto-sync every 15 min');
 });
 
 test('the popup replaces Sync now with Stop sync while a run is queued or active', async () => {
@@ -422,12 +524,46 @@ test('a quiet or interrupted sync shows its actual state and keeps Stop availabl
     },
     workerReply: () => ({ ok: true }),
   });
-  assert.match(get('notice').textContent, /^Waiting for sync progress… 3\/74 checked · 0 saved$/);
+  assert.equal(
+    get('notice-label').textContent,
+    'Waiting for sync progress… 3/74 checked · 0 saved',
+  );
   assert.equal(get('sync').textContent, 'Stop sync');
   entry.running = false;
   entry.continuationPending = true;
   entry.progress.phase = 'recovering';
   await changed({ status: { newValue: data.status } }, 'local');
-  assert.match(get('notice').textContent, /Sync interrupted\. Resuming from the last saved batch…/);
+  assert.equal(
+    get('notice-label').textContent,
+    'Sync interrupted. Resuming from the last saved batch… 3/74 checked · 0 saved',
+  );
   assert.equal(get('sync').disabled, false);
+});
+
+test('the popup groups missing sign-in tabs and shows only nonzero sync totals', async () => {
+  const archiveId = 'a'.repeat(32);
+  const status = Object.fromEntries(
+    ['chatgpt', 'claude'].map((provider, index) => [
+      provider,
+      {
+        captureScope: JSON.stringify([archiveId, provider, 'profile', 'browser-local', {}]),
+        lastRunMs: Date.now(),
+        progress: { created: index * 2, updated: 0, unchanged: index * 23, accountsUnavailable: 1 },
+        selection: { skipped: 0 },
+        selectionWarning: 'Open a signed-in tab for 1 account.',
+      },
+    ]),
+  );
+  const { get, data, changed } = await popup({
+    data: { settings: { archiveId, providers: { chatgpt: true, claude: true } }, status },
+    workerReply: () => ({ ok: true }),
+  });
+  assert.equal(get('notice-label').textContent, 'Partial sync');
+  assert.equal(get('notice-counts').textContent, ' · 2 new · 23 unchanged');
+  assert.equal(get('notice-actions').textContent, 'Open signed-in tabs · ChatGPT, Claude');
+
+  for (const entry of Object.values(data.status)) entry.selectionWarning = null;
+  await changed({ status: { newValue: data.status } }, 'local');
+  assert.equal(get('notice-label').textContent, 'Done');
+  assert.equal(get('notice-actions').textContent, '');
 });

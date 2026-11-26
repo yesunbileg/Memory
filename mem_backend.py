@@ -182,7 +182,7 @@ class Backend:
                 )
             instance = view.get_setting("archive_instance_id")
             notebook_id = view.get_setting("notebook_id")
-            auto_sync = bool(notebook_id) and view.get_setting("tui_auto_sync", True) is True
+            auto_sync_preference = view.get_setting("tui_auto_sync", True) is True
             auto_sync_due = view.auto_sync_due()
             identity = view.get_setting("notebook_identity")
             if not isinstance(identity, dict) or identity.get("id") != notebook_id:
@@ -194,7 +194,8 @@ class Backend:
             "notebook_id": notebook_id,
             "notebook_identity": identity,
             "sync_activity": sync_activity,
-            "auto_sync": auto_sync,
+            "auto_sync": bool(notebook_id) and auto_sync_preference,
+            "auto_sync_preference": auto_sync_preference,
             "auto_sync_due": auto_sync_due,
         }
 
@@ -203,7 +204,8 @@ class Backend:
             conn.execute("SELECT id FROM conversations LIMIT 0")
             self._view(conn).set_setting("tui_auto_sync", enabled)
 
-    def background_sync_enabled(self) -> bool:
+    def background_sync_timer_active(self) -> bool:
+        """Check the optional default-archive systemd timer."""
         launcher = Path.home() / ".local/bin/mem"
         if self.db != (self.repo / "data/conversations.sqlite").resolve():
             return False

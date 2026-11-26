@@ -340,7 +340,7 @@ function extractMessage(node, index) {
   };
 }
 
-function toParsedConversation(detail, conversationId, accountId) {
+function toParsedConversation(detail, conversationId, accountId, capturePrincipal) {
   const mapping = detail?.mapping;
   if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping))
     throw new Error('ChatGPT conversation detail shape is unavailable');
@@ -374,6 +374,7 @@ function toParsedConversation(detail, conversationId, accountId) {
     metadata: {
       url: `${BASE}/c/${conversationId}`,
       ...(accountId ? { accountId } : {}),
+      ...(capturePrincipal && { capturePrincipal }),
     },
   };
 }
@@ -430,6 +431,7 @@ async function popupPrincipals(context, signal) {
   return [
     {
       principalId: JSON.stringify([userId, accountId]),
+      capturePrincipal: [userId, accountId],
       id: accountId,
       title: account.name,
       token: session.accessToken,
@@ -462,7 +464,7 @@ const popup = (context, signal) => ({
       headers: authHeaders(p.token, p.id),
       ...p.requestOptions,
     }),
-  parse: (detail, id, p) => toParsedConversation(detail, id, p.id),
+  parse: (detail, id, p) => toParsedConversation(detail, id, p.id, p.capturePrincipal),
 });
 export const listChatGPTCatalog = (context) => listPopupCatalog(popup(context));
 export const chatGPTPrincipalIds = async (context, { signal } = {}) =>

@@ -103,6 +103,7 @@ def _safe_error(error: Exception, *, loading_auth: bool = False) -> NotebookLMEr
         AuthExtractionError,
         NetworkError,
         RateLimitError,
+        SourceNotFoundError,
         SourceProcessingError,
         SourceTimeoutError,
     )
@@ -113,6 +114,8 @@ def _safe_error(error: Exception, *, loading_auth: bool = False) -> NotebookLMEr
         return NotebookLMAuthError()
     if isinstance(error, RateLimitError):
         return NotebookLMError("NotebookLM rate limit reached. Retry later.", "rate_limited")
+    if isinstance(error, SourceNotFoundError):
+        return NotebookLMError("NotebookLM source is missing.", "remote_missing")
     if isinstance(error, SourceProcessingError):
         return NotebookLMError("NotebookLM source processing failed.", "processing_failed")
     if isinstance(error, SourceTimeoutError):
@@ -249,6 +252,11 @@ def _notebook_identity(info: dict) -> dict:
     return {key: info[key] for key in keys}
 
 
+def _archive_auth_path(store) -> Path:
+    store.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return store.workspace / f"notebooklm-auth-{uuid4().hex}.json"
+
+
 def _clear_resolved_auth_failure(store) -> None:
     errors = store.get_setting("sync_preflight_errors", [])
     remaining = [
@@ -316,8 +324,6 @@ def _brave_storage(profile: str, account: str):
 
 def login_from_brave(db_path: Path, profile: str = "", account: str = "") -> dict:
     """Replace the archive's auth file only after checking its bound notebook."""
-    from notebooklm.paths import get_storage_path
-
     from .archive_lock import archive_lock
     from .private_io import write_private_text
     from .store import Store
@@ -327,14 +333,32 @@ def login_from_brave(db_path: Path, profile: str = "", account: str = "") -> dic
         if not notebook_id:
             raise NotebookLMError("NotebookLM тохируулаагүй байна.", "not_configured")
         storage = store.get_setting("storage_path")
-        destination = Path(storage).expanduser() if storage else get_storage_path()
+        profile = profile.strip() or store.get_setting("notebook_login_profile") or ""
+        previous = store.get_setting("notebook_identity") or {}
+        account = account.strip() or previous.get("account") or ""
         with _brave_storage(profile, account) as staged:
             info, _ = asyncio.run(
-                _inspect_notebook(staged, notebook_id, account=account.strip(), bound=True)
+                _inspect_notebook(staged, notebook_id, account=account, bound=True)
             )
+            session = staged.read_text(encoding="utf-8")
+            identity = _notebook_identity(info)
+            destination = Path(storage).expanduser() if storage else _archive_auth_path(store)
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            write_private_text(destination, staged.read_text(encoding="utf-8"))
-            store.set_setting("notebook_identity", _notebook_identity(info))
+            write_private_text(destination, session, overwrite=bool(storage))
+            try:
+                with store.connection:
+                    store.connection.executemany(
+                        "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                        (
+                            ("storage_path", json.dumps(str(destination))),
+                            ("notebook_identity", json.dumps(identity)),
+                            ("notebook_login_profile", json.dumps(profile)),
+                        ),
+                    )
+            except BaseException:
+                if not storage:
+                    destination.unlink(missing_ok=True)
+                raise
             _clear_resolved_auth_failure(store)
     return {"notebook": info}
 
@@ -391,8 +415,7 @@ def setup_notebook_from_brave(
                     raise _unconfirmed_create() from None
                 raise
 
-            store.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
-            destination = store.workspace / f"notebooklm-auth-{uuid4().hex}.json"
+            destination = _archive_auth_path(store)
             credentials_saved = False
             try:
                 with store.connection:
@@ -402,6 +425,7 @@ def setup_notebook_from_brave(
                             ("notebook_id", json.dumps(info["id"])),
                             ("storage_path", json.dumps(str(destination))),
                             ("notebook_identity", json.dumps(_notebook_identity(info))),
+                            ("notebook_login_profile", json.dumps(profile.strip())),
                         ),
                     )
                     store.connection.execute("DELETE FROM settings WHERE key=?", (_SETUP_PENDING,))

@@ -8,6 +8,7 @@ Receipts count accepted conversation records, partitioned into created, updated
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import re
@@ -30,9 +31,11 @@ _PLATFORMS = {
 _EXTENSION_ORIGIN = re.compile(
     r"(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-fA-F-]{36})\Z"
 )
+_CAPTURE_ACCOUNT_PREFIX = "browser-principal-v1:"
+_CAPTURE_ACCOUNT_FIELDS = {"chatgpt-web": "accountId", "claude-web": "orgId"}
 
 
-def _normalize_packet(packet: object) -> list[dict]:
+def _normalize_packet(packet: object) -> list[tuple[dict, str | None]]:
     if not isinstance(packet, dict):
         raise ValueError("invalid packet")
     adapter = packet.get("adapter")
@@ -63,6 +66,27 @@ def _normalize_packet(packet: object) -> list[dict]:
         )
         if not isinstance(account, str) or not account or len(account) > 1024:
             raise ValueError("invalid account")
+        legacy_account = None
+        if "capturePrincipal" in metadata:
+            field = _CAPTURE_ACCOUNT_FIELDS.get(adapter)
+            principal = metadata["capturePrincipal"]
+            if (
+                field is None
+                or not isinstance(principal, list)
+                or len(principal) != 2
+                or any(
+                    not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value)
+                    for value in principal
+                )
+                or principal[1] != metadata.get(field)
+                or principal[1] != account
+            ):
+                raise ValueError("invalid verified capture principal")
+            legacy_account = account
+            encoded = json.dumps(principal, separators=(",", ":")).encode()
+            account = _CAPTURE_ACCOUNT_PREFIX + hashlib.sha256(encoded).hexdigest()
+        elif account.startswith(_CAPTURE_ACCOUNT_PREFIX):
+            raise ValueError("reserved capture account namespace")
         raw_messages = raw.get("messages")
         if not isinstance(raw_messages, list):
             raise ValueError("invalid messages")
@@ -90,7 +114,7 @@ def _normalize_packet(packet: object) -> list[dict]:
         ids = [message["native_id"] for message in conversation["messages"]]
         if len(set(ids)) != len(ids):
             raise ValueError("duplicate message IDs")
-        result.append(conversation)
+        result.append((conversation, legacy_account))
     return result
 
 
@@ -106,7 +130,7 @@ def save_packet(store: Store, packet: dict) -> dict:
         raise ArchiveChanged("Archive changed")
     created = updated = unchanged = 0
     with store.import_transaction():
-        for conversation in conversations:
+        for conversation, legacy_account in conversations:
             previous = store.connection.execute(
                 "SELECT id,revision FROM conversations WHERE platform=? AND account=? AND external_id=?",
                 (
@@ -115,7 +139,19 @@ def save_packet(store: Store, packet: dict) -> dict:
                     conversation["external_id"],
                 ),
             ).fetchone()
-            key = store.ingest(conversation, reconcile_order=True)
+            # Workspace-only records have no verified user. Preserve their IDs and
+            # consent, and require a fresh approval for any ambiguous new record.
+            legacy_match = (
+                previous is None
+                and legacy_account is not None
+                and store.connection.execute(
+                    "SELECT 1 FROM conversations WHERE platform=? AND account=? AND external_id=?",
+                    (conversation["platform"], legacy_account, conversation["external_id"]),
+                ).fetchone()
+            )
+            key = store.ingest(
+                conversation, consent=False if legacy_match else None, reconcile_order=True
+            )
             if previous is None:
                 created += 1
             else:

@@ -119,9 +119,9 @@ async def test_transport_rejects_a_signed_out_brave_session(monkeypatch):
     async def signed_out(*_arguments):
         return ('AI_MEMORY_DOCS_RESULT={"status":"auth_required"}', 0)
 
-    monkeypatch.setattr(web_docs_transport, "_start", signed_out)
+    monkeypatch.setattr(web_docs_transport.WebDocsTransport, "_run_script", signed_out)
     with pytest.raises(DocsWebError) as error:
-        await web_docs_transport.WebDocsTransport(1).call("ping")
+        await web_docs_transport.WebDocsTransport().call("ping")
     assert error.value.code == "docs_web_auth_required"
 
 
@@ -706,7 +706,7 @@ async def test_registered_source_with_sparse_metadata_does_not_consume_new_quota
     ],
 )
 async def test_transport_rejects_invalid_or_transformed_save_response(monkeypatch, result, reason):
-    transport = web_docs_transport.WebDocsTransport(3)
+    transport = web_docs_transport.WebDocsTransport()
     monkeypatch.setattr(transport, "call", AsyncMock(return_value=result))
     with pytest.raises(DocsWebError) as rejected:
         await transport.write("synthetic", "tx", "before", "after", [], recovering=False)
@@ -714,7 +714,7 @@ async def test_transport_rejects_invalid_or_transformed_save_response(monkeypatc
 
 
 async def test_transport_accepts_exact_save_ack_or_zero_byte_reconciliation(monkeypatch):
-    transport = web_docs_transport.WebDocsTransport(3)
+    transport = web_docs_transport.WebDocsTransport()
     result = {
         "status": "submitted",
         "previous": 7,

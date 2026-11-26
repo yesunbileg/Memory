@@ -251,12 +251,13 @@ for (const [provider, sync] of [
   );
 
   test(
-    provider + ' verifies a chosen project before unrelated membership exhausts the scan',
+    provider + ' skips unrelated membership when chosen projects cover every direct pick',
     async (t) => {
       const f = fixture(t, provider, sync, 201);
       const result = await f.run(['chosen'], ['overlap']);
       assert.deepEqual(f.sent.toSorted(), ['no-title', 'offscreen', 'overlap']);
-      assert.ok(result.selectionWarning, 'unverified entries must still be reported');
+      assert.equal(result.hasMore, false);
+      assert.equal(result.selectionWarning, null);
     },
   );
 }
