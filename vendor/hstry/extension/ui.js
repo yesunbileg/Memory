@@ -378,7 +378,7 @@ export function statusForPairing(status, settings) {
   );
 }
 
-// The status is the receiver's acknowledgement, never a promise of Google consent or retrieval.
+// The receiver acknowledges local capture. NotebookLM publication has its own status.
 export function captureProgress(status, providers, since = 0) {
   const active = Object.entries(status)
     .filter(

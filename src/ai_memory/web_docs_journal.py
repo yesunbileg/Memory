@@ -144,7 +144,7 @@ class DocumentJournal:
         raise DocsWebError("docs_web_uncertain")
 
     async def sync_mirror(self, text, *, repair_target=None):
-        """Restore a managed copy from the approved archive, including remote-only edits."""
+        """Restore a managed copy from the archive, including remote-only edits."""
         self.write_payload_bytes = 0
         self.repaired = False
         text = docs_text(text)

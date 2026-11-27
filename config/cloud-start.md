@@ -26,7 +26,9 @@ It installs one local plugin for OpenCode 2.x or 1.18.29+, leaving existing
 configuration intact. Reload OpenCode. For OpenCode MCP retrieval, merge the
 matching v1 or v2 example in this directory; use the same absolute archive path.
 To remove the OpenCode bridge, delete only its printed `plugins/ai-memory.js`.
-Neither local collection nor browser capture grants upload consent.
+Both integrations save chats to the local archive. Use an archive without a
+configured notebook for local-only checks. For a connected archive, `/auto off`
+in `mem` pauses automatic publication.
 
 If a live NotebookLM test is explicitly intended, use a writable `NOTEBOOKLM_HOME`
 or storage file dedicated to the authorized test account. See [NotebookLM setup](../README.md#connect-notebooklm).

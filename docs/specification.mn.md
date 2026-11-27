@@ -47,7 +47,7 @@ Codex, OpenCode, Claude Code, ChatGPT болон бусад AI агентын я
 
 WRITE — яриа хадгалах:
 
-AI яриа → hstry → Filter → SQLite. Хэрэглэгч илгээхийг зөвшөөрч, `ai-memory sync` ажиллуулахад Markdown Segment → NotebookLM.
+AI яриа → hstry → Filter → SQLite. Синк хийхэд архивын өөрчлөлт → Markdown Segment → NotebookLM.
 
 READ — санах ой сэргээх:
 
@@ -354,7 +354,7 @@ SQLite-д revision-ийг зөв бүртгэж, өөрчлөгдсөн яриа
 
 ## 11. Sync Engine
 
-Зөвшөөрсөн яриаг NotebookLM рүү илгээхдээ `ai-memory sync` ажиллуулна. AI ашиглахгүй.
+Архивын өөрчлөлтийг NotebookLM рүү гараар илгээхдээ `ai-memory sync` ажиллуулна. Энэ алхамд AI ашиглахгүй.
 
 ### Source шинэчлэх дараалал
 
@@ -365,7 +365,7 @@ SQLite-д revision-ийг зөв бүртгэж, өөрчлөгдсөн яриа
 
 - Мессеж бүрд NotebookLM рүү upload хийхгүй.
 - Өөрчлөгдсөн өгөгдлийг багцлан sync хийнэ.
-- Яриа дуусахад локалд хадгална. Энэ нь NotebookLM рүү илгээх зөвшөөрөл биш.
+- Яриа дуусахад локалд хадгална. NotebookLM холбогдсон, автомат синк асаалттай үед архивын өөрчлөлт дараагийн синкээр нийтлэгдэнэ.
 - Өөрчлөлтгүй Segment-ийг дахин upload хийхгүй.
 - NotebookLM API-ийн quota болон алдааг хүндэтгэнэ.
 - Internet тасарвал ажил SQLite queue-д үлдэнэ.
@@ -519,7 +519,7 @@ NotebookLM-ийн хариултыг шууд үнэн гэж үзэхгүй. Х
 | API өөрчлөгдөх                      | NotebookLM adapter-ийг тусгаарлан засах |
 | Нууц мэдээлэл илрэх                 | Cloud upload-ийг түр хориглох           |
 
-Google руу зөвхөн хэрэглэгчийн зөвшөөрсөн яриаг дамжуулна. API key, password, cookie, authentication token-ийг source болон log-д санамсаргүй оруулахгүй байх хамгаалалттай байна.
+Архивласан чат бүр нийтлэх ижил дүрмээр явна. API key, password, cookie, authentication token-ийг source болон log-д санамсаргүй оруулахгүй байх хамгаалалттай байна.
 
 ## 16. Төхөөрөмжийн нөөцийн хэрэглээ
 
@@ -687,7 +687,7 @@ Markdown Segment Builder
 
 notebooklm-py
 
-Зөвшөөрсөн өгөгдлийг `sync` ажиллуулахад upload · verify · replace
+Архивын өөрчлөлтийг `sync` ажиллуулахад upload · verify · replace
 
 [NotebookLM - AI toolr  tools, reviews, blogs](https://images.openai.com/static-rsc-4/Exi42vueYIoXjU7jVoSu8Zdx8iBDH3thgmx7a9Kq9JLUGvgc7V3r0mYDFiTiybcbMqtu3LoI6pYXAuh_7CFrnd-6w_Xfm4tzQEYz7gvYWfPgL1iazbmf1YwuIqPOXPXwOXBS3hJs7k8625N6x4R1_puEsPHNw_hv8ykFvnUKW30?purpose=inline)
 
@@ -699,6 +699,6 @@ MCP Gateway
 
 Agent memory хэрэгтэй үед асууна
 
-Гол зарчим: Local SQLite-д эх яриагаа бүрэн хадгална. Хэрэглэгч `ai-memory sync` ажиллуулахад зөвшөөрсөн яриаг багцалсан Markdown Segment-үүд NotebookLM-д очно. Агент шаардлагатай үед ганц NotebookLM-ээс санах ойгоо сэргээнэ. Local smart memory, тусдаа Main Memory, Medium Memory, INDEX, олон notebook-ийн routing байхгүй.
+Local SQLite-д эх яриагаа бүрэн хадгална. `ai-memory sync` ажиллуулахад архивын өөрчлөлтийг маскалж, Markdown Segment-д багцлаад NotebookLM-д илгээнэ. Агент шаардлагатай үед ганц NotebookLM-ээс санах ойгоо сэргээнэ. Local smart memory, тусдаа Main Memory, Medium Memory, INDEX, олон notebook-ийн routing байхгүй.
 
 Энэ бол V1-ийн архитектурын төлөвлөгөө. Хэрэгжсэн боломж, суулгах дарааллыг [локал заавар](local-testing.mn.md)-аас, шалгалт тус бүрийн хамрах хүрээг [баталгаажуулалт](validation.md)-аас үзнэ.

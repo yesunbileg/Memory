@@ -35,11 +35,11 @@ collectors, extension or Python checks does not require npm packages.
 | `src/ai_memory/collectors.py` | Node adapter execution, rollout discovery and Codex snapshot reconciliation |
 | `src/ai_memory/normalization.py` | Visible text, stable native identities and metadata normalization |
 | `src/ai_memory/importer.py` | Archive imports, per-file checkpoints and failure isolation |
-| `src/ai_memory/store.py` | SQLite schema, transactions, consent and revisions |
+| `src/ai_memory/store.py` | SQLite schema, transactions and revisions |
 | `src/ai_memory/segments.py` | Lossless Markdown layout, word budgets and merges |
 | `src/ai_memory/sync.py` | Persistent upload, readiness, mapping, cleanup and retries |
 | `src/ai_memory/notebook.py` | Lazy notebooklm-py client boundary and safe errors |
-| `src/ai_memory/gateway.py` | Two MCP tools and verified structured citations |
+| `src/ai_memory/gateway.py` | Three MCP tools and verified structured citations |
 | `src/ai_memory/connection.py`, `ingest.py` | Legacy authenticated HTTP receiver and shared validation for browser packets |
 | `src/ai_memory/native.py` | Linux native messaging host registration, pairing verification and browser packets |
 | `vendor/hstry/adapters/` | Audited upstream TypeScript parsers |
@@ -57,8 +57,8 @@ internal responsibilities.
 
 `data/` holds local archives, connection files, synthetic demo output and optional
 screenshots. Archive-specific Markdown exports, pending snapshots and native host files live in a private `<database filename>.files/` directory. These workspaces are ignored even outside `data/`. `dist/` holds wheels, source distributions, extension ZIPs and verification records. Build outputs are ignored, as
-are caches, local agent state and auth/token files. Runtime never cleans an
-archive or changes consent automatically. Do not run blanket reset/clean commands
+are caches, local agent state and auth/token files. Runtime preserves the archived
+originals. Do not run blanket reset/clean commands
 to update an installation with local changes; inspect `git status` and save those
 changes first.
 

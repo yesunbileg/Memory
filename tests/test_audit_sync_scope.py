@@ -24,7 +24,7 @@ async def test_registered_source_readiness_timeout_polls_only(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "  Монгол 😺\r\n$x\r\n\r код\r "
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = Polling()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         result = await engine.run_once()
@@ -39,7 +39,7 @@ async def test_registered_source_readiness_timeout_polls_only(tmp_path):
 async def test_wrong_body_after_lost_response_never_disclosed_or_deleted(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = Remote()
         remote.lose_response = True
         builder = SegmentBuilder(store, target_words=1)
@@ -47,7 +47,7 @@ async def test_wrong_body_after_lost_response_never_disclosed_or_deleted(tmp_pat
         await engine.run_once()
         foreign = next(iter(remote.sources))
         remote.sources[foreign]["text"] = "synthetic foreign data, same filename"
-        store.ingest(conversation(external_id="independent"), consent=True)
+        store.ingest(conversation(external_id="independent"))
         make_retries_due(store)
         await engine.run_once()
         assert foreign in remote.sources
@@ -62,7 +62,7 @@ def test_unchanged_build_skips_sealed_renders(tmp_path, monkeypatch):
     with Store(tmp_path / "db") as store:
         builder = SegmentBuilder(store, target_words=1)
         for i in range(12):
-            store.ingest(conversation(external_id=str(i)), consent=True)
+            store.ingest(conversation(external_id=str(i)))
         builder.build()
         before = {
             r[0]: builder.render(r[0]) for r in store.connection.execute("SELECT id FROM segments")
@@ -87,12 +87,9 @@ async def test_oversized_message_or_title_does_not_block_other_conversation(tmp_
         base = conversation()["messages"][0]
         message_id = store.ingest(
             conversation(external_id="long-message", messages=[dict(base, text="бие " * 101)]),
-            consent=True,
         )
-        title_id = store.ingest(
-            conversation(external_id="long-title", title="урт " * 500001), consent=True
-        )
-        good_id = store.ingest(conversation(external_id="simple"), consent=True)
+        title_id = store.ingest(conversation(external_id="long-title", title="урт " * 500001))
+        good_id = store.ingest(conversation(external_id="simple"))
         remote = Remote()
         result = await SyncEngine(
             store, SegmentBuilder(store, max_words=100, target_words=50), remote, tmp_path / "md"
@@ -107,7 +104,7 @@ async def test_oversized_message_or_title_does_not_block_other_conversation(tmp_
 async def test_reconcile_stale_uncertain_while_new_revision_proceeds(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = Remote()
         remote.lose_response = True
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
@@ -126,7 +123,7 @@ async def test_reconcile_stale_uncertain_while_new_revision_proceeds(tmp_path):
 async def test_crash_after_readiness_resumes_without_duplicate(tmp_path):
     remote = Remote()
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         # An aborted mapping transaction simulates a stop after provider readiness.
         store.connection.execute(
             "CREATE TRIGGER interrupt_map BEFORE INSERT ON source_map BEGIN SELECT RAISE(ABORT, 'stop'); END"
@@ -155,7 +152,7 @@ async def test_uncertain_finalize_with_registration_id_polls_only(tmp_path):
 
     remote = LostFinalize()
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
         make_retries_due(store)
@@ -173,7 +170,7 @@ async def test_late_proof_cleans_stale_attempt_after_new_mapping_finished(tmp_pa
 
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = DelayedIndex()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         remote.lose_response = True

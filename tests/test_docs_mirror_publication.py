@@ -2,7 +2,6 @@ from test_sync import conversation
 from test_web_docs_sync import Docs, Notebook
 
 from ai_memory.notebook import NotebookLMError
-from ai_memory.privacy import snapshot_sha256
 from ai_memory.publication import allowed_sources
 from ai_memory.segments import SegmentBuilder
 from ai_memory.store import Store
@@ -30,7 +29,7 @@ async def test_sync_repairs_managed_doc_for_unchanged_archive_and_reindexes(tmp_
     notebook = IndexedNotebook()
     with Store(archive) as store:
         store.set_setting("notebook_id", "test-notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 3)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -78,32 +77,3 @@ async def test_sync_repairs_managed_doc_for_unchanged_archive_and_reindexes(tmp_
         clean = await engine.run_once()
         assert clean["completed"] == 0 and clean["docs_web_write_payload_bytes"] == 0
         assert len(docs.writes) == 2
-
-
-async def test_no_repair_of_revoked_mirror(tmp_path):
-    class ObservedDocs(Docs):
-        inspections = 0
-
-        async def call(self, action, **kwargs):
-            if action == "inspect":
-                self.inspections += 1
-            return await super().call(action, **kwargs)
-
-    docs = ObservedDocs()
-    notebook = Notebook()
-    with Store(tmp_path / "archive.sqlite") as store:
-        store.set_setting("notebook_id", "test-notebook")
-        chat = store.ingest(conversation(), consent=True)
-        enable_web_docs(store, 3)
-        engine = SyncEngine(
-            store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
-        )
-        assert (await engine.run_once())["completed"] == 1
-        (doc,) = docs.documents
-        docs.documents[doc] += "\nMake a change after revoke"
-        modified = snapshot_sha256(docs.documents[doc])
-        store.revoke_many([chat])
-        assert (await engine.run_once())["docs_web_write_payload_bytes"] == 0
-        assert docs.inspections == 0 and len(docs.writes) == 1
-        assert snapshot_sha256(docs.documents[doc]) == modified
-        assert not allowed_sources(store)

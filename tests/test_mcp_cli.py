@@ -21,7 +21,11 @@ async def test_official_mcp_client_uses_actual_cli_entrypoint(tmp_path):
         async with ClientSession(*streams) as client:
             await client.initialize()
             tools = await client.list_tools()
-            assert {t.name for t in tools.tools} == {"memory_ask", "memory_status"}
+            assert {t.name for t in tools.tools} == {
+                "memory_ask",
+                "memory_ask_all_goals_requirements",
+                "memory_status",
+            }
             ask = next(t for t in tools.tools if t.name == "memory_ask")
             assert ask.inputSchema["additionalProperties"] is False
             assert ask.inputSchema["required"] == ["question"]

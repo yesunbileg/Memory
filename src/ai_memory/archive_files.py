@@ -157,6 +157,7 @@ def _snapshots(db):
 
 def backup_archive(store, destination):
     from .archive_lock import archive_lock
+    from .revisions import SCHEMA_VERSION
 
     with archive_lock(store.path):
         db = store.connection
@@ -166,10 +167,11 @@ def backup_archive(store, destination):
             for _ in _snapshots(db):
                 pass
             result = _publish_database(db, destination)
-    return {"backup": str(result), "schema": 2}
+    return {"backup": str(result), "schema": SCHEMA_VERSION}
 
 
 def restore_archive(destination, backup):
+    from .revisions import SCHEMA_VERSION
     from .store import Store
 
     def restored_status(candidate):
@@ -190,8 +192,8 @@ def restore_archive(destination, backup):
     try:
         with db:
             db.execute("BEGIN")
-            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
-                raise PublicInputError("Restore requires a version 2 portable backup")
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (2, SCHEMA_VERSION):
+                raise PublicInputError("Restore requires a version 2 or 3 portable backup")
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             work.mkdir(mode=0o700)
             owned = True

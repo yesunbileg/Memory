@@ -20,7 +20,7 @@ async def live_demo(output: Path, *, notebook_id: str):
     if output.is_symlink() or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
         raise ValueError("Live demo requires an empty output directory")
     # All records are produced inside a new private directory; no retained marker,
-    # DB, auth override or previously approved transcript is an input to this run.
+    # DB, auth override or previously captured transcript is an input to this run.
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
     fresh = output / "synthetic"
     fresh.mkdir(mode=0o700)  # exclusive even if two live commands race
@@ -28,11 +28,10 @@ async def live_demo(output: Path, *, notebook_id: str):
     db = fresh.resolve() / "conversations.sqlite"
     with Store(db) as store:
         rows = store.connection.execute(
-            "SELECT id,platform,account,external_id,consent FROM conversations"
+            "SELECT id,platform,account,external_id FROM conversations"
         ).fetchall()
         if (
-            {tuple(row)[1:4] for row in rows} != DEMO_ORIGINS
-            or not all(row["consent"] for row in rows)
+            {tuple(row)[1:] for row in rows} != DEMO_ORIGINS
             or {row["id"] for row in rows} != set(result["conversation_ids"])
             or store.get_setting("notebook_id")
             or store.get_setting("storage_path")

@@ -194,6 +194,7 @@ async def verify_mcp_scope(db, remote_path, source_id):
         await client.initialize()
         assert {tool.name for tool in (await client.list_tools()).tools} == {
             "memory_ask",
+            "memory_ask_all_goals_requirements",
             "memory_status",
         }
         accepted = await client.call_tool("memory_ask", {"question": QUESTION})
@@ -278,9 +279,7 @@ async def test_mongolian_upload_restarts_and_limits_stdio_citations(tmp_path, tr
     with Store(db) as store:
         store.set_setting("tui_auto_sync", False)  # This test owns sync via its fake adapter.
     cli(db, "collect", "codex", rollout, "--account", "alpha")
-    cli(db, "collect", "codex", rollout, "--account", "beta")
     alpha = rows_by_account(db)["alpha"]
-    cli(db, "approve", alpha["id"])
     expected_snapshots = cli(db, "preview", alpha["id"])["segments"]
     assert len(expected_snapshots) == 1
     expected_outbound = expected_snapshots[0]["text"].encode()
@@ -358,8 +357,6 @@ def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_pat
     assert rows_by_account(db)["alpha"] == alpha
     assert_original_text(alpha)
 
-    assert rows_by_account(db)["alpha"]["consent"] is True
-
     cli(db, "collect", "codex", rollout, "--account", "beta")
     accounts = rows_by_account(db)
     beta = accounts["beta"]
@@ -368,7 +365,6 @@ def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_pat
     assert_original_text(beta)
     assert beta["id"] != alpha["id"]
     assert {m["id"] for m in beta["messages"]}.isdisjoint(m["id"] for m in alpha["messages"])
-    assert beta["consent"] is True
 
     write_rollout(rollout, text=EDITED, changed_on=2)
     cli(db, "collect", "codex", rollout, "--account", "alpha")
@@ -376,6 +372,5 @@ def test_mongolian_cli_capture_and_automatic_publication_across_accounts(tmp_pat
     assert accounts["beta"] == beta
     assert account_checkpoint(db, "beta") == beta_checkpoint
     assert_original_text(accounts["alpha"], EDITED)
-    assert accounts["alpha"]["consent"] is True
     assert accounts["alpha"]["revision"] > alpha["revision"]
     assert [m["id"] for m in accounts["alpha"]["messages"]] == [m["id"] for m in alpha["messages"]]

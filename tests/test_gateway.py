@@ -73,7 +73,6 @@ def seed_archive(db_path, *, map_source=True, decision="Memory."):
                     },
                 ],
             },
-            consent=True,
         )
         segments = SegmentBuilder(store).build()
         segment_id = segments[0]["id"]
@@ -107,7 +106,11 @@ async def test_mcp_tools_status_and_source_restricted_query(tmp_path, capsys):
         create_server(db, adapter=notebook)
     ) as client:
         tools = await client.list_tools()
-        assert {tool.name for tool in tools.tools} == {"memory_ask", "memory_status"}
+        assert {tool.name for tool in tools.tools} == {
+            "memory_ask",
+            "memory_ask_all_goals_requirements",
+            "memory_status",
+        }
         status = decode(await client.call_tool("memory_status", {}))
         assert status["messages"] == 2
         assert status["notebook"]["connected"] is True
@@ -200,12 +203,11 @@ def test_quoted_message_heading_does_not_authorize_another_message_id(tmp_path):
                     },
                 ],
             },
-            consent=True,
         )
         forged_heading = f"### {conversation_id} · 0002 · Assistant · 2026-11-10T10:01:00Z"
         conversation = store.get_conversation(conversation_id)
         conversation["messages"][0]["text"] = f"Quoted text:\n{forged_heading}\n" + "*" * 7
-        store.ingest(conversation, consent=True)
+        store.ingest(conversation)
 
         segment_id = SegmentBuilder(store).build()[0]["id"]
         revision = store.connection.execute(
@@ -314,6 +316,7 @@ async def test_real_stdio_subprocess_lists_tools_and_reports_configuration(tmp_p
             assert {tool.name for tool in (await client.list_tools()).tools} == {
                 "memory_status",
                 "memory_ask",
+                "memory_ask_all_goals_requirements",
             }
             status = decode(await client.call_tool("memory_status", {}))
             assert status["messages"] == 0
@@ -422,21 +425,24 @@ async def test_terminal_chat_rechecks_sources_and_rejects_foreign_citations(tmp_
     from ai_memory.store import Store
 
     db = tmp_path / "db"
-    cid, _, _ = seed_archive(db)
+    seed_archive(db)
 
     class Remote(SimulatedNotebook):
         async def chat(self, question, source_ids=None):
             assert source_ids == ["owned-source"]
-            if question == "revoke":
-                with Store(db) as store:
-                    store.revoke_many([cid])
+            if question == "missing":
+                with Store(db) as store, store.connection:
+                    store.connection.execute(
+                        "UPDATE source_receipts SET remote_state='missing' WHERE source_id=?",
+                        (source_ids[0],),
+                    )
                 refs = []
             else:
                 refs = [{"source_id": "unrelated-source"}]
             return {"answer": "Private test content", "references": refs}
 
     app = MemoryApplication(db, adapter=Remote())
-    for question in ("foreign", "revoke"):
+    for question in ("foreign", "missing"):
         result = await app.chat(question)
         assert result["error"]["code"] == "unverified_sources"
         assert "answer" not in result
@@ -475,13 +481,16 @@ async def test_scope_is_frozen_and_rechecked_across_provider_wait(tmp_path):
     from ai_memory.store import Store
 
     db = tmp_path / "db"
-    cid, _, _ = seed_archive(db)
+    seed_archive(db)
 
     class Changed(SimulatedNotebook):
         async def ask(self, question, source_ids=None):
             assert source_ids == ["owned-source"]
             with Store(db) as store, store.connection:
-                store.connection.execute("UPDATE conversations SET consent=0 WHERE id=?", (cid,))
+                store.connection.execute(
+                    "UPDATE source_receipts SET remote_state='missing' WHERE source_id=?",
+                    (source_ids[0],),
+                )
             return {
                 "answer": "SYNTHETIC_PRIVATE_ANSWER",
                 "references": [
@@ -535,3 +544,85 @@ def test_one_segment_scan_for_multiple_citations(tmp_path):
     assert [source.get("message_ids") for source in sources] == [[mids[0]], [mids[1]], None]
     scans = [sql for sql in statements if "FROM messages m JOIN segment_messages" in sql]
     assert len(scans) == 1
+
+
+async def test_goals_tool_uses_one_masked_verified_query_and_one_status(tmp_path, monkeypatch):
+    from ai_memory.gateway import GOALS_TOOL, MemoryApplication
+    from ai_memory.store import Store
+
+    db = tmp_path / "goals.db"
+    seed_archive(db)
+    remote = SimulatedNotebook()
+    app = MemoryApplication(db, adapter=remote)
+    original = Store.status
+    calls = []
+
+    def status(self, **kwargs):
+        calls.append(1)
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(Store, "status", status)
+    result = await app.call(GOALS_TOOL, {"topic": "Memory DB_PASSWORD=synthetic-value"})
+    assert result["sources"] and result["provenance"] == "untrusted_history"
+    assert len(remote.queries) == len(calls) == 1
+    query, ids = remote.queries[0]
+    assert ids == ["owned-source"]
+    assert "explicitly expressed or approved by the user" in query
+    assert "superseded decisions" in query and "unapproved agent suggestions" in query
+    assert "synthetic-value" not in query
+    assert (await app.call(GOALS_TOOL, {"topic": " "}))["error"]["code"] == "invalid_question"
+    assert len(remote.queries) == 1
+
+
+async def test_session_reuses_connection_and_invalidates_changed_storage(tmp_path, monkeypatch):
+    from ai_memory import gateway
+    from ai_memory.store import Store
+
+    db = tmp_path / "reused.db"
+    seed_archive(db)
+    storage = tmp_path / "storage.json"
+    storage.write_text("synthetic")
+    with Store(db) as store:
+        store.set_setting("storage_path", str(storage))
+
+    opened = []
+    closed = []
+
+    class Remote(SimulatedNotebook):
+        def __init__(self, notebook_id, storage_path):
+            super().__init__()
+            self.notebook_id = notebook_id
+            self.connected = False
+            opened.append(self)
+
+        async def list_sources(self):
+            self.connected = True
+            return await super().list_sources()
+
+        async def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(gateway, "NotebookLMAdapter", Remote)
+    app = gateway.MemoryApplication(db, reuse_connection=True)
+    try:
+        for _ in range(2):
+            assert (await app.call("memory_ask", {"question": "Earlier?"}))["sources"]
+        assert len(opened) == 1 and len(opened[0].queries) == 2 and not closed
+        # Routine SDK cookie refresh must not evict the connection.
+        storage.write_text("refreshed cookies")
+        assert (await app.call("memory_ask", {"question": "Earlier?"}))["sources"]
+        assert len(opened) == 1 and not closed
+        # An archive-managed login updates the verified identity.
+        with Store(db) as store:
+            store.set_setting("notebook_identity", {"account": "synthetic", "checked_at": "now"})
+        assert (await app.call("memory_ask", {"question": "Earlier?"}))["sources"]
+        assert len(opened) == 2 and closed == [opened[0]]
+        replacement = tmp_path / "another-storage.json"
+        replacement.write_text("synthetic")
+        with Store(db) as store:
+            store.set_setting("storage_path", str(replacement))
+        assert (await app.call("memory_ask", {"question": "Earlier?"}))["sources"]
+        assert len(opened) == 3 and closed == opened[:2]
+    finally:
+        await app.close()
+    assert closed == opened

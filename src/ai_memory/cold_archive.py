@@ -96,7 +96,7 @@ def stage_unassigned(builder):
             return
         rows = db.execute(
             f"""SELECT m.id,m.conversation_id,m.text FROM messages m JOIN conversations c ON c.id=m.conversation_id
-            WHERE c.consent=1 AND {_AGE} AND NOT EXISTS (
+            WHERE {_AGE} AND NOT EXISTS (
                 SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
                 WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""",
             (f"-{IDLE_DAYS} days",),
@@ -182,7 +182,7 @@ def stage_replacement(builder, inventory):
                     SELECT s.id,s.word_count,COALESCE(({_AGE}),0) AS cold
                     FROM segments s JOIN segment_messages sm ON s.id=sm.segment_id
                     JOIN messages m ON m.id=sm.message_id JOIN conversations c ON c.id=m.conversation_id
-                    WHERE s.state IN ('sealed','open') AND c.consent=1
+                    WHERE s.state IN ('sealed','open')
                     AND NOT EXISTS (SELECT 1 FROM sync_jobs j WHERE j.segment_id=s.id
                         AND j.stage NOT IN ('done','superseded'))
                 )
@@ -230,22 +230,3 @@ def ready_replacements(store, plan):
     ]
     if {row["segment_id"] for row in mappings} == children:
         return {row["source_id"] for row in mappings}
-
-
-def cancel_for_revocation(store, affected):
-    """Cancel a regrouping that would otherwise resume after consent was removed."""
-    plan = store.get_setting(PLAN)
-    if not plan or not set(affected).intersection(plan["parents"] + plan["children"]):
-        return affected
-    db = store.connection
-    db.execute("DELETE FROM settings WHERE key=?", (PLAN,))
-    if cleanup := plan.get("cleanup"):
-        # Do not continue deleting predecessors on behalf of an invalidated plan.
-        db.execute(
-            "UPDATE sync_jobs SET stage='done',old_source_ids='[]',error=NULL WHERE id=?",
-            (cleanup,),
-        )
-        return affected
-    # Parents still cover the original history. Retain any remote copies already
-    # written by this interrupted plan and rebuild consented material as needed.
-    return list(dict.fromkeys([*affected, *plan["children"]]))

@@ -69,9 +69,13 @@ async def smoke(tmp):
             raise RuntimeError("Expected one new Stop hook for review")
         result = await call(3, "mcpServerStatus/list", {"serverName": "ai_memory"})
         servers = [s for s in result["data"] if s.get("pluginId") == PLUGIN_ID]
-        if len(servers) != 1 or set(servers[0]["tools"]) != {"memory_ask", "memory_status"}:
-            raise RuntimeError("Installed plugin did not provide both MCP tools")
-        print("PASS: installed plugin, native Stop awaiting review, both local MCP tools available")
+        if len(servers) != 1 or set(servers[0]["tools"]) != {
+            "memory_ask",
+            "memory_ask_all_goals_requirements",
+            "memory_status",
+        }:
+            raise RuntimeError("Installed plugin did not provide all MCP tools")
+        print("PASS: installed plugin, native Stop awaiting review, all local MCP tools available")
     finally:
         proc.terminate()
         await proc.wait()

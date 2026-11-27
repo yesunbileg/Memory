@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-memory-archive"
-version = "0.1.0"
+version = "0.9.11"
 description = "Lossless AI conversation archive with NotebookLM memory and MCP"
 requires-python = ">=3.12"
 license = "MIT"

@@ -53,11 +53,13 @@ account and saved Brave profile. Each archive has its own auth file after
 setup or renewal, unless you explicitly configured a storage path.
 
 The extension's **Sync now** saves selected web chats in the local archive.
-Once a notebook is connected, new captures are automatically queued for NotebookLM.
-Browser imports and local hooks wake a publisher even when `mem` is closed.
+Every archived chat follows the same publication rules. When a notebook is
+connected and automatic sync is enabled, browser imports and local hooks wake a
+publisher even when `mem` is closed.
 The publisher batches nearby changes and masks recognized credentials before upload.
-`mem` shows upload progress, readiness and cleanup. Use `ai-memory sync` for a
-manual run. `/auto off` pauses automatic publication for this archive.
+`mem` shows upload progress, readiness and cleanup. Use `/sync` in `mem` or
+`ai-memory sync` for a manual run. `/auto off` pauses automatic publication for
+this archive.
 Type a question and press Enter for NotebookLM's reply. Use `/chats` to browse
 the local archive.
 
@@ -85,7 +87,9 @@ systemctl --user enable --now ai-memory-sync.timer
 
 The default archive is `data/conversations.sqlite`. Use `--db PATH` **before** the subcommand to select another archive. Import prints the conversation IDs, and `preview ID` shows the masked text. Before upload, recognized API keys, password/token assignments, cookies, JWTs and private-key payloads are replaced with the same number of `*` characters. Surrounding text and line breaks are preserved. SQLite and local Markdown exports retain the originals. The upload gate blocks residual secrets and recognized quoted values whose boundaries cannot be determined. Exports and snapshots use private temporary files. Detection cannot identify every possible secret.
 
-The CLI also supports syncing a subset through its per-chat consent settings. Confirming `/sync-all` approves the entire local archive at the start of sync, including previously revoked chats and future continuations. See [consent, backup and restore](docs/consent-backup.md).
+Existing archives upgrade locally when opened by the new version. Previously
+withheld chats follow the same publication rules as other archived chats after
+the upgrade. See [local review, backup and restore](docs/archive-backup.md).
 
 Incremental scans checkpoint the selected path's file inventory. Codex and OpenCode JSON sessions are imported independently: a broken session remains retryable while healthy sessions continue. OpenCode JSON checkpoints also observe message/part changes; SQLite remains preferred when present. Native-ID upserts preserve partial snapshots and reject known older revisions. Direct Codex directory reads reconcile overlapping snapshots and can fall back to individual files if batch serialization overflows. This version does not implement upstream message deletion/tombstones. Collectors retain user text, assistant text/code and explicit visible progress/summary parts; unknown or hidden reasoning, system prompts, tool events, logs and attachments are excluded. A complete Codex user message containing one reserved internal goal wrapper is excluded; mixed or quoted wrappers retain their visible text. Missing timestamps and model names remain unknown.
 
@@ -126,7 +130,7 @@ Create a new empty notebook specifically for the test and copy its ID. The live 
 
 ## Experimental incremental Google Docs sync
 
-An optional path can publish approved Memory segments through Google Docs and send later text edits instead of re-uploading each full Markdown segment. The first migration is still a full upload. This uses the signed-in Docs editor's **private, undocumented web save endpoint**, not the official Google Docs REST API, and may break when Google changes its editor. It is not enabled by default. Review the [Mongolian setup, byte-count scope and recovery limitations](docs/google-docs-incremental-sync.mn.md) before enabling it.
+An optional path can publish Memory segments through Google Docs and send only later text edits. The first migration is still a full upload. This path uses the signed-in Docs editor's **private, undocumented web save endpoint** and may break when Google changes its editor. Enable it explicitly after reading the [Mongolian setup, byte-count scope and recovery limitations](docs/google-docs-incremental-sync.mn.md).
 
 The sync uses the archive's existing Google sign-in in a private headless Brave process. It runs with the desktop browser closed and opens no desktop tabs. For a wheel installation that omits development dependencies, install the `docs` extra to provide Playwright.
 
@@ -134,7 +138,7 @@ The sync uses the archive's existing Google sign-in in a private headless Brave 
 
 Codex uses **one local plugin** for its Stop hook and the memory MCP server. Nothing is published to a plugin directory. Follow the [local installation instructions](docs/local-hooks.md) on the computer where Codex runs. OpenCode uses its own session-idle integration and [MCP configuration](docs/agent-instructions.md). Both capture only the session that fired the event, into the initialized archive. A configured notebook and enabled automatic sync allow the capture to wake the publication worker. Use the explicit import commands above for older sessions.
 
-Tools: `memory_status` reports archive/sync/connectivity state; `memory_ask` asks NotebookLM using only committed archive sources. The gateway returns verified conversation/message IDs in structured `sources` only when exact citation headings can be verified. IDs in free-form answer text remain unverified. A known source with no verifiable message ID keeps a source-level reference. If a citation is outside the request’s approved source set, the response does not disclose the answer or passage. Historical instructions remain historical context; current user instructions take priority.
+`memory_status` reports archive, sync and connectivity state. `memory_ask` asks NotebookLM using only committed archive sources. `memory_ask_all_goals_requirements({"topic":"..."})` retrieves user goals, current and superseded requirements, and distinguishes unapproved agent proposals in one cited query. The gateway returns conversation and message IDs in structured `sources` only when it verifies an exact archive message. IDs in free-form answer text remain unverified. A known source with no verifiable message ID keeps a source-level reference. A citation outside the request’s verified source set causes an error with the answer and passage withheld. Historical instructions remain historical context. Current user instructions take priority. See [agent instructions](docs/agent-instructions.md) for the verified Custom chat setup and timing diagnostics.
 
 ## Web capture
 
@@ -157,7 +161,7 @@ Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in **AI
 | Check the **Recents** heading on ChatGPT | Includes all ordinary Recent chats in that account on each sync, including newly added ones. Pinned, project, GPT, locked and archived chats are excluded from this group. Turning it off keeps individual selections. |
 | Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |
 | Uncheck an item or turn off List mode | Unchecking removes that explicit selection. Turning the mode off hides the controls without changing the list. Neither action deletes archived content. |
-| Enable the provider and click **Sync now** | Fetches the saved items into the paired **local SQLite archive**. Enabled automatic checks use the same saved list. Choosing an item does not start a sync or approve a Google upload. |
+| Enable the provider and click **Sync now** | Fetches the saved items into the paired **local SQLite archive**. Scheduled capture uses the same saved list when enabled. The archive's own sync setting controls automatic publication to NotebookLM. |
 
 Existing selections keep their account and workspace restrictions on upgrade. In Brave, keep a signed-in provider tab open for each container you want to sync. You can select different chats or projects on each account, then click **Sync now** once. The extension looks for matching signed-in tabs across browser windows and reports when a saved account needs a tab. The popup shows accounts checked, chats checked and chats saved while capture runs. A provider switch alone does not authorize capture. If the account or item cannot be verified, it cannot be added. Sync reports incomplete provider listings rather than treating them as a complete project. An empty list captures nothing.
 
@@ -165,7 +169,7 @@ After the archive acknowledges a ChatGPT or Claude chat, later runs can skip its
 
 **Stop sync** cancels the current sync and any remaining batches. Chats already saved stay in the local archive. The regular automatic schedule remains in effect unless you pause it in Settings.
 
-Run `/sync-all` in `mem` to send archived chats to NotebookLM. The popup’s **Sync now** saves selected web chats to the local archive. Private provider interfaces can change. Offline verification uses synthetic data. See the [Mongolian setup guide](docs/extension-setup.mn.md).
+Run `/sync` in `mem` to publish archived chats to NotebookLM. Private provider interfaces can change. Offline verification uses synthetic data. See the [Mongolian setup guide](docs/extension-setup.mn.md).
 
 ## Reliability and scope
 

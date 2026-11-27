@@ -1,4 +1,4 @@
-"""Version 2 archive metadata. Existing source mappings start unverified."""
+"""Archive migrations and immutable outbound revision metadata."""
 
 import hashlib
 import hmac
@@ -10,7 +10,9 @@ from .archive_files import _publish_database, legacy_bytes
 from .diagnostics import PublicInputError
 from .privacy import MASKING_POLICY, snapshot_sha256
 
-MIGRATION = """
+SCHEMA_VERSION = 3
+
+_REVISION_SCHEMA = """
 CREATE TABLE outbound_revisions(segment_id TEXT NOT NULL REFERENCES segments(id),
  revision INTEGER NOT NULL, masking_policy INTEGER NOT NULL, sha256 TEXT NOT NULL,
  snapshot BLOB NOT NULL, PRIMARY KEY(segment_id,revision));
@@ -18,13 +20,10 @@ CREATE TABLE source_receipts(source_id TEXT PRIMARY KEY,segment_id TEXT NOT NULL
  masking_policy INTEGER NOT NULL,sha256 TEXT NOT NULL,verified_at REAL NOT NULL,
  remote_state TEXT NOT NULL DEFAULT 'ready');
 CREATE TABLE legacy_job_snapshots(job_id INTEGER PRIMARY KEY REFERENCES sync_jobs(id),title TEXT NOT NULL,snapshot BLOB NOT NULL);
-CREATE TABLE retained_sources(source_id TEXT PRIMARY KEY);
 CREATE TABLE registered_sources(source_id TEXT PRIMARY KEY);
-CREATE TABLE retained_segments(segment_id TEXT PRIMARY KEY);
 ALTER TABLE sync_jobs ADD COLUMN prior_source_ids TEXT;
 ALTER TABLE sync_jobs ADD COLUMN failure_phase TEXT;
 INSERT INTO settings(key,value) VALUES('receipt_key',json_quote(lower(hex(randomblob(32)))));
-PRAGMA user_version=2;
 """
 
 
@@ -32,14 +31,14 @@ def initialize(store, original_schema):
     """Serialize first open and migrations; back up an existing v1 before DDL."""
     db = store.connection
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version == 2:
+    if version == SCHEMA_VERSION:
         return
-    if version > 2:
+    if version > SCHEMA_VERSION:
         raise PublicInputError("Archive schema is newer than this application")
     with db:
         db.execute("BEGIN IMMEDIATE")
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if version == 2:
+        if version == SCHEMA_VERSION:
             return
         if version == 0:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
@@ -58,38 +57,30 @@ def initialize(store, original_schema):
                 _publish_database(prior, dest)
             finally:
                 prior.close()
-        else:
+        elif version != 2:
             raise PublicInputError("Unsupported archive schema")
-        for statement in MIGRATION.split(";"):
-            if statement.strip():
-                db.execute(statement)
-        for job in db.execute(
-            "SELECT * FROM sync_jobs WHERE stage NOT IN ('done','superseded','cleanup')"
-        ):
-            data = legacy_bytes(store, job)
-            if data is not None:
-                db.execute(
-                    "INSERT INTO legacy_job_snapshots VALUES(?,?,?)",
-                    (job["id"], job["title"], data),
-                )
-
-
-def enable_default_publication(db):
-    """Migrate the old upload queue once, including archives restored from backup."""
-    marker = "default_publication_v3"
-    if db.execute("SELECT 1 FROM settings WHERE key=?", (marker,)).fetchone():
-        return
-    with db:
-        inserted = db.execute("INSERT OR IGNORE INTO settings VALUES(?, 'true')", (marker,))
-        if inserted.rowcount:
-            # Retained segment membership records a prior explicit revocation.
-            db.execute("""
-                UPDATE conversations SET consent=1 WHERE consent=0 AND NOT EXISTS (
-                    SELECT 1 FROM messages m JOIN segment_messages sm ON sm.message_id=m.id
-                    JOIN retained_segments rs ON rs.segment_id=sm.segment_id
-                    WHERE m.conversation_id=conversations.id
-                )
-                """)
+        if version in (0, 1):
+            for statement in _REVISION_SCHEMA.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            for job in db.execute(
+                "SELECT * FROM sync_jobs WHERE stage NOT IN ('done','superseded','cleanup')"
+            ):
+                data = legacy_bytes(store, job)
+                if data is not None:
+                    db.execute(
+                        "INSERT INTO legacy_job_snapshots VALUES(?,?,?)",
+                        (job["id"], job["title"], data),
+                    )
+        if version in (1, 2):
+            # The retired assignments stay as history. The normal builder will
+            # assign messages that no longer belong to any active segment.
+            if any(row[1] == "consent" for row in db.execute("PRAGMA table_info(conversations)")):
+                db.execute("ALTER TABLE conversations DROP COLUMN consent")
+            db.execute("DROP TABLE IF EXISTS retained_segments")
+            db.execute("DROP TABLE IF EXISTS retained_sources")
+            db.execute("DELETE FROM settings WHERE key='default_publication_v3'")
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 def receipt_marker(store, segment_id, revision):

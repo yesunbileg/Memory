@@ -46,7 +46,6 @@ async def test_codex_hook_docs_memory_citation_and_backup(tmp_path):
     capture(db, origin, "synthetic-session", base)
     with Store(db) as store:
         chat_id = store.connection.execute("SELECT id FROM conversations").fetchone()[0]
-        store.approve(chat_id)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
         )

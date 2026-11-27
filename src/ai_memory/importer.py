@@ -129,7 +129,6 @@ def collect_into(
     platform: str,
     path: Path,
     account: str = "local",
-    consent: bool | None = None,
 ) -> dict:
     from .collectors import codex_rollout_files, codex_thread_metadata, collect, selected_source
 
@@ -190,12 +189,7 @@ def collect_into(
             if platform == "codex"
             else None
         )
-        if (
-            checkpoint
-            and checkpoint[0] == fingerprint
-            and not consent
-            and (platform != "codex" or known_ids)
-        ):
+        if checkpoint and checkpoint[0] == fingerprint and (platform != "codex" or known_ids):
             # Refresh indexed titles without parsing unchanged JSONL. Pre-metadata
             # checkpoints are read once to establish this file's conversation IDs.
             if known_ids:
@@ -229,9 +223,7 @@ def collect_into(
                     failures.append(_file_failure(relative, "source_changed"))
                     continue
                 accepted = [
-                    store.ingest(
-                        c, consent=consent, reconcile_order=True, codex_snapshot=platform == "codex"
-                    )
+                    store.ingest(c, reconcile_order=True, codex_snapshot=platform == "codex")
                     for c in conversations
                 ]
                 store.connection.execute(

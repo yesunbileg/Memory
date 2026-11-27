@@ -311,7 +311,6 @@ async def trace(store, folder, notebook, docs, report, phase, *, repair=False):
     origin = folder / "rollout-field-log.jsonl"
     capture(store.path, origin, run_id, seed)
     chat = store.connection.execute("SELECT id FROM conversations").fetchone()[0]
-    store.approve(chat)
     await phase("seed")
     seeded = await publication_cycle(store, report, "seed_publication", docs)
     first = source_pair(store)

@@ -1,4 +1,4 @@
-"""Public, offline consent and archive recovery contracts (synthetic data only)."""
+"""Public, offline preview and archive recovery contracts (synthetic data only)."""
 
 import hashlib
 import json
@@ -49,7 +49,7 @@ def test_prune_removes_only_byte_identical_terminal_work_files(tmp_path):
         )
 
 
-def test_atomic_approval_preview_revocation_and_private_fields(tmp_path, capsys):
+def test_preview_masks_private_fields_without_changing_archive(tmp_path, capsys):
     path = tmp_path / "archive.sqlite"
     secret_text = '  Монгол 🙂\r\n\rcode\npassword="""test\r\nkey"""  '
     with Store(path) as store:
@@ -61,14 +61,9 @@ def test_atomic_approval_preview_revocation_and_private_fields(tmp_path, capsys)
                 external_id="private-native",
                 messages=[dict(conversation()["messages"][0], text=secret_text)],
             ),
-            consent=False,
         )
-        b = store.ingest(conversation(account="separate"), consent=True)
-    cli(path, capsys, "approve", a, "missing", code=1)
-    with Store(path) as store:
-        assert not store.get_conversation(a)["consent"]
-        assert store.get_conversation(b)["consent"]
-    assert [c["id"] for c in cli(path, capsys, "pending")["conversations"]] == [a]
+        store.ingest(conversation(account="separate"))
+        before = tuple(store.connection.iterdump())
     preview = cli(path, capsys, "preview", a)["segments"][0]
     assert not any(
         x in preview["text"]
@@ -82,29 +77,12 @@ def test_atomic_approval_preview_revocation_and_private_fields(tmp_path, capsys)
     )
     assert 'password="""****\r\n***"""' in preview["text"]
     assert hashlib.sha256(preview["text"].encode()).hexdigest() == preview["sha256"]
-    assert cli(path, capsys, "approve", a, a)["approved"] == [a]
     with Store(path) as store:
+        assert tuple(store.connection.iterdump()) == before
         builder = SegmentBuilder(store)
         sid = builder.build()[0]["id"]
         text = builder.render_outbound(sid)
         assert text == preview["text"]
-        assert store.get_conversation(a)["messages"][0]["text"] == secret_text
-        with store.connection:
-            store.connection.execute(
-                "INSERT INTO source_map VALUES(?,?,?)", (sid, "synthetic-owned", 1)
-            )
-    cli(path, capsys, "revoke", a)
-    with Store(path) as store:
-        assert (
-            store.connection.execute("SELECT source_id FROM retained_sources").fetchone()[0]
-            == "synthetic-owned"
-        )
-        assert (
-            store.connection.execute("SELECT state FROM segments WHERE id=?", (sid,)).fetchone()[0]
-            == "retired"
-        )
-        other = SegmentBuilder(store).build()[0]["id"]
-        assert a not in SegmentBuilder(store).render_outbound(other)
         assert store.get_conversation(a)["messages"][0]["text"] == secret_text
 
 
@@ -128,7 +106,7 @@ def test_migration_v1_preserves_jobs_and_backup_restores_snapshot(tmp_path, caps
     (tmp_path / "sync").mkdir()
     (tmp_path / "sync" / title).write_bytes(text.encode())
     with Store(path) as store:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert store.connection.execute("SELECT COUNT(*) FROM source_receipts").fetchone()[0] == 0
     backup = tmp_path / "backup.sqlite"
     cli(path, capsys, "backup", backup)
@@ -151,7 +129,7 @@ def test_exports_are_scoped_and_never_overwrite_user_files(tmp_path, capsys):
     paths = [tmp_path / f"{name}.sqlite" for name in ("one", "two")]
     for path in paths:
         with Store(path) as store:
-            store.ingest(conversation(), consent=True)
+            store.ingest(conversation())
     out = [Path(cli(p, capsys, "build")["output"]) for p in paths]
     assert out[0] != out[1]
     (out[0] / "SEG-001.md").write_text("handwritten")
@@ -171,6 +149,7 @@ def test_v1_job_can_reconstruct_original_bytes_without_external_files(tmp_path):
     )
     with sqlite3.connect(path) as db:
         db.executescript(SCHEMA)
+        db.execute("ALTER TABLE conversations ADD COLUMN consent INTEGER NOT NULL DEFAULT 1")
         # Frozen rows and expected UTF-8 digest came from the v1 writer at b5b86a5.
         # Today's build/ingest/renderer must not rewrite the legacy input or oracle.
         for table in (
@@ -184,7 +163,7 @@ def test_v1_job_can_reconstruct_original_bytes_without_external_files(tmp_path):
         ):
             for row in fixture["rows"][table]:
                 db.execute(
-                    f"INSERT INTO {table} VALUES ({','.join('?' for _ in row)})",
+                    f"INSERT INTO {table} ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
                     tuple(row.values()),
                 )
     with Store(path) as store:
@@ -199,14 +178,13 @@ def test_v1_job_can_reconstruct_original_bytes_without_external_files(tmp_path):
     with Store(dest) as store:
         restored = store.get_conversation(fixture["conversation_id"])
         assert restored["messages"][0]["text"] == fixture["text"]
-        assert restored["consent"]
 
 
 def test_unprovable_pending_backup_never_publishes_an_incomplete_file(tmp_path):
     from ai_memory.archive_files import backup_archive
 
     with Store(tmp_path / "archive.db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         row = SegmentBuilder(store).build()[0]
         with store.connection:
             store.connection.execute(
@@ -219,17 +197,81 @@ def test_unprovable_pending_backup_never_publishes_an_incomplete_file(tmp_path):
         assert not path.exists()
 
 
-def test_active_sync_cannot_race_successful_revoke(tmp_path):
-    from ai_memory.archive_lock import archive_lock
+@pytest.mark.parametrize("restore_old_backup", [False, True])
+async def test_v2_revoked_chat_returns_to_normal_sync_and_mcp(tmp_path, restore_old_backup):
+    from test_sync import Remote
 
-    path = tmp_path / "archive.db"
-    with Store(path) as store, Store(path) as other:
-        cid = store.ingest(conversation(), consent=True)
-        with archive_lock(other.path), pytest.raises(RuntimeError):
-            store.revoke_many([cid])
-        assert store.get_conversation(cid)["consent"]
-        store.revoke_many([cid])
-        assert not store.get_conversation(cid)["consent"]
+    from ai_memory.archive_files import restore_archive
+    from ai_memory.gateway import MemoryApplication
+    from ai_memory.sync import SyncEngine
+
+    class Notebook(Remote):
+        async def ask(self, question, source_ids):
+            assert question == "What was archived?"
+            assert len(source_ids) == 1
+            self.asked_source = source_ids[0]
+            return {"answer": "Synthetic answer", "references": [{"source_id": self.asked_source}]}
+
+    path = tmp_path / "old.sqlite"
+    remote = Notebook()
+    chat = conversation()
+    chat["messages"][0]["text"] = "Formerly withheld synthetic history"
+    with Store(path) as store:
+        chat_id = store.ingest(chat)
+        store.set_setting("notebook_id", "synthetic-notebook")
+        engine = SyncEngine(store, SegmentBuilder(store), remote, store.workspace / "sync")
+        assert (await engine.run_once())["completed"] == 1
+        old_segment, old_source = store.connection.execute(
+            "SELECT segment_id,source_id FROM source_map"
+        ).fetchone()
+        with store.connection as db:
+            # Reproduce the state left by the removed v2 command. A portable
+            # backup also carries these fields, and can be restored without a provider.
+            db.execute("ALTER TABLE conversations ADD COLUMN consent INTEGER NOT NULL DEFAULT 1")
+            db.execute("UPDATE conversations SET consent=0 WHERE id=?", (chat_id,))
+            db.execute("CREATE TABLE retained_segments(segment_id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE retained_sources(source_id TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO retained_segments VALUES(?)", (old_segment,))
+            db.execute("INSERT INTO retained_sources VALUES(?)", (old_source,))
+            db.execute("UPDATE segments SET state='retired' WHERE id=?", (old_segment,))
+            db.execute("INSERT INTO settings VALUES('default_publication_v3','true')")
+            db.execute("PRAGMA user_version=2")
+
+    initial_operations = len(remote.operations)
+    if restore_old_backup:
+        restored = tmp_path / "restored.sqlite"
+        restore_archive(restored, path)
+        with sqlite3.connect(path) as backup:
+            assert backup.execute("PRAGMA user_version").fetchone()[0] == 2
+        path = restored
+    with Store(path, existing=True) as store:
+        db = store.connection
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert not db.execute(
+            "SELECT 1 FROM pragma_table_info('conversations') WHERE name='consent'"
+        ).fetchone()
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name IN ('retained_segments','retained_sources')"
+        ).fetchone()
+        assert store.get_setting("default_publication_v3") is None
+        assert store.status()["unassigned_messages"] == len(chat["messages"])
+        assert store.auto_sync_due() == 0
+        assert len(remote.operations) == initial_operations
+        migrated = tuple(db.iterdump())
+
+    with Store(path, existing=True) as store:
+        assert tuple(store.connection.iterdump()) == migrated
+        engine = SyncEngine(store, SegmentBuilder(store), remote, store.workspace / "sync")
+        assert (await engine.run_once())["status"]["ready_conversations"] == 1
+        assert (await engine.run_once())["completed"] == 0
+        assert [operation for operation, _ in remote.operations[initial_operations:]] == [
+            "upload",
+            "ready",
+        ]
+    answer = await MemoryApplication(path, adapter=remote).ask("What was archived?")
+    assert answer["sources"][0]["source_id"] == remote.asked_source != old_source
+    assert "Formerly withheld synthetic history" in remote.sources[remote.asked_source]["text"]
 
 
 @pytest.mark.parametrize("args", [["status"], ["connect"]])
@@ -248,7 +290,7 @@ def test_missing_remote_hold_is_portable_without_a_fake_snapshot(tmp_path):
     from ai_memory.archive_files import backup_archive, restore_archive
 
     with Store(tmp_path / "original.db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         seg = SegmentBuilder(store).build()[0]
         with store.connection:
             store.connection.execute(
@@ -265,7 +307,7 @@ def test_backup_rejects_wrong_outbound_filename_digest(tmp_path):
     from ai_memory.archive_files import backup_archive
 
     with Store(tmp_path / "original.db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         builder = SegmentBuilder(store)
         seg = builder.build()[0]
         with store.connection:
@@ -301,7 +343,7 @@ def test_unmaskable_derived_title_never_blocks_safely_masked_message(tmp_path):
     packet = conversation(title=title)
     packet["messages"][0]["text"] = "Сайн байна уу 🙂\r\npassword = 'fixture-value'\r  "
     with Store(tmp_path / "archive.db") as store:
-        cid = store.ingest(packet, consent=True)
+        cid = store.ingest(packet)
         builder = SegmentBuilder(store)
         sid = builder.build()[0]["id"]
         outward = builder.render_outbound(sid)
@@ -331,8 +373,8 @@ def test_outbound_masking_failure_is_limited_to_one_message(tmp_path, monkeypatc
         first["messages"][0]["text"] = broken
         second = conversation(external_id="other-message")
         second["messages"][0]["text"] = other
-        first_id = store.ingest(first, consent=True)
-        store.ingest(second, consent=True)
+        first_id = store.ingest(first)
+        store.ingest(second)
         builder = SegmentBuilder(store)
         outbound = builder.render_outbound(builder.build()[0]["id"])
         assert "\n***\n" in outbound and other in outbound

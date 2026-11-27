@@ -336,7 +336,7 @@ async def test_expression_privacy_boundary_keeps_original_and_masks_or_blocks_up
     with Store(tmp_path / "synthetic.db") as store:
         packet = conversation()
         packet["messages"][0]["text"] = text
-        conversation_id = store.ingest(packet, consent=True)
+        conversation_id = store.ingest(packet)
         remote = Remote()
         result = await SyncEngine(
             store, SegmentBuilder(store), remote, tmp_path / "upload-artifacts"
@@ -439,10 +439,10 @@ async def test_incomplete_and_multiline_values_obey_the_upload_boundary(tmp_path
     with Store(tmp_path / "synthetic.db") as store:
         packet = conversation()
         packet["messages"][0]["text"] = text
-        conversation_id = store.ingest(packet, consent=True)
+        conversation_id = store.ingest(packet)
         other = conversation(external_id="unrelated")
         other["messages"][0]["text"] = "Unrelated synthetic conversation"
-        store.ingest(other, consent=True)
+        store.ingest(other)
         remote = Remote()
         result = await SyncEngine(
             store, SegmentBuilder(store), remote, tmp_path / "upload-artifacts"

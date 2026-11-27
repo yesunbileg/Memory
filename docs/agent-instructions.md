@@ -1,9 +1,10 @@
 # Using AI Memory with Codex and OpenCode
 
 Install the project with `uv sync --frozen`. Configure the archive and NotebookLM
-notebook with `ai-memory init`, then approve, build, and sync the conversations
-you want NotebookLM to receive. Install optional login support with
-`uv sync --frozen --extra login` and use `notebooklm login --browser-cookies brave` to import the
+notebook with `ai-memory init`. Capture the conversations you want to archive,
+then use `ai-memory sync` to publish them to the configured notebook. Install
+optional login support with `uv sync --frozen --extra login` and use
+`notebooklm login --browser-cookies brave` to import the
 session already signed in to NotebookLM in Brave; use `chrome` or `firefox`
 for those browsers. No separate Chromium installation is required. Run login
 as the browser's operating-system user, and use the same `NOTEBOOKLM_HOME` or
@@ -44,9 +45,20 @@ Add these instructions to the agent's project instructions:
 an empty archive never expands the query to unrelated notebook sources. Its
 answer includes `sources` and `sync_status`. Source-level citations are retained
 even when no local message can be verified. Conversation and message IDs appear
-only when a returned passage includes an exact archive heading and the local
+only when a returned passage identifies a verified archive message and the local
 segment still matches the uploaded revision. Missing configuration, missing
 browser authentication, and empty synced sources return explicit errors.
+
+`memory_ask_all_goals_requirements({"topic":"Memory project"})` sends one
+source-restricted question for all user-stated or user-approved goals and
+requirements, including superseded decisions and unapproved agent proposals
+as distinct categories. It uses the same masking, citation verification and
+output schema as `memory_ask`. Completeness depends on the available sources.
+
+A stdio MCP session reuses its NotebookLM connection until the notebook or
+authentication changes; inventory and citation checks still run on every
+question. To diagnose timings, launch the MCP server with `AI_MEMORY_TRACE=1`.
+Content-free timing events go to stderr, never to MCP stdout.
 
 Offline contract tests simulate Google's HTTP service and exercise the real
 notebooklm-py SDK and MCP protocol. They do not prove live NotebookLM retrieval
@@ -55,7 +67,7 @@ live run.
 
 ## Disclosure and recovery
 
-The CLI commands `ask` and `check` use the same application handlers as the two
+The CLI commands `ask` and `check` use the same application handlers as the three
 stdio tools. `memory_status({})` checks provider connectivity without sending
 a question. Local counts and pending jobs, the last confirmed managed source
 states (`last_verified_remote`), and suggested actions are separate. An
@@ -63,14 +75,18 @@ inventory failure does not prove deletion. `ai-memory status` reads that
 record locally without contacting Google.
 
 `memory_ask({"question":"Өмнөх шийдвэр юу байсан бэ?"})` sends the question
-(1–4,000 characters), a fixed research prompt and selected source IDs to
-Google. Google may record it in this notebook's chat history. No archive
+(1–4,000 characters) and selected source IDs to Google. Run
+`python scripts/configure_memory_chat.py --db PATH` once to save and read back
+the existing Custom persona plus the archive's source rules (Default length).
+If the Custom settings are edited manually, rerun this setup or restart after
+changing the notebook authentication. After verification the ordinary query contains no repeated instruction prefix;
+without a verified setup, the previous fixed research prompt is retained. Google may record it in this notebook's chat history. No archive
 transcript, browser cookie or credential is appended to the question. The
-per-query prompt asks for citations, relevant dates, conflicting decisions,
+source rules ask for citations, relevant dates, conflicting decisions,
 insufficient evidence and a reply in the question's language. It is ordinary
 query text, **not** a system-role instruction or a security boundary.
 
-Only consented, policy-attested, confirmed-ready revisions are eligible. The
+Only policy-attested, confirmed-ready revisions are eligible. The
 server freezes that selection before the query and rechecks it before
 disclosure. If any citation is unknown, outside that selection or malformed,
 or there are no citations, `isError` is true and `error.code` is
@@ -95,5 +111,4 @@ cleanup of known-owned copies.
 After a managed source disappears, retrieval excludes it and sync pauses
 publication of that segment. To deliberately put it back, inspect the local
 archive, run `ai-memory --db PATH republish SEGMENT_ID`, then `sync` against
-the same database. This is separate from consent and does not restore revoked
-conversations.
+the same database.

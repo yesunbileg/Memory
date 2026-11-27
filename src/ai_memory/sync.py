@@ -73,7 +73,7 @@ def republish(store, segment_id):
         )
     return {
         "republish_authorized": segment_id,
-        "action": "Run sync to publish the approved revision.",
+        "action": "Run sync to publish the current revision.",
     }
 
 
@@ -414,7 +414,7 @@ class SyncEngine:
             (segment, revision),
         ).fetchone()
         if not snapshot or snapshot["masking_policy"] != MASKING_POLICY:
-            raise SnapshotError("Missing approved snapshot for Google Docs")
+            raise SnapshotError("Missing masked snapshot for Google Docs")
         text = bytes(snapshot["snapshot"]).decode("utf-8")
         if (
             snapshot_sha256(text) != snapshot["sha256"]
@@ -435,12 +435,7 @@ class SyncEngine:
             for parent in plan["parents"]:
                 quota_predecessors.extend(self._old_sources(parent))
         replaceable = [
-            source_id
-            for source_id in dict.fromkeys(quota_predecessors)
-            if self._owns(source_id)
-            and not db.execute(
-                "SELECT 1 FROM retained_sources WHERE source_id=?", (source_id,)
-            ).fetchone()
+            source_id for source_id in dict.fromkeys(quota_predecessors) if self._owns(source_id)
         ]
         try:
             sources = await publisher.publish(
@@ -934,13 +929,7 @@ class SyncEngine:
         if old_ids:
             present = set(sources)
             for old_id in dict.fromkeys(old_ids):
-                if (
-                    not self._owns(old_id)
-                    or old_id in replacement_ids
-                    or db.execute(
-                        "SELECT 1 FROM retained_sources WHERE source_id=?", (old_id,)
-                    ).fetchone()
-                ):
+                if not self._owns(old_id) or old_id in replacement_ids:
                     continue
                 if old_id in present:
                     await self.adapter.delete(old_id)

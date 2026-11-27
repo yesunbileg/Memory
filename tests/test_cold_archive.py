@@ -19,7 +19,7 @@ def ingest(store, name, age, text=None):
     updated = (datetime.now(UTC) - timedelta(days=age)).isoformat()
     chat = conversation(external_id=name, created_at=updated, updated_at=updated)
     chat["messages"][0].update(text=text or name, timestamp=updated)
-    return store.ingest(chat, consent=True)
+    return store.ingest(chat)
 
 
 async def test_compacts_mixed_sources_only_when_both_replacements_are_ready(tmp_path):

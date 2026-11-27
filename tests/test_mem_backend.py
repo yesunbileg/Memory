@@ -1,6 +1,8 @@
 import asyncio
+import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -24,7 +26,7 @@ async def test_status_counts_current_chats_and_does_not_treat_empty_as_current(t
         assert store.status()["sync_status"] == "no_sources"
 
         first = conversation()
-        store.ingest(first, consent=True)
+        store.ingest(first)
         remote = Remote()
         await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
         store.ingest(conversation(external_id="local-only"))
@@ -47,15 +49,15 @@ async def test_shared_source_refresh_only_counts_changed_chats(tmp_path):
 
     with Store(tmp_path / "archive.sqlite") as store:
         first = conversation()
-        edited = store.ingest(first, consent=True)
-        unchanged = store.ingest(conversation(external_id="unchanged"), consent=True)
+        edited = store.ingest(first)
+        unchanged = store.ingest(conversation(external_id="unchanged"))
         builder = SegmentBuilder(store)
         engine = SyncEngine(store, builder, Remote(), tmp_path / "md")
         assert (await engine.run_once())["completed"] == 1
 
         first["messages"][0]["text"] = "Updated message"
         store.ingest(first)
-        new = store.ingest(conversation(external_id="new"), consent=True)
+        new = store.ingest(conversation(external_id="new"))
         backend = Backend(store.path)
         for _ in range(2):  # Both the dirty segment and its rebuilt revision.
             view = backend.snapshot()
@@ -109,7 +111,7 @@ async def test_auto_sync_detects_new_chats_edits_and_retry_deadlines(tmp_path, m
         store.ingest(chat)
         assert backend.snapshot()["auto_sync_due"] == 0
         remote.fail_upload = True
-        result = await sync_archive(store, all_chats=True)
+        result = await sync_archive(store)
         deadline = result["blocked"][0]["next_attempt"]
         assert backend.snapshot()["auto_sync_due"] == deadline > time.time()
         assert await sync_archive(store, automatic=True) == {"automatic": "idle"}
@@ -167,7 +169,7 @@ async def test_auto_sync_replaces_old_masking_policy_even_with_no_chat_changes(
     monkeypatch.setattr("ai_memory.notebook.NotebookLMAdapter", lambda *_: remote)
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook-test")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         await sync_archive(store)
         old = next(iter(remote.sources))
         Backend(store.path).set_auto_sync(True)
@@ -194,3 +196,22 @@ def test_auto_sync_waits_for_manual_recovery_of_a_missing_source(tmp_path):
                 "INSERT INTO sync_jobs(segment_id,revision,title,stage) VALUES('S',0,'S','missing')"
             )
         assert backend.snapshot()["auto_sync_due"] is None
+
+
+def test_snapshot_reads_old_publication_flags_without_applying_them(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with Store(path) as store:
+        cid = store.ingest(conversation())
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute("ALTER TABLE conversations ADD COLUMN consent INTEGER NOT NULL DEFAULT 1")
+            conn.execute("UPDATE conversations SET consent=0 WHERE id=?", (cid,))
+            conn.execute("PRAGMA user_version=2")
+        snapshot = Backend(path).snapshot()
+        assert snapshot["chats"][0]["id"] == cid
+        assert snapshot["chats"][0]["nb"] == "pending"
+        assert snapshot["status"]["pending_conversations"] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            conn.execute("SELECT consent FROM conversations WHERE id=?", (cid,)).fetchone()[0] == 0
+        )

@@ -860,3 +860,34 @@ def test_successful_check_clears_only_resolved_preflight_auth_error(tmp_path, mo
     assert notebook.check_notebook_connection(db)["notebook"]["connected"]
     with Store(db, existing=True) as archive:
         assert archive.get_setting("sync_preflight_errors") == [{"reason": "network_error"}]
+
+
+async def test_configure_custom_preserves_persona_verifies_and_sends_plain_question():
+    from notebooklm.types import ChatGoal, ChatResponseLength, ChatSettings
+
+    from ai_memory.notebook import CUSTOM_MARKER, NotebookLMAdapter
+
+    class ConfigurableSDK(SimulatedSDK):
+        settings = ChatSettings(ChatGoal.CUSTOM, ChatResponseLength.DEFAULT, "my memory manager")
+        writes = 0
+
+        async def get_settings(self, notebook_id):
+            return self.settings
+
+        async def configure(self, notebook_id, goal, response_length, custom_prompt):
+            self.writes += 1
+            self.settings = ChatSettings(goal, response_length, custom_prompt)
+
+    sdk = ConfigurableSDK()
+    adapter = NotebookLMAdapter("notebook-1", client_factory=lambda path: sdk)
+    try:
+        await adapter.configure_memory_prompt()
+        await adapter.configure_memory_prompt()
+        assert sdk.writes == 1
+        assert sdk.settings.custom_prompt.startswith("my memory manager")
+        assert sdk.settings.custom_prompt.count(CUSTOM_MARKER) == 1
+        assert sdk.settings.response_length == ChatResponseLength.DEFAULT
+        await adapter.ask("Earlier?", ["source-1"])
+        assert sdk.questions == [("notebook-1", "Earlier?", ["source-1"])]
+    finally:
+        await adapter.close()

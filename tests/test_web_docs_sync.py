@@ -284,7 +284,7 @@ async def test_title_failure_keeps_document_id_without_writing_or_linking(tmp_pa
     docs, notebook = InterruptedTitle(), Notebook()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -319,7 +319,7 @@ async def test_create_response_loss_adopts_same_document_then_confirms_title(tmp
     docs, notebook = InterruptedCreate(), Notebook()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -344,7 +344,7 @@ async def test_source_link_recovers_after_response_loss_without_second_add(tmp_p
     docs, notebook = Docs(), LostLinkAcknowledgement()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -364,7 +364,7 @@ async def test_existing_markdown_migrates_and_docs_keep_stable_source_ids(tmp_pa
         chat = conversation()
         chat["messages"][0]["text"] = "A readable archived message.\n" * 40
         assert len(split_document(chat["messages"][0]["text"])) == 2
-        store.ingest(chat, consent=True)
+        store.ingest(chat)
         builder = SegmentBuilder(store)
         out = tmp_path / "revisions"
         assert (await SyncEngine(store, builder, notebook, out).run_once())["completed"] == 1
@@ -396,7 +396,7 @@ async def test_sync_counts_confirmed_docs_payload_before_a_later_write_fails(tmp
     docs = InterruptedDocs()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), Notebook(), tmp_path / "sync", docs_client=docs
@@ -415,7 +415,7 @@ async def test_docs_grow_then_shrink_and_resume_source_cleanup(tmp_path, monkeyp
     chat["messages"][0]["text"] = "Short original message."
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(chat, consent=True)
+        store.ingest(chat)
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -460,7 +460,7 @@ async def test_mismatched_drive_document_cannot_attest_managed_source(tmp_path):
     chat = conversation()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(chat, consent=True)
+        store.ingest(chat)
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -559,7 +559,7 @@ async def test_publication_requires_independent_remote_hash_after_ack(tmp_path):
     docs, notebook = ChangedAfterAck(), Notebook()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -600,7 +600,7 @@ async def test_publication_with_missing_remote_revision_remains_unverified(tmp_p
     docs, notebook = IncompleteRead(), Notebook()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         result = await SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -629,7 +629,7 @@ async def test_link_requires_independent_drive_identity_and_does_not_duplicate(t
     docs, notebook = Docs(), DelayedInventory()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -657,7 +657,7 @@ async def test_registered_source_with_sparse_metadata_does_not_consume_new_quota
     chat = conversation()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(chat, consent=True)
+        store.ingest(chat)
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs
@@ -667,7 +667,7 @@ async def test_registered_source_with_sparse_metadata_does_not_consume_new_quota
         notebook.sources[source].pop("drive_document_id")
         for index in range(49):
             notebook.sources[f"foreign-{index}"] = {"title": "foreign", "ready": True}
-        chat["messages"][0]["text"] += " One more approved message."
+        chat["messages"][0]["text"] += " One more archived message."
         store.ingest(chat)
         result = await engine.run_once()
         assert result["completed"] == 1 and not result["blocked"]
@@ -750,7 +750,7 @@ async def test_change_during_notebook_indexing_requires_reindex_before_publicati
     notebook = ChangedDuringIndex()
     with Store(tmp_path / "archive.sqlite") as store:
         store.set_setting("notebook_id", "notebook")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         enable_web_docs(store, 8)
         engine = SyncEngine(
             store, SegmentBuilder(store), notebook, tmp_path / "sync", docs_client=docs

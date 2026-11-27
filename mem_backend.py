@@ -29,7 +29,7 @@ _BROWSER_FOLDERS = {
     "Chromium": "chromium",
 }
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_SYNC_OPERATIONS = {"sync", "sync-all", "auto-sync"}
+_SYNC_OPERATIONS = {"sync", "auto-sync"}
 _TIMEOUTS = {
     "ask": 420,
     "check": 90,
@@ -111,7 +111,7 @@ class Backend:
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN IMMEDIATE" if writable else "BEGIN")
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (1, 2):
+                if version not in (1, 2, 3):
                     raise BackendError(
                         "Архивын SQLite хувилбар тохирохгүй байна.",
                         code="archive_incompatible",
@@ -152,7 +152,7 @@ class Backend:
         with self._archive() as (conn, version):
             view = self._view(conn)
             sync_activity = read_sync_activity(self.db)
-            if version == 2:
+            if version >= 2:
                 sources = allowed_sources(view)
                 published = published_message_counts(
                     view, sources, comparison_cache=self._coverage_cache
@@ -173,7 +173,6 @@ class Backend:
             chats = self._chats(conn, published, active_segment)
             status["conversations"] = len(chats)
             status["messages"] = sum(chat["message_count"] for chat in chats)
-            status["unapproved_conversations"] = sum(not chat["approved"] for chat in chats)
             if version == 1:
                 status["ready_conversations"] = 0
                 status["pending_conversations"] = sum(chat["message_count"] > 0 for chat in chats)
@@ -239,7 +238,7 @@ class Backend:
                 ) GROUP BY m.conversation_id
             )
             SELECT c.id,c.platform,c.account,c.title,c.project,c.created_at,c.updated_at,
-                c.consent,c.revision,COALESCE(message_totals.total,0) AS total,errors.reason,
+                c.revision,COALESCE(message_totals.total,0) AS total,errors.reason,
                 EXISTS(
                     SELECT 1 FROM messages active_message
                     JOIN segment_messages active_assignment ON active_assignment.message_id=active_message.id
@@ -253,11 +252,8 @@ class Backend:
         chats = []
         for row in conn.execute(query, (active_segment,)):
             total, covered = row["total"], published.get(row["id"], 0)
-            approved = bool(row["consent"])
             reason = row["reason"] or ""
-            if not approved:
-                nb = "none"
-            elif row["running"]:
+            if row["running"]:
                 nb = "running"
             elif total and total == covered:
                 nb = "done"
@@ -281,7 +277,6 @@ class Backend:
                     "ts": _epoch(row["updated_at"]) or _epoch(row["created_at"]),
                     "revision": row["revision"],
                     "local": True,
-                    "approved": approved,
                     "nb": nb,
                     "parts": (covered, total),
                     "error": (reason if reason in SAFE_FAILURES else "operation_failed")
@@ -611,9 +606,7 @@ def _worker(repo: str, db: str, operation: str) -> int:
     args = ["--db", db, "docs-web-enable" if operation == "docs-connect" else operation]
     if operation in _SYNC_OPERATIONS:
         args[-1] = "sync"
-        if operation == "sync-all":
-            args.append("--all-chats")
-        elif operation == "auto-sync":
+        if operation == "auto-sync":
             args.append("--automatic")
 
         def emit(event):

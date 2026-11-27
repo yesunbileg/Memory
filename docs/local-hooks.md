@@ -40,11 +40,13 @@ Restart OpenCode to load the integration. A `session.idle` event selects that na
 
 ## Check a local capture
 
-Finish a short, non-sensitive turn in the configured client. List local conversations using the same database, then inspect the returned ID:
+Finish a short test turn in the configured client. Run `status` against the
+same database to check the archive counts. To find the conversation and inspect
+its original text, open `mem` using the same database and run `/chats`.
 
 ```bash
-.venv/bin/ai-memory --db "$PWD/data/conversations.sqlite" pending
-.venv/bin/ai-memory --db "$PWD/data/conversations.sqlite" show CX-REPLACE_WITH_ID
+.venv/bin/ai-memory --db "$PWD/data/conversations.sqlite" status
+mem --db "$PWD/data/conversations.sqlite"
 ```
 
-An event can only save what its client has already written. If a turn is missing, check the client loaded the integration, the machine has access to the configured paths and the event completed. For missed events or historical data, run an explicit [one-time import](../README.md#import-existing-histories-once). Repeated native message IDs are deduplicated. Eligible captures join the publication queue by default. A configured notebook and enabled automatic sync allow captures to wake the publisher. Use `/auto off` to pause automatic publication.
+An event can only save what its client has already written. If a turn is missing, check the client loaded the integration, the machine has access to the configured paths and the event completed. Repeated native message IDs are deduplicated. A configured notebook and enabled automatic sync allow captures to wake the publisher. Use `/auto off` to pause automatic publication. For missed events or historical data, run an explicit [one-time import](../README.md#import-existing-histories-once).

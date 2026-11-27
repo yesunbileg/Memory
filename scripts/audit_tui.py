@@ -21,7 +21,6 @@ async def audit(db, output=None):
 
     from mem import (
         AiBlock,
-        DialogSelect,
         JobDialog,
         Mem,
         NotebookDialog,
@@ -58,7 +57,7 @@ async def audit(db, output=None):
             self.operations.append(operation)
             if operation == "docs-connect":
                 return {}
-            if operation == "sync-all":
+            if operation == "sync":
                 for phase in ("upload", "readiness"):
                     on_progress({"phase": phase, "segment_id": "SEG-001"})
                     if phase == "readiness":
@@ -109,6 +108,8 @@ async def audit(db, output=None):
         await pilot.press("enter")
 
     assert all(find_cmd(command) is None for command in ("new", "resume", "sessions"))
+    assert all(find_cmd(command) is None for command in ("sync-all", "syns-all"))
+    assert find_cmd("sync") is not None
     results = []
     if output is not None:
         output.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -137,18 +138,8 @@ async def audit(db, output=None):
             assert "Docs индексжсэн" in app.screen.status_labels()["sync"]
             assert app.focused.id == "connect"
             await pilot.press("tab", "tab")
-            assert app.focused.id == "sync-all"
+            assert app.focused.id == "sync"
             await pilot.press("enter")
-            await until(pilot, lambda app=app: isinstance(app.screen, DialogSelect))
-            assert app.screen.current_opt().value == "cancel"
-            assert "Цуцалсан зөвшөөрлийг сэргээнэ" in [opt.title for opt in app.screen.opts_all]
-            if output is not None:
-                app.save_screenshot(f"consent-{width}x{height}.svg", path=str(output))
-            await pilot.press("escape")
-            assert backend.operations == ["docs-connect"]
-            app.cmd_sync_all()
-            await until(pilot, lambda app=app: isinstance(app.screen, DialogSelect))
-            await pilot.press("down", "enter")
             await until(pilot, backend.indexing.is_set)
             assert isinstance(app.screen, JobDialog)
             assert "хүлээж" in app.job.steps[-1].detail
@@ -163,7 +154,7 @@ async def audit(db, output=None):
                 pilot, lambda app=app: app.ask_messages and not app.ask_messages[-1]["pending"]
             )
             assert app.ask_messages[-1]["text"] == "Synthetic audit answer"
-            assert backend.operations == ["docs-connect", "sync-all", "ask"]
+            assert backend.operations == ["docs-connect", "sync", "ask"]
 
             # Returning from another tab keeps the same transcript.
             app.cmd_dashboard()

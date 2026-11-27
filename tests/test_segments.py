@@ -7,7 +7,7 @@ from ai_memory.store import Store, digest
 
 def test_build_does_not_expand_whole_conversation_for_metadata_or_rescan_idle_open_body(tmp_path):
     with Store(tmp_path / "archive.db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         builder = SegmentBuilder(store)
         queries = []
         store.connection.set_trace_callback(
@@ -23,12 +23,10 @@ def test_build_does_not_expand_whole_conversation_for_metadata_or_rescan_idle_op
         )
 
 
-def test_only_approved_messages_and_exact_markdown_are_packaged(tmp_path):
+def test_build_preserves_exact_markdown_for_archived_messages(tmp_path):
     with Store(tmp_path / "db") as store:
-        key = store.ingest(conversation(), consent=False)
+        key = store.ingest(conversation())
         builder = SegmentBuilder(store)
-        assert builder.build() == []
-        store.approve(key)
         segments = builder.build()
         assert len(segments) == 1
         text = builder.render(segments[0]["id"])
@@ -44,7 +42,7 @@ def test_rollover_continuation_and_edit_sealed_segment(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "first message"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         builder = SegmentBuilder(store, target_words=3)
         builder.build()
         second = dict(c["messages"][0], native_id="m2", sequence=2, text="second message")
@@ -71,7 +69,7 @@ def test_overflow_merge_retains_every_message_and_parent_sources(tmp_path):
         for n in range(3):
             c = conversation(external_id=f"c{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         builder.build()
         merge_id = builder.merge_oldest()
         rendered = builder.render(merge_id)
@@ -95,7 +93,7 @@ def test_oversized_message_never_truncated_and_exhaustion_never_summarizes(tmp_p
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "word " * 21
-        key = store.ingest(c, consent=True)
+        key = store.ingest(c)
         builder = SegmentBuilder(store, target_words=10, max_words=20)
         with pytest.raises(CapacityError):
             builder.build()
@@ -107,7 +105,7 @@ def test_missing_timestamp_stays_unknown(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation(created_at=None, models=[], title="---\nmisleading: YAML")
         c["messages"][0]["timestamp"] = None
-        store.ingest(c, consent=True)
+        store.ingest(c)
         builder = SegmentBuilder(store)
         s = builder.build()[0]
         rendered = builder.render(s["id"])
@@ -120,14 +118,13 @@ def test_continuation_does_not_rewrite_sealed_metadata(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "old message"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         b = SegmentBuilder(store, target_words=2)
         first = b.build()[0]
         store.ingest(
             conversation(
                 external_id="other", messages=[dict(c["messages"][0], text="other message")]
             ),
-            consent=True,
         )
         b.build()
         previous = b.render(first["id"])
@@ -149,7 +146,7 @@ def test_merges_find_oldest_feasible_adjacent_window_and_preserve_chronology(tmp
         for n in range(7):
             c = conversation(external_id=f"c{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         b.build()
         first = b.merge_oldest()
         assert [
@@ -176,13 +173,13 @@ def test_remerged_segments_keep_original_arrival_order(tmp_path):
         for n in range(4):
             c = conversation(external_id=f"c{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         b.build()
         b.merge_oldest()
         # Seal the open source by appending the next one.
         c = conversation(external_id="c4")
         c["messages"][0]["text"] = "message 4"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         b.build()
         merged = b.merge_oldest()
         values = [
@@ -203,7 +200,7 @@ def test_full_oldest_segment_does_not_block_feasible_later_merge(tmp_path):
         ):
             c = conversation(external_id=str(n))
             c["messages"][0]["text"] = text
-            store.ingest(c, consent=True)
+            store.ingest(c)
         builder.build()
         merged = builder.merge_oldest()
         text = builder.render(merged)
@@ -217,7 +214,7 @@ def test_merge_rejects_rendered_snapshot_over_500000_before_retiring_parents(tmp
         for n in range(3):
             c = conversation(external_id=f"large-{n}")
             c["messages"][0]["text"] = "word " * 250_000 if n < 2 else "tail"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         builder.build()
         parent_rows = store.connection.execute(
             "SELECT * FROM segments WHERE state='sealed' ORDER BY id"
@@ -269,7 +266,7 @@ def test_appending_many_messages_uses_constant_open_segment_count_queries(tmp_pa
         with Store(tmp_path / f"db-{message_count}") as store:
             c = conversation()
             c["messages"][0]["text"] = "seed"
-            store.ingest(c, consent=True)
+            store.ingest(c)
             builder = SegmentBuilder(store, target_words=100_000)
             builder.build()
             additions = [
@@ -296,8 +293,8 @@ def test_reopened_builder_preserves_multiconversation_order_and_revision(tmp_pat
         first["messages"][0]["text"] = "first one"
         second = conversation(external_id="second")
         second["messages"][0]["text"] = "second two"
-        store.ingest(first, consent=True)
-        store.ingest(second, consent=True)
+        store.ingest(first)
+        store.ingest(second)
         builder = SegmentBuilder(store, target_words=5)
         before = builder.build()[0]
 
@@ -333,7 +330,7 @@ def test_active_segment_rejects_rendered_snapshot_over_500000(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "word " * 500_000
-        store.ingest(c, consent=True)
+        store.ingest(c)
         builder = SegmentBuilder(store, target_words=500_000, max_words=500_000)
         with pytest.raises(CapacityError):
             builder.build()
@@ -348,15 +345,15 @@ def test_full_source_budget_still_commits_edited_segment_revision(tmp_path):
         first["messages"][0]["text"] = "first original"
         second = conversation(external_id="second")
         second["messages"][0]["text"] = "second original"
-        store.ingest(first, consent=True)
-        store.ingest(second, consent=True)
+        store.ingest(first)
+        store.ingest(second)
         builder = SegmentBuilder(store, target_words=2, max_words=10, max_active=2)
         builder.build()
         first["messages"][0]["text"] = "first corrected"
         store.ingest(first)
         extra = conversation(external_id="overflow")
         extra["messages"][0]["text"] = "overflow message"
-        store.ingest(extra, consent=True)
+        store.ingest(extra)
 
         with pytest.raises(SourceBudgetError):
             builder.build()
@@ -381,11 +378,9 @@ def test_render_uses_canonical_sequence_within_existing_conversation_slots(tmp_p
                     dict(base, native_id="late", sequence=2, text="later body"),
                 ]
             ),
-            consent=True,
         )
         other = store.ingest(
             conversation(external_id="other", messages=[dict(base, text="unrelated body")]),
-            consent=True,
         )
         builder = SegmentBuilder(store)
         (segment,) = builder.build()

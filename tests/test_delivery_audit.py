@@ -30,11 +30,11 @@ def test_status_typo_has_no_filesystem_side_effect(tmp_path, capsys):
     assert not directory.exists()
 
 
-def test_live_demo_refuses_existing_mixed_approved_archive_before_provider(tmp_path, monkeypatch):
+def test_live_demo_refuses_existing_mixed_archive_before_provider(tmp_path, monkeypatch):
     output = tmp_path / "demo"
     run_demo(output)
     with Store(output / "conversations.sqlite") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         store.set_setting("notebook_id", "explicit-test-id")
     module = live_module()
     calls = []
@@ -105,7 +105,7 @@ def test_live_demo_revalidates_all_local_conversations_before_construction(tmp_p
     def polluted_fixture(path):
         data = run_demo(path)
         with Store(path / "conversations.sqlite") as store:
-            store.ingest(conversation(), consent=True)
+            store.ingest(conversation())
         return data
 
     monkeypatch.setattr(module, "run_demo", polluted_fixture)
@@ -205,7 +205,7 @@ def test_local_demo_refuses_nonfixture_conversations_in_retained_database(tmp_pa
     output = tmp_path / "demo"
     run_demo(output)
     with Store(output / "conversations.sqlite") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
     before = (output / "segments/SEG-001.md").read_bytes()
     with pytest.raises(ValueError, match="empty"):
         run_demo(output)

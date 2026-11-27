@@ -111,7 +111,6 @@ def test_authenticated_ingest_preserves_raw_text_and_enables_publication(running
     conversation = archived(database)[0]
     assert conversation["platform"] == "chatgpt"
     assert conversation["account"] == "synthetic-account"
-    assert conversation["consent"] is True
     assert conversation["created_at"] is None
     assert [(m["role"], m["kind"], m["text"]) for m in conversation["messages"]] == [
         ("user", "text", RAW),
@@ -167,12 +166,9 @@ def test_account_isolation_uses_provider_native_account_not_short_source_id(runn
 @pytest.mark.parametrize(
     ("adapter", "account_field"), [("chatgpt-web", "accountId"), ("claude-web", "orgId")]
 )
-@pytest.mark.parametrize("legacy_approved", [True, False])
-def test_verified_browser_principals_keep_legacy_identity_and_consent_separate(
-    running_server, adapter, account_field, legacy_approved
+def test_verified_browser_principals_keep_legacy_identities_separate(
+    running_server, adapter, account_field
 ):
-    from ai_memory.store import Store
-
     server, database = running_server
 
     def packet(text, user=None, external_id="shared-test-chat"):
@@ -187,9 +183,6 @@ def test_verified_browser_principals_keep_legacy_identity_and_consent_separate(
 
     assert request(server, data=packet("legacy"))[0] == 200
     legacy_id = archived(database)[0]["id"]
-    if not legacy_approved:
-        with Store(database) as store:
-            store.revoke_many([legacy_id])
 
     for user in ("fixture-user-a", "fixture-user-b"):
         status, _, receipt = request(server, data=packet(user, user))
@@ -198,21 +191,19 @@ def test_verified_browser_principals_keep_legacy_identity_and_consent_separate(
 
     by_text = {entry["messages"][0]["text"]: entry for entry in archived(database)}
     assert by_text["legacy"]["id"] == legacy_id
-    assert by_text["legacy"]["consent"] is legacy_approved
+    assert len({row["id"] for row in by_text.values()}) == 3
+    assert len({row["account"] for row in by_text.values()}) == 3
     for user in ("fixture-user-a", "fixture-user-b"):
-        assert by_text[user]["consent"] is False
         assert request(server, data=packet(user, user))[0] == 200
     assert len(archived(database)) == 3
 
     assert request(server, data=packet("ordinary", "fixture-user-a", "another-chat"))[0] == 200
     ordinary = next(row for row in archived(database) if row["external_id"] == "another-chat")
-    assert ordinary["consent"] is True
-    with Store(database) as store:
-        store.revoke_many([ordinary["id"]])
+    ordinary_id = ordinary["id"]
     assert request(server, data=packet("updated", "fixture-user-a", "another-chat"))[0] == 200
     ordinary = next(row for row in archived(database) if row["external_id"] == "another-chat")
     assert ordinary["messages"][0]["text"] == "updated"
-    assert ordinary["consent"] is False
+    assert ordinary["id"] == ordinary_id
 
 
 def test_verified_browser_principal_requires_matching_native_workspace(running_server):
@@ -336,7 +327,6 @@ def test_real_extension_providers_roundtrip_to_archive(running_server):
             m["native_id"] and not m["native_id"].startswith("record:")
             for m in conversation["messages"]
         )
-        assert conversation["consent"] is True
 
 
 def test_visible_summary_changes_keep_the_native_final_text_identity(running_server):
@@ -591,7 +581,6 @@ process.stdout.write(JSON.stringify(receipts));
     assert all(receipt["unchanged"] == 1 and receipt["updated"] == 0 for receipt in receipts[1])
     conversation = archived(database)[0]
     assert conversation["account"] == "native-account"
-    assert conversation["consent"] is True
     assert [message["native_id"] for message in conversation["messages"]] == [
         "native-0",
         "native-1",

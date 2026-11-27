@@ -41,7 +41,7 @@ def stop(source, session_id="synthetic-codex"):
     }
 
 
-def test_codex_stop_replay_then_continuation_preserves_ids_and_consent(tmp_path):
+def test_codex_stop_replay_then_continuation_preserves_ids(tmp_path):
     source = tmp_path / "rollout-selected.jsonl"
     shutil.copyfile(Path(__file__).parent / "fixtures/codex-visible.jsonl", source)
     (tmp_path / "rollout-unselected.jsonl").write_text(
@@ -56,13 +56,12 @@ def test_codex_stop_replay_then_continuation_preserves_ids_and_consent(tmp_path)
         assert result.stdout == ""
     with Store(archive) as store:
         (row,) = store.connection.execute(
-            "SELECT id,external_id,account,revision,consent FROM conversations"
+            "SELECT id,external_id,account,revision FROM conversations"
         ).fetchall()
         cid = row[0]
-        assert tuple(row[1:]) == ("synthetic-codex", "work", 1, 1)
+        assert tuple(row[1:]) == ("synthetic-codex", "work", 1)
         messages = store.get_conversation(cid)["messages"]
         assert len(messages) == 5 and "DO NOT IMPORT" not in json.dumps(messages)
-        store.approve_many([cid])
     with source.open("a") as stream:
         stream.write(
             "\n"
@@ -82,7 +81,6 @@ def test_codex_stop_replay_then_continuation_preserves_ids_and_consent(tmp_path)
     assert hook(archive, "codex", stop(source), "--account", "work").returncode == 0
     with Store(archive) as store:
         continued = store.get_conversation(cid)
-        assert continued["consent"] is True
         assert [m["id"] for m in continued["messages"][:-1]] == [m["id"] for m in messages]
         assert continued["messages"][-1]["text"] == "one new turn"
         assert store.connection.execute("SELECT COUNT(*) FROM sync_jobs").fetchone()[0] == 0
@@ -110,8 +108,8 @@ def test_opencode_idle_queries_only_selected_native_session(tmp_path, schema):
         assert result.returncode == 0, result.stderr
         assert result.stdout == ""
     with sqlite3.connect(archive) as db:
-        assert db.execute("SELECT external_id,revision,consent FROM conversations").fetchall() == [
-            ("s-0", 1, 1)
+        assert db.execute("SELECT external_id,revision FROM conversations").fetchall() == [
+            ("s-0", 1)
         ]
         assert db.execute("SELECT native_id,text FROM messages").fetchall() == [("m", "new")]
 

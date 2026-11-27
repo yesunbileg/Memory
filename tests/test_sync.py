@@ -81,7 +81,7 @@ async def test_progress_reports_live_segment_phases_during_replacement(tmp_path)
 
     with Store(tmp_path / "db") as store:
         chat = conversation()
-        store.ingest(chat, consent=True)
+        store.ingest(chat)
         remote = ObservedRemote()
         engine = SyncEngine(
             store, SegmentBuilder(store), remote, tmp_path / "md", progress=progress.append
@@ -118,8 +118,8 @@ async def test_sync_rebuilds_a_pending_snapshot_changed_by_capture(tmp_path):
                     writer.ingest(second)
 
     with Store(path) as store:
-        store.ingest(first, consent=True)
-        store.ingest(second, consent=True)
+        store.ingest(first)
+        store.ingest(second)
         remote = ConcurrentCapture()
         engine = SyncEngine(store, SegmentBuilder(store, target_words=3), remote, tmp_path / "md")
         result = await engine.run_once()
@@ -149,7 +149,7 @@ async def test_sync_rechecks_pending_snapshot_after_remote_inventory(tmp_path):
             return await super().list_sources()
 
     with Store(path) as store:
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = ConcurrentCapture()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         result = await engine.run_once()
@@ -178,7 +178,7 @@ async def test_sync_defers_a_segment_that_changes_again_during_the_retry(tmp_pat
             return await super().list_sources()
 
     with Store(path) as store:
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = BusyCapture()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         result = await engine.run_once()
@@ -194,7 +194,7 @@ async def test_sync_defers_a_segment_that_changes_again_during_the_retry(tmp_pat
 async def test_replace_waits_for_ready_and_unchanged_sync_is_noop(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         b = SegmentBuilder(store)
         remote = Remote()
         engine = SyncEngine(store, b, remote, tmp_path / "segments")
@@ -225,7 +225,7 @@ async def test_ambiguous_upload_reconciles_after_restart_without_duplicate(tmp_p
     remote.lose_response = True
     path = tmp_path / "db"
     with Store(path) as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
         job = store.connection.execute("SELECT * FROM sync_jobs").fetchone()
         assert job["attempts"] == 1
@@ -244,7 +244,7 @@ async def test_offline_retry_and_cleanup_persist(tmp_path):
     remote.fail_upload = True
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
         assert store.status()["pending_jobs"] == 1
@@ -275,7 +275,7 @@ async def test_real_49_source_overflow_uses_only_one_spare_slot(tmp_path):
         for n in range(50):
             c = conversation(external_id=f"conversation-{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         b = SegmentBuilder(store, target_words=2, max_words=10, max_active=49)
         remote = Remote()
         engine = SyncEngine(store, b, remote, tmp_path / "md")
@@ -293,11 +293,8 @@ async def test_real_49_source_overflow_uses_only_one_spare_slot(tmp_path):
 @pytest.mark.asyncio
 async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=False)
         remote = Remote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
-        await engine.run_once()
-        assert remote.operations == []
         secret_value = "SyntheticPass987654!"
         secret_text = f"password = '{secret_value}'"
         secret = conversation(
@@ -305,7 +302,7 @@ async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_pat
             title="Credentials test",
             messages=[dict(conversation()["messages"][0], text=secret_text)],
         )
-        store.ingest(secret, consent=True)
+        store.ingest(secret)
         result = await engine.run_once()
         assert not result["blocked"]
         assert len(remote.sources) == 1
@@ -317,15 +314,10 @@ async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_pat
             "SELECT id FROM conversations WHERE external_id='synthetic-secret'"
         ).fetchone()[0]
         assert store.get_conversation(conversation_id)["messages"][0]["text"] == secret_text
-        assert (
-            store.connection.execute(
-                "SELECT consent FROM conversations WHERE id=?", (conversation_id,)
-            ).fetchone()[0]
-            == 1
-        )
         status = store.status()
-        assert status["sync_status"] == "pending"
-        assert status["ready_conversations"] == status["pending_conversations"] == 1
+        assert status["sync_status"] == "up_to_date"
+        assert status["ready_conversations"] == 1
+        assert status["pending_conversations"] == 0
         assert remote.operations[0][0] == "upload"
         snapshot = next((tmp_path / "md").glob("*.md"), None)
         assert snapshot is None  # completed sync removes its immutable local snapshot
@@ -334,7 +326,7 @@ async def test_upload_masks_credentials_and_preserves_the_local_original(tmp_pat
 @pytest.mark.asyncio
 async def test_existing_foreign_sources_respected_at_quota(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = Remote()
         remote.sources = {f"foreign-{n}": {"title": "foreign", "ready": True} for n in range(50)}
         result = await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
@@ -364,7 +356,7 @@ async def test_edit_during_failed_merge_invalidates_retired_parent_citation(tmp_
         for n in range(3):
             c = conversation(external_id=f"c{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         engine = SyncEngine(store, builder, remote, tmp_path / "md")
         await engine.run_once()
         parent = store.connection.execute(
@@ -373,7 +365,7 @@ async def test_edit_during_failed_merge_invalidates_retired_parent_citation(tmp_
         cited = remote.sources[parent]["text"]
         c = conversation(external_id="c3")
         c["messages"][0]["text"] = "message 3"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote.fail_ready = True
         await engine.run_once()
         assert (
@@ -392,7 +384,7 @@ async def test_invalid_edited_segment_is_never_enqueued_or_uploaded(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "small"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         builder = SegmentBuilder(store, target_words=10, max_words=20)
         builder.build()
         c["messages"][0]["text"] = "huge " * 21
@@ -426,7 +418,7 @@ async def test_terminal_partial_upload_can_recover_without_deleting_old_source(t
             await super().wait_ready(source_id)
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = PartialRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -465,7 +457,7 @@ async def test_known_body_upload_failure_reuploads_partial_and_keeps_mapping_unt
 
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = BodyFailureRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -532,7 +524,7 @@ async def test_known_upload_failure_reconciles_partial_that_is_already_ready(tmp
 
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = ReadyPartialRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -562,7 +554,7 @@ async def test_known_upload_failure_reconciles_partial_that_is_already_ready(tmp
 @pytest.mark.asyncio
 async def test_terminal_error_never_adopts_ready_source_with_a_different_title(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         builder = SegmentBuilder(store)
         builder.build()
         segment = store.connection.execute("SELECT * FROM segments").fetchone()
@@ -612,7 +604,7 @@ async def test_failed_partial_at_notebook_quota_yields_only_its_uncommitted_slot
 
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = QuotaRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -664,7 +656,7 @@ async def test_foreign_source_budget_preserves_a_spare_and_merges_before_growth(
         for n in range(49):
             c = conversation(external_id=f"foreign-budget-{n}")
             c["messages"][0]["text"] = f"message {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         result = await SyncEngine(store, builder, remote, tmp_path / "md").run_once()
         assert result["status"]["sync_status"] == "up_to_date"
         assert len(remote.sources) <= 49
@@ -675,7 +667,7 @@ async def test_foreign_source_budget_preserves_a_spare_and_merges_before_growth(
 @pytest.mark.asyncio
 async def test_tampered_pending_snapshot_is_never_uploaded(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = Remote()
         remote.fail_upload = True
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
@@ -703,7 +695,6 @@ async def test_legacy_sensitive_pending_snapshot_is_redacted_before_resume(
                 title="Secret",
                 messages=[dict(conversation()["messages"][0], text=secret)],
             ),
-            consent=True,
         )
         builder = SegmentBuilder(store, target_words=1)
         builder.build()
@@ -773,7 +764,6 @@ async def test_legacy_mapped_raw_source_replaced_but_unproven_copy_never_deleted
                 external_id="mapped-legacy",
                 messages=[dict(conversation()["messages"][0], text=secret)],
             ),
-            consent=True,
         )
         builder = SegmentBuilder(store)
         builder.build()
@@ -798,7 +788,7 @@ async def test_explicit_legacy_cleanup_retries_completed_replacement(tmp_path):
     from ai_memory.publication import cleanup_legacy_sources
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         builder = SegmentBuilder(store)
         builder.build()
         remote = Remote()
@@ -826,12 +816,6 @@ async def test_explicit_legacy_cleanup_retries_completed_replacement(tmp_path):
         with pytest.raises(PublicInputError):
             await cleanup_legacy_sources(store, remote, ["legacy-raw"])
         remote.sources[current]["ready"] = True
-        with store.connection:
-            store.connection.execute("INSERT INTO retained_sources VALUES('legacy-raw')")
-        with pytest.raises(PublicInputError):
-            await cleanup_legacy_sources(store, remote, ["legacy-raw"])
-        with store.connection:
-            store.connection.execute("DELETE FROM retained_sources")
         assert remote.operations == before
 
         result = await cleanup_legacy_sources(store, remote, ["legacy-raw"])
@@ -855,7 +839,6 @@ async def test_legacy_inflight_unproven_source_never_claimed_or_deleted(tmp_path
                 external_id=f"inflight-{stage}",
                 messages=[dict(conversation()["messages"][0], text=secret)],
             ),
-            consent=True,
         )
         builder = SegmentBuilder(store)
         builder.build()
@@ -905,7 +888,6 @@ async def test_stale_raw_source_cleanup_moves_to_current_revision_job(tmp_path, 
                 external_id="stale-inflight",
                 messages=[dict(conversation()["messages"][0], text=secret)],
             ),
-            consent=True,
         )
         builder = SegmentBuilder(store)
         builder.build()
@@ -940,7 +922,7 @@ async def test_stale_raw_source_cleanup_moves_to_current_revision_job(tmp_path, 
             store.connection.execute("SELECT id FROM conversations").fetchone()[0]
         )
         current["messages"][0]["text"] = "A newer local decision."
-        store.ingest(current, consent=True)
+        store.ingest(current)
 
         result = await SyncEngine(store, builder, remote, snapshot_dir).run_once()
 
@@ -964,7 +946,7 @@ async def test_auth_failure_has_safe_status_retry_and_rate_limited_log(tmp_path,
             raise NotebookLMAuthError()
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         engine = SyncEngine(store, SegmentBuilder(store), AuthRemote(), tmp_path / "md")
         result = await engine.run_once()
         failure = result["blocked"][0]
@@ -983,7 +965,7 @@ async def test_failed_unregistered_upload_then_edit_recovers_without_losing_revi
     with Store(tmp_path / "db") as store:
         c = conversation()
         c["messages"][0]["text"] = "old exact content"
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = Remote()
         remote.fail_upload = True
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
@@ -1022,7 +1004,7 @@ async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
 
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = UnreadyRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -1071,7 +1053,7 @@ async def test_resumed_cleanup_preserves_predecessor_until_replacement_verified(
 @pytest.mark.asyncio
 async def test_missing_current_managed_source_requires_republish_by_identity(tmp_path):
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = Remote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -1104,7 +1086,7 @@ async def test_inventory_failure_is_unknown_and_preserves_current_mapping(tmp_pa
             return await super().list_sources()
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = InventoryRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -1123,7 +1105,7 @@ async def test_foreign_capacity_compacts_open_tail_and_preserves_exact_text(tmp_
         for n in range(2):
             c = conversation(external_id=f"tiny-{n}")
             c["messages"][0]["text"] = f"exact text {n}"
-            store.ingest(c, consent=True)
+            store.ingest(c)
         remote = Remote()
         foreign = {f"foreign-{n}" for n in range(48)}
         remote.sources.update({sid: {"title": sid, "ready": True, "text": sid} for sid in foreign})
@@ -1144,7 +1126,7 @@ async def test_foreign_capacity_compacts_open_tail_and_preserves_exact_text(tmp_
 async def test_missing_cleanup_replacement_after_another_edit_transfers_obligations(tmp_path):
     with Store(tmp_path / "db") as store:
         c = conversation()
-        store.ingest(c, consent=True)
+        store.ingest(c)
         remote = Remote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -1192,7 +1174,7 @@ async def test_unready_current_mapping_uses_queue_backoff_and_can_recover(tmp_pa
             await super().wait_ready(source_id)
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = ReadinessRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         await engine.run_once()
@@ -1226,11 +1208,11 @@ async def test_full_budget_failed_upload_then_edit_and_new_conversation_recovers
     with Store(tmp_path / "db") as store:
         first = conversation(external_id="conversation-0")
         first["messages"][0]["text"] = "first original"
-        store.ingest(first, consent=True)
+        store.ingest(first)
         for n in range(1, max_active):
             item = conversation(external_id=f"conversation-{n}")
             item["messages"][0]["text"] = f"message {n}"
-            store.ingest(item, consent=True)
+            store.ingest(item)
         remote = Remote()
         builder = SegmentBuilder(store, target_words=2, max_words=10, max_active=max_active)
         engine = SyncEngine(store, builder, remote, tmp_path / "md")
@@ -1248,7 +1230,7 @@ async def test_full_budget_failed_upload_then_edit_and_new_conversation_recovers
         store.ingest(first)
         extra = conversation(external_id="overflow")
         extra["messages"][0]["text"] = "overflow message"
-        store.ingest(extra, consent=True)
+        store.ingest(extra)
         make_retries_due(store)
 
         # Capacity pressure cannot invalidate the in-flight revision's hash or
@@ -1285,7 +1267,7 @@ async def test_already_locked_sync_keeps_shared_lock_until_operation_finishes(tm
             return await super().upload(path, title)
 
     with Store(tmp_path / "db") as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = LockCheckingRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         with archive_lock(store.path):
@@ -1336,7 +1318,7 @@ async def test_first_sync_retains_notebook_binding_during_concurrent_rebind(tmp_
     db_path = tmp_path / "archive.sqlite"
     with Store(db_path) as store:
         store.set_setting("notebook_id", "notebook-A")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = RebindingRemote()
         result = await SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once()
         assert result["blocked"] == []
@@ -1355,7 +1337,7 @@ def test_notebook_rebind_guard_cannot_overlap_first_sync(tmp_path):
     db_path = tmp_path / "archive.sqlite"
     with Store(db_path) as settings, Store(db_path) as syncing:
         settings.set_setting("notebook_id", "notebook-A")
-        settings.ingest(conversation(), consent=True)
+        settings.ingest(conversation())
         remote = Remote()
         engine = SyncEngine(syncing, SegmentBuilder(syncing), remote, tmp_path / "md")
         attempted = blocked = False
@@ -1405,7 +1387,7 @@ async def test_sync_activity_is_visible_across_readers_and_cleared_on_cancel(tmp
 
     path = tmp_path / "db"
     with Store(path) as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         remote = SlowRemote()
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         task = asyncio.create_task(engine.run_once())
@@ -1462,7 +1444,7 @@ async def test_restart_after_upload_interruption_uses_the_pretransfer_registrati
     remote = TrackedRemote()
     database = tmp_path / "db"
     with Store(database) as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         engine = SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md")
         with pytest.raises(asyncio.CancelledError):
             await engine.run_once()

@@ -181,8 +181,7 @@ class Chat:
     created_at: str | None = None
     updated_at: str | None = None
     local: bool = True
-    approved: bool = False
-    nb: str = "none"
+    nb: str = "pending"
     parts: tuple[int, int] = (0, 0)
     error: str = ""
     prog: float = 0.0
@@ -220,13 +219,7 @@ COMMANDS = [
     Cmd("docs-connect", "Google Docs холбох", "Brave-ийн Docs нэвтрэлтийг ашиглах", "Холболт"),
     Cmd("check", "Холболт шалгах", "Алхам алхмаар шалгана", "Холболт"),
     Cmd("flow", "Ажлын урсгал", "Архиваас NotebookLM хүрэх урсгал", "Санах ой"),
-    Cmd(
-        "sync-all",
-        "Архивын бүх чатыг sync хийх",
-        "Бүх чатад NotebookLM рүү илгээх зөвшөөрөл өгнө",
-        "Sync",
-        ("syns-all",),
-    ),
+    Cmd("sync", "Архив sync хийх", "Архивын өөрчлөлтийг NotebookLM рүү илгээнэ", "Sync"),
     Cmd(
         "auto",
         "Автомат sync",
@@ -2392,7 +2385,7 @@ class Mem(App):
         )
         hints: list[Hint] = []
         if c.local and c.message_count > 0 and not c.fully_synced:
-            hints.append(Hint("/sync-all", "бүгдийг sync хийх", self.cmd_sync_all))
+            hints.append(Hint("/sync", "архив sync хийх", self.cmd_sync))
         hints.append(Hint("/chats", "архив", self.cmd_chats))
         return [head, Horizontal(*hints, classes="chactions")]
 
@@ -2569,7 +2562,6 @@ class Mem(App):
         if not c.message_count:
             return "Мессежгүй"
         return {
-            "none": "Sync хүлээж байна",
             "pending": "NotebookLM шинэчлэлт хүлээж байна",
             "running": "тухайн багцыг sync хийж байна…",
             "partial": f"хэсэгчлэн {c.parts[0]}/{c.parts[1]}",
@@ -2789,7 +2781,7 @@ class Mem(App):
         else:
             self.start_job("login", args.strip())
 
-    def cmd_sync_all(self, args: str = "") -> None:
+    def cmd_sync(self, args: str = "") -> None:
         if self.job and self.job.status in ("running", "stopping"):
             self.toast("Ажил явагдаж байна", "warning")
             return
@@ -2813,26 +2805,7 @@ class Mem(App):
             self.open_notebook_form("login")
             return
 
-        def confirmed(result) -> None:
-            if result == ("pick", "sync-all"):
-                self.call_after_refresh(lambda: self.start_job("all"))
-
-        self.dialog(
-            DialogSelect(
-                "Архивын бүх чатыг илгээх үү?",
-                [
-                    Opt("scope", "Sync эхлэхэд архивт байгаа бүх чат", disabled=True),
-                    Opt("revoked", "Цуцалсан зөвшөөрлийг сэргээнэ", disabled=True),
-                    Opt("future", "Цаашдын үргэлжлэлд мөн үйлчилнэ", disabled=True),
-                    Opt("cancel", "Буцах"),
-                    Opt("sync-all", "Бүх чатад зөвшөөрөл өгч sync хийх"),
-                ],
-                searchable=False,
-                size=74,
-                current="cancel",
-            ),
-            confirmed,
-        )
+        self.start_job("sync")
 
     def cmd_auto(self, args: str = "") -> None:
         mode = args.strip().lower()
@@ -2882,7 +2855,7 @@ class Mem(App):
             return
         self.workers.cancel_group(self, "notebook-status")
         titles = {
-            "all": "Архивын өөрчлөлтийг sync хийх",
+            "sync": "Архивын өөрчлөлтийг sync хийх",
             "auto": "NotebookLM руу автомат sync хийх",
             "check": "Холболт шалгах",
             "login": "NotebookLM-д нэвтрэх",
@@ -2983,7 +2956,7 @@ class Mem(App):
             elif kind == "docs-connect":
                 result = await self.backend.call(kind)
             else:
-                operation = "auto-sync" if job.automatic else "sync-all"
+                operation = "auto-sync" if job.automatic else "sync"
                 result = await self.backend.call(operation, on_progress=show_phase)
                 if result.get("automatic") in {"idle", "busy", "stopped"}:
                     remote_step.state = "skip"
@@ -3025,7 +2998,6 @@ class Mem(App):
                 work_left = (
                     status.get("sync_status") == "pending"
                     or self.archive_status.get("sync_status") == "pending"
-                    or any(c.local and c.message_count and c.nb == "none" for c in self.chats)
                 )
                 if blocked := result.get("blocked"):
                     reasons = list(

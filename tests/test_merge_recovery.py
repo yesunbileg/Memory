@@ -22,9 +22,7 @@ async def test_real_source_budget_recovers_with_a_pair_when_three_render_too_lar
                 }
                 for i in range(7500)
             ]
-            store.ingest(
-                conversation(external_id=f"large-{group}", messages=messages), consent=True
-            )
+            store.ingest(conversation(external_id=f"large-{group}", messages=messages))
         builder.build()
         with store.connection:
             store.connection.execute("UPDATE segments SET state='sealed'")
@@ -42,7 +40,6 @@ async def test_real_source_budget_recovers_with_a_pair_when_three_render_too_lar
                         }
                     ],
                 ),
-                consent=True,
             )
             with store.connection:
                 sid = builder._new("sealed")
@@ -79,7 +76,6 @@ async def test_real_source_budget_recovers_with_a_pair_when_three_render_too_lar
                     }
                 ],
             ),
-            consent=True,
         )
         engine = SyncEngine(store, builder, remote, tmp_path / "snapshots")
         result = await engine.run_once()
@@ -118,7 +114,7 @@ def test_rendered_size_failure_does_not_hide_a_feasible_later_window(tmp_path):
         for n, text in enumerate(["first " * 250_000, "second " * 250_000, "tail"]):
             c = conversation(external_id=f"window-{n}")
             c["messages"][0]["text"] = text
-            store.ingest(c, consent=True)
+            store.ingest(c)
         builder.build()
         with store.connection:
             store.connection.execute("UPDATE segments SET state='sealed'")

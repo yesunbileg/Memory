@@ -39,7 +39,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
  id TEXT PRIMARY KEY, external_id TEXT NOT NULL, platform TEXT NOT NULL,
  account TEXT NOT NULL, title TEXT, project TEXT, models TEXT NOT NULL,
- created_at TEXT, updated_at TEXT, source_url TEXT, consent INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT, updated_at TEXT, source_url TEXT,
  revision INTEGER NOT NULL DEFAULT 1, UNIQUE(platform,account,external_id)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -115,7 +115,6 @@ class Store:
         self.connection.execute("PRAGMA journal_mode=WAL")
         try:
             revisions.initialize(self, SCHEMA)
-            revisions.enable_default_publication(self.connection)
         except BaseException:
             self.close()
             raise
@@ -302,7 +301,6 @@ class Store:
     def ingest(
         self,
         conversation: dict,
-        consent: bool | None = None,
         *,
         reconcile_order: bool = False,
         codex_snapshot: bool = False,
@@ -431,10 +429,10 @@ class Store:
             )
             db.execute(
                 """INSERT INTO conversations(id,external_id,platform,account,title,project,
-                created_at,updated_at,source_url,models,consent) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                created_at,updated_at,source_url,models) VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title,project=excluded.project,
                 created_at=excluded.created_at,updated_at=excluded.updated_at,source_url=excluded.source_url,
-                models=excluded.models,consent=MAX(conversations.consent,?)""",
+                models=excluded.models""",
                 (
                     key,
                     external,
@@ -442,8 +440,6 @@ class Store:
                     account,
                     *fields,
                     metadata[-1],
-                    int(consent is not False),
-                    int(consent is True),
                 ),
             )
             for m in messages:
@@ -533,20 +529,6 @@ class Store:
                 )
         return key
 
-    def approve(self, conversation_id: str):
-        self.approve_many([conversation_id])
-
-    def approve_many(self, ids):
-        from .consent import update_consent
-
-        return update_consent(self, ids, approved=True)
-
-    def revoke_many(self, ids):
-        from .consent import update_consent
-
-        with archive_lock(self.path):
-            return update_consent(self, ids, approved=False)
-
     def conversation_metadata(self, conversation_id: str) -> dict:
         """Return the archive fields without loading any message bodies."""
         row = self.connection.execute(
@@ -556,7 +538,6 @@ class Store:
             raise ValueError("Conversation does not exist")
         result = dict(row)
         result["models"] = json.loads(result["models"])
-        result["consent"] = bool(result["consent"])
         return result
 
     def get_conversation(self, conversation_id: str) -> dict:
@@ -605,8 +586,7 @@ class Store:
         hybrid = self.get_setting(cold_archive.ENABLED) and self.get_setting(DOCS_SETTING)
         plan = self.get_setting(cold_archive.PLAN) if hybrid else None
         if db.execute("""
-            SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id
-            WHERE c.consent=1 AND NOT EXISTS (
+            SELECT 1 FROM messages m WHERE NOT EXISTS (
                 SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
                 WHERE sm.message_id=m.id AND s.state!='retired')
             LIMIT 1
@@ -672,20 +652,18 @@ class Store:
         sources = allowed_sources(self) if sources is None else sources
         if published is None:
             published = published_message_counts(self, sources)
-        ready = waiting = approved_waiting = 0
-        for chat_id, consent, total in db.execute(
-            """SELECT c.id, c.consent, count(*) FROM messages m
-            JOIN conversations c ON c.id=m.conversation_id GROUP BY c.id""",
+        ready = waiting = 0
+        for chat_id, total in db.execute(
+            "SELECT conversation_id,count(*) FROM messages GROUP BY conversation_id",
         ):
             if published.get(chat_id, 0) == total:
                 ready += 1
             else:
                 waiting += 1
-                approved_waiting += consent == 1
         pending = count("""SELECT COUNT(*) FROM segments s LEFT JOIN source_map sm ON s.id=sm.segment_id
             WHERE s.state!='retired' AND (sm.source_id IS NULL OR sm.revision!=s.revision OR s.content_hash='')""")
-        unassigned = count("""SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
-            WHERE c.consent=1 AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
+        unassigned = count("""SELECT COUNT(*) FROM messages m
+            WHERE NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
             WHERE sm.message_id=m.id AND s.state!='retired')""")
         cleanup = count("SELECT COUNT(*) FROM sync_jobs WHERE stage NOT IN ('done','superseded')")
         sync_errors = [
@@ -716,13 +694,11 @@ class Store:
         return {
             "conversations": count("SELECT COUNT(*) FROM conversations"),
             "messages": count("SELECT COUNT(*) FROM messages"),
-            "unapproved_conversations": count("SELECT COUNT(*) FROM conversations WHERE consent=0"),
             "segments": count("SELECT COUNT(*) FROM segments WHERE state!='retired'"),
             "sources": count("SELECT COUNT(*) FROM source_map"),
             "last_verified_remote": publication_status(self, sources=sources),
             "ready_conversations": ready,
             "pending_conversations": waiting,
-            "pending_approved_conversations": approved_waiting,
             "pending_segments": pending,
             "unassigned_messages": unassigned,
             "pending_jobs": cleanup,

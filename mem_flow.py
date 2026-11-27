@@ -120,13 +120,13 @@ class FlowCanvas(ModalScreen[str]):
             return (
                 "Веб + локал → SQLite → Google Docs → NotebookLM → Асуух",
                 "Docs → NotebookLM",
-                "/sync-all Docs-д анх бүтнээр нь бичнэ. Дараа нь нэмсэн, зассан, устгасан "
+                "/sync Docs-д анх бүтнээр нь бичнэ. Дараа нь нэмсэн, зассан, устгасан "
                 "хэсгийг илгээнэ. NotebookLM холбосон Docs-ийг шинэчилнэ.",
             )
         return (
             "Веб + локал → SQLite → NotebookLM → Асуух",
             "NotebookLM sync",
-            "/sync-all өөрчлөгдсөн Markdown хэсгүүдийг NotebookLM-д бүтнээр нь байршуулна.",
+            "/sync өөрчлөгдсөн Markdown хэсгүүдийг NotebookLM-д бүтнээр нь байршуулна.",
         )
 
     def update_status(self, counts: dict, notebook_label: str) -> None:
@@ -179,7 +179,7 @@ class FlowCanvas(ModalScreen[str]):
                         sync_description,
                         kind="sync",
                         status=labels["sync"],
-                        action=("sync-all", "/sync-all"),
+                        action=("sync", "/sync"),
                     )
                     yield Static("→", classes="flow-map-edge flow-forward")
                     yield FlowCard(

@@ -34,7 +34,7 @@ def test_overlapping_snapshot_backfill_preserves_order_in_archive_and_markdown(t
 
     with Store(tmp_path / "archive.db") as store:
         write(meta, newer)
-        result = collect_into(store, "codex", rollout, consent=True)
+        result = collect_into(store, "codex", rollout)
         assert result["failed_files"] == 0
         (conversation_id,) = result["conversation_ids"]
         builder = SegmentBuilder(store)

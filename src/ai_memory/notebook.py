@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, TypeGuard
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .query_trace import trace
+
 if TYPE_CHECKING:
     from notebooklm import NotebookLMClient
 
@@ -71,6 +73,15 @@ Rules:
 Question:
 {question}
 """
+
+CUSTOM_RULES = (
+    MEMORY_PROMPT.split("\nQuestion:", 1)[0]
+    + """
+- Distinguish user requirements and explicitly approved decisions from agent suggestions.
+- Mark superseded decisions and identify the latest user-approved replacement.
+"""
+)
+CUSTOM_MARKER = "[AI Memory source rules]"
 
 
 class NotebookLMError(RuntimeError):
@@ -572,10 +583,54 @@ class NotebookLMAdapter:
         self._client: NotebookLMClient | None = None
         self._connect_lock = asyncio.Lock()
         self._upload_lock = asyncio.Lock()
+        self.use_configured_prompt = False
+
+    @property
+    def connected(self):
+        return self._client is not None
+
+    async def configure_memory_prompt(self):
+        """Preserve the existing persona, write once, then verify exact readback."""
+        from notebooklm.types import ChatGoal, ChatResponseLength
+
+        client = await self._connect()
+        try:
+            with _private_sdk_logging():
+                original = await client.chat.get_settings(self.notebook_id)
+                persona = (
+                    (original.custom_prompt or "You are my memory manager.")
+                    .split(CUSTOM_MARKER, 1)[0]
+                    .rstrip()
+                )
+                prompt = f"{persona}\n\n{CUSTOM_MARKER}\n{CUSTOM_RULES.strip()}"
+                if (original.goal, original.response_length, original.custom_prompt) != (
+                    ChatGoal.CUSTOM,
+                    ChatResponseLength.DEFAULT,
+                    prompt,
+                ):
+                    await client.chat.configure(
+                        self.notebook_id,
+                        goal=ChatGoal.CUSTOM,
+                        response_length=ChatResponseLength.DEFAULT,
+                        custom_prompt=prompt,
+                    )
+                verified = await client.chat.get_settings(self.notebook_id)
+                if (verified.goal, verified.response_length, verified.custom_prompt) != (
+                    ChatGoal.CUSTOM,
+                    ChatResponseLength.DEFAULT,
+                    prompt,
+                ):
+                    raise NotebookLMError("Custom chat settings could not be verified.")
+            self.use_configured_prompt = True
+        except NotebookLMError:
+            raise
+        except Exception as error:
+            raise _safe_error(error) from None
 
     async def _connect(self) -> NotebookLMClient:
         async with self._connect_lock:
             if self._client is None:
+                trace("connection_open_start")
                 try:
                     with _private_sdk_logging():
                         context = self._factory(self.storage_path)
@@ -583,6 +638,7 @@ class NotebookLMAdapter:
                 except Exception as error:
                     raise _safe_error(error, loading_auth=True) from None
                 self._context, self._client = context, client
+                trace("connection_open_ready")
             return self._client
 
     async def list_sources(self) -> list[dict]:
@@ -760,10 +816,14 @@ class NotebookLMAdapter:
             raise ValueError("Explicit source IDs must contain at least one valid source")
         client = await self._connect()
         try:
-            with _private_sdk_logging():
+            from .query_trace import sdk_chat_trace
+
+            with _private_sdk_logging(), sdk_chat_trace(client.chat):
                 result = await client.chat.ask(
                     self.notebook_id,
-                    MEMORY_PROMPT.format(question=question) if archive_prompt else question,
+                    MEMORY_PROMPT.format(question=question)
+                    if archive_prompt and not self.use_configured_prompt
+                    else question,
                     source_ids=source_ids,
                 )
             return {

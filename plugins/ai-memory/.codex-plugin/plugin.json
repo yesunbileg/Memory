@@ -1,6 +1,6 @@
 {
   "name": "ai-memory",
-  "version": "0.1.0",
+  "version": "0.9.11",
   "description": "Archive completed local Codex turns and query approved NotebookLM memory.",
   "hooks": "./hooks/hooks.json",
   "interface": {

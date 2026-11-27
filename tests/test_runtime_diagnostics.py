@@ -34,7 +34,7 @@ def test_sync_persists_jobless_failure_and_recovery(tmp_path, monkeypatch, reaso
     db = tmp_path / "archive.sqlite"
     with Store(db) as store:
         store.set_setting("notebook_id", "synthetic")
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         asyncio.run(SyncEngine(store, SegmentBuilder(store), remote, tmp_path / "md").run_once())
         assert store.status()["sync_status"] == "up_to_date"
     remote.failure = reason
@@ -146,7 +146,7 @@ def test_build_preserves_existing_symlink_and_publishes_complete_fresh_export(tm
     outside = tmp_path / "existing-user-file"
     outside.write_text("must remain untouched")
     with Store(db) as store:
-        store.ingest(conversation(), consent=True)
+        store.ingest(conversation())
         builder = SegmentBuilder(store)
         builder.build()
         segment_id = store.connection.execute("SELECT id FROM segments").fetchone()[0]

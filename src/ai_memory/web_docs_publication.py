@@ -1,4 +1,4 @@
-"""Publish approved archive snapshots through Google Docs web sync."""
+"""Publish masked archive snapshots through Google Docs web sync."""
 
 import json
 from functools import partial

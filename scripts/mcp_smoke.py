@@ -18,7 +18,7 @@ async def smoke(db: Path):
         await client.initialize()
         tools = await client.list_tools()
         names = sorted(tool.name for tool in tools.tools)
-        if names != ["memory_ask", "memory_status"]:
+        if names != ["memory_ask", "memory_ask_all_goals_requirements", "memory_status"]:
             raise RuntimeError("Unexpected MCP tool contract")
         result = await client.call_tool("memory_status", {})
         if result.isError:

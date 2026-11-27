@@ -38,31 +38,15 @@ def parser():
     collect.add_argument("platform", choices=["codex", "opencode"])
     collect.add_argument("path", type=Path)
     collect.add_argument("--account", default="local")
-    collect.add_argument(
-        "--approve-upload",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    approve = sub.add_parser(
-        "approve",
-        help="Allow future Google uploads of these conversations, including later continuations (no network)",
-    )
-    approve.add_argument("conversation_ids", nargs="+")
-    sub.add_parser("pending", help="List local conversations awaiting Google upload permission")
-    preview = sub.add_parser(
-        "preview", help="Review exact masked Markdown locally, without granting consent"
-    )
+    preview = sub.add_parser("preview", help="Review exact masked Markdown locally")
     preview.add_argument("conversation_id")
-    revoke = sub.add_parser("revoke", help="Stop future uploads; do not delete old Google copies")
-    revoke.add_argument("conversation_ids", nargs="+")
     backup = sub.add_parser(
         "backup", help="Make a portable private SQLite backup including pending snapshots"
     )
     backup.add_argument("destination", type=Path)
     restore = sub.add_parser("restore", help="Restore a backup into a new --db archive path")
     restore.add_argument("backup", type=Path)
-    build = sub.add_parser("build", help="Generate approved Markdown segments, without networking")
+    build = sub.add_parser("build", help="Generate Markdown segments, without networking")
     build.add_argument("--output", type=Path)
     recover = sub.add_parser(
         "republish", help="Authorize republishing a confirmed missing cloud source"
@@ -70,11 +54,6 @@ def parser():
     recover.add_argument("segment_id")
     sync = sub.add_parser("sync", help="Upload changed segments, verify, then retire old sources")
     mode = sync.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--all-chats",
-        action="store_true",
-        help="Include every conversation already in this archive and its future continuations",
-    )
     mode.add_argument(
         "--automatic", action="store_true", help="Sync due work only when /auto on is enabled"
     )
@@ -120,7 +99,7 @@ def parser():
         help="Optional browser user-data root (not a profile subdirectory)",
     )
     connect.add_argument("--port", type=int, default=41770)
-    sub.add_parser("mcp", help="Serve memory_ask and memory_status over stdio")
+    sub.add_parser("mcp", help="Serve the three memory MCP tools over stdio")
     hook = sub.add_parser("hook", help="Import one completed session from a native hook on stdin")
     clients = hook.add_subparsers(dest="platform", required=True)
     for platform in ("codex", "opencode"):
@@ -160,7 +139,7 @@ async def _run_automatic_sync(engine):
 
 
 async def sync_archive(
-    store, *, progress=None, all_chats=False, automatic=False, archive_cold=False, docs_client=None
+    store, *, progress=None, automatic=False, archive_cold=False, docs_client=None
 ):
     from .archive_lock import archive_lock
     from .cold_archive import ENABLED, NEXT_CHECK
@@ -189,12 +168,6 @@ async def sync_archive(
         adapter = None
         owns_docs_client = docs_client is None
         try:
-            approved_count = 0
-            if all_chats:
-                with store.connection:
-                    approved_count = store.connection.execute(
-                        "UPDATE conversations SET consent=1 WHERE consent=0"
-                    ).rowcount
             adapter = NotebookLMAdapter(notebook_id, Path(storage) if storage else None)
             if store.get_setting(DOCS_SETTING) and docs_client is None:
                 from .web_docs_background import BackgroundDocsTransport
@@ -215,8 +188,6 @@ async def sync_archive(
             )
             if result is None:
                 return {"automatic": "stopped"}
-            if all_chats:
-                result["newly_included_conversations"] = approved_count
             errors = _preflight_errors(result)
             store.set_setting("sync_preflight_errors", errors)
             result["status"]["sync_preflight_errors"] = errors
@@ -250,7 +221,7 @@ async def rename_notebook_sources(store):
             await adapter.close()
 
 
-async def cleanup_legacy_archive(store, approved_ids):
+async def cleanup_legacy_archive(store, source_ids):
     from .archive_lock import archive_lock
     from .notebook import NotebookLMAdapter
     from .publication import cleanup_legacy_sources
@@ -261,7 +232,7 @@ async def cleanup_legacy_archive(store, approved_ids):
             raise PublicInputError("Set a notebook ID with init --notebook-id before cleanup")
         adapter = NotebookLMAdapter(notebook_id, store.get_setting("storage_path"))
         try:
-            return await cleanup_legacy_sources(store, adapter, approved_ids)
+            return await cleanup_legacy_sources(store, adapter, source_ids)
         finally:
             await adapter.close()
 
@@ -416,28 +387,11 @@ def execute(args, *, progress=None):
         if args.command == "collect":
             from .auto_publish import kick_sync
 
-            result = collect_into(
-                store, args.platform, args.path, args.account, args.approve_upload
-            )
+            result = collect_into(store, args.platform, args.path, args.account)
             kick_sync(store)
             return result
-        if args.command == "approve":
-            return {
-                "approved": store.approve_many(args.conversation_ids),
-                "includes_future_continuations": True,
-                "uploaded": False,
-            }
-        if args.command == "revoke":
-            return {
-                "revoked": store.revoke_many(args.conversation_ids),
-                "old_google_copies_deleted": False,
-            }
-        if args.command == "pending":
-            from .consent import pending
-
-            return pending(store)
         if args.command == "preview":
-            from .consent import preview
+            from .preview import preview
 
             return preview(store, args.conversation_id)
         if args.command == "backup":
@@ -456,7 +410,6 @@ def execute(args, *, progress=None):
                     sync_archive(
                         store,
                         progress=progress,
-                        all_chats=args.all_chats,
                         automatic=args.automatic,
                         archive_cold=args.archive_cold,
                     )
@@ -539,18 +492,6 @@ def main(argv=None, *, progress=None):
                 and not args.automatic
                 and not args.archive_cold
                 and status.get("sync_status") == "pending"
-                and (
-                    args.all_chats
-                    or any(
-                        status.get(key)
-                        for key in (
-                            "pending_approved_conversations",
-                            "pending_segments",
-                            "unassigned_messages",
-                            "pending_jobs",
-                        )
-                    )
-                )
             )
         ):
             return 1

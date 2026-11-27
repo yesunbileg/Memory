@@ -222,7 +222,6 @@ def run_demo(output: Path) -> dict:
             current = store.get_conversation(row["id"])
             if (
                 not fixture
-                or not current["consent"]
                 or any(current.get(k) != v for k, v in fixture.items() if k != "messages")
                 or len(current["messages"]) != len(fixture["messages"])
                 or any(
@@ -231,7 +230,7 @@ def run_demo(output: Path) -> dict:
                 )
             ):
                 raise PublicInputError(_CLEAN_OUTPUT)
-        ids = [store.ingest(c, consent=True) for c in fixtures]
+        ids = [store.ingest(c) for c in fixtures]
         builder = SegmentBuilder(store)
         builder.build()
         segment_dir = output / "segments"

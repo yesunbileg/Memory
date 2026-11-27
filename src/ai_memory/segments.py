@@ -32,6 +32,39 @@ def message_heading(row) -> str:
     return f"### {row['conversation_id']} · {row['sequence']:04d} · {row['role'].title()}{kind} · {row['timestamp'] or 'Unknown'}"
 
 
+OUTBOUND_SCHEMA = 2
+_PROVIDER_NAMES = {
+    "chatgpt": "ChatGPT",
+    "claude": "Claude",
+    "gemini": "Gemini",
+    "codex": "Codex",
+    "opencode": "OpenCode",
+}
+
+
+def outbound_schema(snapshot: str | bytes) -> int:
+    """Identify an immutable snapshot by its fixed front matter, not chat text."""
+    prefix = b"---\nschema: 2\n" if isinstance(snapshot, bytes) else "---\nschema: 2\n"
+    return 2 if snapshot.startswith(prefix) else 1
+
+
+def compact_message_heading(row, platform: str) -> str:
+    speaker = "User" if row["role"] == "user" else _PROVIDER_NAMES.get(platform, "Assistant")
+    kind = {"progress": " Progress", "thinking_summary": " Thinking"}.get(row["kind"], "")
+    stamp = row["timestamp"]
+    time = ""
+    if stamp:
+        try:
+            value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if value.tzinfo is not None:
+                time = " | " + value.astimezone(ZoneInfo("Asia/Ulaanbaatar")).strftime(
+                    "%m-%d %H:%M"
+                )
+        except (ValueError, OverflowError):
+            pass
+    return f"### {speaker}{kind}{time}"
+
+
 def mask_for_upload(text: str) -> str:
     """Contain a masking failure to the current field or message."""
     try:
@@ -73,24 +106,40 @@ class SegmentBuilder:
     def render(self, segment_id: str) -> str:
         return self._render(segment_id, outbound=False)
 
-    def render_outbound(self, segment_id: str, *, refresh_metadata: bool = False) -> str:
+    def render_outbound(
+        self, segment_id: str, *, refresh_metadata: bool = False, schema: int | None = None
+    ) -> str:
         """Serialize only reviewed cloud fields; local exports retain full originals."""
-        return self._render(segment_id, outbound=True, refresh_metadata=refresh_metadata)
+        return self._render(
+            segment_id, outbound=True, refresh_metadata=refresh_metadata, schema=schema
+        )
 
-    def _render(self, segment_id: str, *, outbound: bool, refresh_metadata: bool = False) -> str:
+    def _render(
+        self,
+        segment_id: str,
+        *,
+        outbound: bool,
+        refresh_metadata: bool = False,
+        schema: int | None = None,
+    ) -> str:
         db = self.store.connection
         segment = db.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
         if segment is None:
             raise ValueError("Segment does not exist")
-        if outbound and (
-            segment["state"] == "retired"
-            or db.execute(
-                """SELECT 1 FROM segment_messages sm JOIN messages m ON m.id=sm.message_id
-                JOIN conversations c ON c.id=m.conversation_id WHERE sm.segment_id=? AND c.consent=0 LIMIT 1""",
-                (segment_id,),
+        if outbound and segment["state"] == "retired":
+            raise ValueError("Retired segments cannot be published")
+        if not outbound:
+            schema = 1
+        elif schema is None:
+            # A persisted revision is immutable. New revisions use compact v2;
+            # existing pending/published v1 revisions remain reproducible.
+            saved = db.execute(
+                "SELECT snapshot FROM outbound_revisions WHERE segment_id=? AND revision=?",
+                (segment_id, segment["revision"]),
             ).fetchone()
-        ):
-            raise ValueError("Segment is not approved for upload")
+            schema = outbound_schema(saved[0]) if saved else OUTBOUND_SCHEMA
+        if schema not in (1, 2):
+            raise ValueError("Unsupported outbound schema")
         metadata_lines = (
             [
                 f"masking_policy: {MASKING_POLICY}",
@@ -101,7 +150,7 @@ class SegmentBuilder:
         )
         lines = [
             "---",
-            "schema: 1",
+            f"schema: {schema}",
             f"segment_id: {segment_id}",
             *metadata_lines,
             "timezone: Asia/Ulaanbaatar",
@@ -174,10 +223,15 @@ class SegmentBuilder:
                     lines.append(f"{name}: {yaml_value(value)}")
                 lines.extend(["```", ""])
                 previous = m["conversation_id"]
-            heading, text = message_heading(m), m["text"]
+            heading = (
+                compact_message_heading(m, c["platform"]) if schema == 2 else message_heading(m)
+            )
+            text = m["text"]
             if outbound:
                 heading, text = mask_for_upload(heading), mask_for_upload(text)
-            lines.extend([heading, "", text, "", "---", ""])
+            lines.extend([heading, "", text, ""])
+            if schema == 1:
+                lines.extend(["---", ""])
         return "\n".join(lines)
 
     def _refresh(self, segment_id: str) -> bool:
@@ -258,8 +312,7 @@ class SegmentBuilder:
                         "UPDATE segments SET state='sealed' WHERE id=? AND state='open'", (row[0],)
                     )
                 self.blocked.append({"reason": "CapacityError", "segment_id": row[0]})
-        pending = db.execute("""SELECT m.id,m.conversation_id FROM messages m JOIN conversations c
-            ON c.id=m.conversation_id WHERE c.consent=1 AND NOT EXISTS(
+        pending = db.execute("""SELECT m.id,m.conversation_id FROM messages m WHERE NOT EXISTS(
             SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
             WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""").fetchall()
         for row in pending:
@@ -286,7 +339,7 @@ class SegmentBuilder:
                     )
         if self.blocked and not changed:
             raise CapacityError(
-                "An approved unit exceeds the rendered or body limit; originals retained"
+                "An archive unit exceeds the rendered or body limit; originals retained"
             )
         return changed
 
@@ -296,8 +349,8 @@ class SegmentBuilder:
         budget_exhausted = False
         with db:
             pending = db.execute(
-                """SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id
-                WHERE c.consent=1 AND (? IS NULL OR m.id=?) AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
+                """SELECT m.* FROM messages m
+                WHERE (? IS NULL OR m.id=?) AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN segments s ON s.id=sm.segment_id
                 WHERE sm.message_id=m.id AND s.state!='retired') ORDER BY m.rowid""",
                 (only_message_id, only_message_id),
             ).fetchall()

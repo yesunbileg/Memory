@@ -50,10 +50,6 @@ def allowed_sources(store, *, include_staged=False):
        WHERE s.state!='retired' AND r.masking_policy=? AND r.remote_state='ready'
          AND s.id NOT IN (SELECT value FROM json_each(?))
          AND NOT EXISTS(SELECT 1 FROM sync_jobs h WHERE h.segment_id=s.id AND h.stage='missing')
-         AND NOT EXISTS(SELECT 1 FROM retained_segments rs WHERE rs.segment_id=m.segment_id)
-         AND NOT EXISTS(SELECT 1 FROM segment_messages sm JOIN messages msg ON msg.id=sm.message_id
-           JOIN conversations c ON c.id=msg.conversation_id
-           WHERE sm.segment_id=m.segment_id AND c.consent!=1)
        ORDER BY m.segment_id""",
             (MASKING_POLICY, json.dumps(staged)),
         )
@@ -154,7 +150,7 @@ def publication_status(store, *, sources=None):
     }
 
 
-async def cleanup_legacy_sources(store, adapter, approved_ids):
+async def cleanup_legacy_sources(store, adapter, source_ids):
     """Preview old replacements and delete only explicitly selected source IDs."""
     sources = {source["id"]: source for source in await adapter.list_sources()}
     eligible = allowed_sources(store)
@@ -172,7 +168,6 @@ async def cleanup_legacy_sources(store, adapter, approved_ids):
           AND EXISTS (SELECT 1 FROM json_each(replacement.prior_source_ids)
                       WHERE value=old.new_source_id)
           AND NOT EXISTS (SELECT 1 FROM source_map WHERE source_id=old.new_source_id)
-          AND NOT EXISTS (SELECT 1 FROM retained_sources WHERE source_id=old.new_source_id)
         ORDER BY old.segment_id, old.revision
     """)
     checked = {}
@@ -199,7 +194,7 @@ async def cleanup_legacy_sources(store, adapter, approved_ids):
             for key in ("source_id", "segment_id", "revision", "title", "replacement_revision")
         }
 
-    requested = list(dict.fromkeys(approved_ids))
+    requested = list(dict.fromkeys(source_ids))
     if any(source_id not in checked for source_id in requested):
         raise PublicInputError(
             "An ID does not match a legacy copy with a verified ready replacement. Run cleanup-legacy to review the candidates."
