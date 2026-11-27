@@ -12,6 +12,7 @@ import {
 import { parseConnectionFile, connectionPresentation } from './connection-file.js';
 import { nonempty, scopeFor } from './popup-scope.js';
 import './page-picker-routes.js';
+import { sendProviderMessage } from './lib/tab-message.js';
 
 const el = (id) => document.getElementById(id);
 const providers = Object.keys(PROVIDERS);
@@ -66,7 +67,7 @@ function setText(id, value) {
 
 function setSettings(open) {
   el('settings-panel').hidden = !open;
-  el('list-panel').hidden = open;
+  el('archive-panel').hidden = open;
   el('settings').setAttribute('aria-expanded', String(open));
   el('settings').textContent = open ? 'Done' : 'Settings';
   renderSyncPlan();
@@ -107,7 +108,7 @@ function describeScope(provider) {
   let chats = 0,
     projects = 0,
     recents = false;
-  for (const entry of scopes[provider].entries) {
+  for (const entry of scopes[provider]?.entries ?? []) {
     chats += entry.conversationIds.length;
     projects += entry.projectIds.length;
     recents ||= entry.includeRecents === true;
@@ -117,13 +118,25 @@ function describeScope(provider) {
     projects && `${projects} ${projects === 1 ? 'project' : 'projects'}`,
     recents && 'all Recents',
   ];
-  return `${names[provider]} · ${items.filter(Boolean).join(', ')}`;
+  return items.filter(Boolean).join(', ');
 }
 
 function renderSyncPlan() {
   const selected = providers.filter((provider) => nonempty(scopes[provider]));
   const enabled = selected.filter((provider) => settings.providers[provider]);
   const settingsOpen = !el('settings-panel').hidden;
+  el('api-title').dataset.connection = connected
+    ? 'online'
+    : connectionCode
+      ? 'offline'
+      : 'checking';
+  for (const provider of providers) {
+    const items = describeScope(provider);
+    const disabled = !settings.providers[provider];
+    const node = el('scope-' + provider);
+    setText('scope-' + provider, (items || '0 chats') + (disabled && items ? ' · Paused' : ''));
+    node.dataset.inactive = String(!items || disabled);
+  }
   el('connection-action').hidden =
     connected || !connectionCode || connectionCode === 'untrusted_sender' || settingsOpen;
   const hint = !connected
@@ -134,15 +147,18 @@ function renderSyncPlan() {
         ? 'Enable sync for ' +
           selected.map((provider) => names[provider]).join(', ') +
           (settingsOpen ? '.' : ' in Settings.')
-        : settingsOpen
-          ? 'Close Settings to choose chats.'
-          : bulkPage
-            ? 'Select chats below or use the sidebar checkboxes.'
-            : 'Open ChatGPT, Claude, or Gemini to select chats.';
+        : settingsOpen || bulkPage
+          ? 'Choose chats in Settings.'
+          : 'Open ChatGPT, Claude, or Gemini to select chats.';
   setText('plan-hint', hint);
   el('plan-hint').hidden = !hint;
   const canSync = connected && enabled.length > 0;
-  setText('sync-scope', canSync ? enabled.map(describeScope).join('\n') : '');
+  setText(
+    'sync-scope',
+    canSync
+      ? enabled.map((provider) => names[provider] + ' · ' + describeScope(provider)).join('\n')
+      : '',
+  );
   el('sync-scope').hidden = !canSync;
   setText(
     'schedule',
@@ -606,7 +622,8 @@ async function updateListMode(toggle = false) {
         el('mode-status').textContent = message.enabled
           ? 'Checking the list on ' + name + '…'
           : 'Hiding checkboxes…';
-      const reply = await chrome.tabs.sendMessage(page.tabId, message, { frameId: 0 });
+      const route = globalThis.aiMemoryPageRoutes.pageContext(page.url);
+      const reply = await sendProviderMessage({ ...page, ...(route || {}) }, message);
       if (
         reply?.ok === true &&
         reply.provider === page.provider &&
@@ -675,6 +692,10 @@ async function requestSync(provider) {
     (provider && (!settings.providers[provider] || !nonempty(scopes[provider])))
   )
     return;
+  if (provider) {
+    setSettings(false);
+    el('settings').focus();
+  }
   syncPending = true;
   stopError = '';
   syncSince = Date.now();

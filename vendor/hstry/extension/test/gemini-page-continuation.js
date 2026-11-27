@@ -73,3 +73,20 @@ test('an unreadable Gemini continuation listing cannot authorize detail requests
   assert.match(next.selectionWarning, /incomplete/i);
   assert.equal(next.state.lastSyncMs, first.state.lastSyncMs);
 });
+
+test('legacy retry-only queue cannot starve newly discovered selected chats', async (t) => {
+  const f = fixture(t);
+  f.detailFailures.add('1');
+  let r = await f.run();
+  while (r.hasMore) r = await f.run(r.state);
+  assert.equal(r.state.pending.summaries.length, 1);
+  assert.equal(r.state.pending.retryOnly, true);
+  delete r.state.pending.retryOnly; // migrate existing installation checkpoint
+  f.reads.length = f.sent.length = 0;
+  let next = await f.run(r.state);
+  while (next.hasMore) next = await f.run(next.state);
+  assert.ok(f.reads.includes('1'));
+  assert.ok(f.reads.includes('13'));
+  assert.ok(f.sent.includes('13'));
+  assert.match(next.selectionWarning, /incomplete/i);
+});

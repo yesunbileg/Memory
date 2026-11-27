@@ -7,6 +7,7 @@
   const gptChat = new RegExp('^/(?:g/g-[^/]+/)?c/(' + uuid + ')/?$', 'i');
   const claudeItem = new RegExp('^/(chat|project)/(' + uuid + ')/?$', 'i');
   const geminiPage = /^\/(?:u\/(\d+)\/)?app(?:\/([a-zA-Z0-9_-]{1,258}))?\/?$/;
+  const geminiGem = /^\/(?:u\/(\d+)\/)?gem\/[a-zA-Z0-9_-]{1,128}\/([a-f0-9]{16})\/?$/i;
   const restricted =
     /(?:^|[^\p{L}\p{N}])(?:locked?|lockedchats?|archived?|archivedchats?|share[d]?|auth|login|settings|datacontrols)(?:$|[^\p{L}\p{N}])/iu;
   function parsed(value, base) {
@@ -44,7 +45,7 @@
     )
       return { provider: 'claude', slot: null };
     if (u.hostname !== 'gemini.google.com') return null;
-    const match = p.match(geminiPage);
+    const match = p.match(geminiPage) ?? p.match(geminiGem);
     if (p !== '/' && !match) return null;
     if (
       match?.[2] &&
@@ -84,7 +85,10 @@
     } else {
       const { slot } = info(url);
       if (slot !== null && slot !== (context.slot ?? '0')) return null;
-      const id = url.pathname.match(geminiPage)?.[2]?.replace(/^c_/, '');
+      const id = (url.pathname.match(geminiPage) ?? url.pathname.match(geminiGem))?.[2]?.replace(
+        /^c_/,
+        '',
+      );
       if (id && id.length <= 256) return { kind: 'conversation', id };
     }
     return null;

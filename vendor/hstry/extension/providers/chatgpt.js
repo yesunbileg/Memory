@@ -1,3 +1,4 @@
+import { sendProviderMessage } from '../lib/tab-message.js';
 import { listPopupCatalog, syncPopupScope, unavailable } from './popup-catalog.js';
 import { readSyncList, hasItems, sessionPrincipal } from '../chatgpt-sync-list.js';
 import { drainSelected, preparePrincipalRun } from './queue.js';
@@ -11,7 +12,6 @@ import {
   textPart,
   thinkingPart,
   toMs,
-  withAbort,
 } from '../lib/common.js';
 
 import {
@@ -32,15 +32,7 @@ const OVERLAP_MS = 5 * 60 * 1000;
 
 export async function getChatGPTSession(context, signal) {
   const data = await (context
-    ? withAbort(
-        () =>
-          chrome.tabs.sendMessage(
-            context.tabId,
-            { type: 'GET_CHATGPT_TAB_SESSION' },
-            { frameId: 0, ...(context.documentId ? { documentId: context.documentId } : {}) },
-          ),
-        signal,
-      ).catch(() => {
+    ? sendProviderMessage(context, { type: 'GET_CHATGPT_TAB_SESSION' }, signal).catch(() => {
         signal?.throwIfAborted();
         throw Object.assign(new Error('The ChatGPT tab is unavailable.'), {
           code: 'provider_tab_unavailable',

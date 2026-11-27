@@ -461,8 +461,16 @@ export function captureOutcome(status, providers, since = 0) {
       else if (unavailable > 0) {
         missingTabCount += unavailable;
         missingTabs.push(unavailable === 1 ? name : `${name} (${unavailable} accounts)`);
-      } else if (entry.selectionWarning) problems.push(`Unverified chats · ${name}`);
-      else problems.push(`${name} · ${friendlyError('', entry.lastErrorCode)}`);
+        if (entry.progress?.tabBridgeFailures > 0) problems.push(`Tab connection failed · ${name}`);
+      } else if (entry.selectionWarning) {
+        const warning = entry.selectionWarning;
+        const label = /could not be read|capture is incomplete|receipt incomplete/i.test(warning)
+          ? 'Incomplete capture'
+          : /discovery is incomplete/i.test(warning)
+            ? 'Incomplete chat list'
+            : 'Unverified chats';
+        problems.push(`${label} · ${name}`);
+      } else problems.push(`${name} · ${friendlyError('', entry.lastErrorCode)}`);
     } else complete++;
   }
   if (missingTabCount) {

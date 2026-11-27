@@ -114,7 +114,12 @@ async function popup({
 test('opening the popup is passive and list mode changes only on the active page', async () => {
   const { get, data, calls, queries, messages } = await popup();
   const toggle = get('list-mode');
-  assert.ok(toggle, 'the toolbar exposes a list mode control');
+  assert.ok(toggle, 'Settings exposes a list mode control');
+  assert.equal(get('settings-panel').hidden, true);
+  assert.equal(get('archive-panel').hidden, false);
+  await get('settings').fire('click');
+  assert.equal(get('settings-panel').hidden, false);
+  assert.equal(get('archive-panel').hidden, true);
   assert.ok(!get('catalog-items') && !get('saved-items') && !get('add-selection'));
   assert.equal(toggle.disabled, false, 'choosing on the page does not need a connected archive');
   assert.equal(toggle.getAttribute('aria-pressed'), 'false');
@@ -475,6 +480,9 @@ test('the empty sync plan points to an eligible tab and lists enabled provider s
     'ChatGPT · 2 chats, 1 project, all Recents\nClaude · 1 chat',
   );
   assert.equal(get('schedule').textContent, 'Auto-sync every 15 min');
+  assert.equal(get('scope-chatgpt').textContent, '2 chats, 1 project, all Recents');
+  assert.equal(get('scope-claude').textContent, '1 chat');
+  assert.equal(get('scope-gemini').textContent, '1 chat · Paused');
 });
 
 test('the popup replaces Sync now with Stop sync while a run is queued or active', async () => {

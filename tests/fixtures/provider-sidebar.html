@@ -70,6 +70,20 @@
     unrelatedDialog.append(row('dialog-chat', '/chat/44444444-4444-4444-8444-444444444444', 'Search result'));
     drawer.append(unrelatedDialog);
   } else if (location.hostname === 'gemini.google.com') {
+    // Gemini mounts its navigation drawer inside main.chat-app.
+    const shell = document.querySelector('main');
+    shell.classList.add('chat-app');
+    const navigation = document.createElement('side-navigation-v2');
+    const drawer = document.createElement('mat-sidenav');
+    navigation.append(drawer);
+    shell.prepend(navigation);
+    drawer.append(document.querySelector('aside'));
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.append(row('gemini-dialog-chat', '/u/0/app/abcdef123456abcd', 'Search result'));
+    drawer.append(dialog);
+    window.replaceGeminiRow = () => document.querySelector('#individual')
+      .replaceWith(row('individual', '/u/0/app/abcdef123456abcd', 'Renamed Gemini chat'));
     historyRows.append(row('individual', '/u/0/app/abcdef123456abcd', 'Gemini chat'),
       row('spare', '/u/0/app/ffffffffffffffff', 'Other chat'));
   }

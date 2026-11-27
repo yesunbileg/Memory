@@ -275,3 +275,18 @@ test('incomplete discovery still archives completed chats while deferring incomp
   assert.equal(captured.pushed[0].messages[0].content, ' complete exact text\n');
   assert.equal(captured.pushed[0].messages[0].metadata.id, 'complete-native:user');
 });
+
+test('native assistant candidate with explicitly null text preserves user turn and other messages', async () => {
+  const noAnswer = [
+    'native-unanswered',
+    null,
+    [['question without text answer']],
+    [[['candidate-id', null]]],
+  ];
+  const captured = await capture({ detail: () => [[turn('new'), noAnswer, turn('old')], null] });
+  assert.equal(captured.result.selectionWarning, null);
+  assert.deepEqual(
+    captured.pushed[0].messages.map((m) => m.metadata.id),
+    ['old:user', 'old:assistant', 'native-unanswered:user', 'new:user', 'new:assistant'],
+  );
+});

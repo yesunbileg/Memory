@@ -351,11 +351,20 @@ async function readChat(session, summary, guard, context, signal) {
       for (const turn of pageTurns) {
         const hasUser = typeof turn?.[2]?.[0]?.[0] === 'string';
         const hasAssistant = typeof turn?.[3]?.[0]?.[0]?.[1]?.[0] === 'string';
+        const candidate = turn?.[3]?.[0]?.[0];
+        const emptyAssistant =
+          Array.isArray(turn?.[3]) &&
+          Array.isArray(turn[3][0]) &&
+          turn[3][0].length === 1 &&
+          Array.isArray(candidate) &&
+          typeof candidate[0] === 'string' &&
+          candidate[0].length > 0 &&
+          candidate[1] === null;
         if (
           !Array.isArray(turn) ||
           (!hasUser && !hasAssistant) ||
           (turn[2] != null && !hasUser) ||
-          (turn[3] != null && !hasAssistant)
+          (turn[3] != null && !hasAssistant && !emptyAssistant)
         )
           throw new Error('Gemini turn text shape is unavailable');
         const id = nativeTurnId(turn);
@@ -502,7 +511,18 @@ export async function syncGemini({
   await register('gemini-web', 'gemini');
   const lastSyncMs = matchingSession ? (state?.lastSyncMs ?? null) : null;
   const since = lastSyncMs ? lastSyncMs - OVERLAP_MS : null;
-  const pending = matchingSession ? state?.pending : null;
+  const savedPending = matchingSession ? state?.pending : null;
+  // A retry-only queue must never replace the next fresh catalog scan.
+  // Migrate the old retry checkpoint shape as well.
+  const retryOnly =
+    explicit &&
+    savedPending &&
+    (savedPending.retryOnly === true ||
+      (savedPending.nextIndex === 0 &&
+        savedPending.hadFailures === false &&
+        !Object.hasOwn(savedPending, 'retrySummaries')));
+  const retryIds = new Set(retryOnly ? savedPending.summaries?.map((s) => s.id) : []);
+  const pending = retryOnly ? null : savedPending;
   if (!fingerprint)
     selectionWarning = [
       selectionWarning,
@@ -522,7 +542,7 @@ export async function syncGemini({
           await verifySession();
           discoveryState = {
             ...discoveryState,
-            ...(pending && { pending }),
+            ...(savedPending && { pending: savedPending }),
             discovery: { ...progress, runStartedMs },
           };
           await guard();
@@ -590,7 +610,8 @@ export async function syncGemini({
     } else {
       missing = [...wanted].some((id) => !listed.has(id));
       summaries = summaries.filter(
-        (s) => wanted.has(s.id) && (!since || !s.updatedAt || s.updatedAt > since),
+        (s) =>
+          wanted.has(s.id) && (retryIds.has(s.id) || !since || !s.updatedAt || s.updatedAt > since),
       );
     }
   }
@@ -711,6 +732,7 @@ export async function syncGemini({
     finalState.pending = {
       runStartedMs,
       summaries: retrySummaries,
+      ...(explicit && { retryOnly: true }),
       nextIndex: 0,
       hadFailures: false,
       discoveryIncomplete: false,

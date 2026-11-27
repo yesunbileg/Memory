@@ -92,3 +92,24 @@ test('Claude and Gemini rows use native API identifiers, not folders or a differ
   ])
     assert.equal(routes.rowFromHref(href, gemini), null, href);
 });
+
+test('Gemini Gem chat routes preserve account slot and native chat identity', () => {
+  const base = 'https://gemini.google.com';
+  const id = 'abcdef123456abcd';
+  assert.deepEqual(routes.pageContext(base + '/gem/coding-partner/' + id), {
+    provider: 'gemini',
+    slot: null,
+  });
+  assert.deepEqual(routes.pageContext(base + '/u/2/gem/coding-partner/' + id), {
+    provider: 'gemini',
+    slot: '2',
+  });
+  assert.deepEqual(routes.rowFromHref('/gem/coding-partner/' + id, base + '/app'), {
+    kind: 'conversation',
+    id,
+  });
+  assert.equal(routes.pageContext(base + '/u/2/gem/coding-partner/' + id + '?authuser=1'), null);
+  assert.equal(routes.rowFromHref('/u/1/gem/coding-partner/' + id, base + '/u/2/app'), null);
+  assert.equal(routes.pageContext(base + '/gem/coding-partner'), null);
+  assert.equal(routes.pageContext(base + '/gem/coding-partner/not-a-chat'), null);
+});

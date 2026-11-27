@@ -16,23 +16,27 @@
       <button id="settings" aria-expanded="false" aria-controls="settings-panel">Settings</button>
     </header>
     <main>
-      <section class="archive" aria-labelledby="archive-title">
-        <div class="line">
-          <h1 id="archive-title">Local archive</h1>
-          <button
-            id="sync"
-            class="primary"
-            aria-describedby="sync-scope schedule plan-hint"
-            disabled
-          >
-            Sync now
-          </button>
+      <section id="archive-panel" class="archive" aria-labelledby="archive-title">
+        <h1 id="archive-title">Selected</h1>
+        <div class="selection-list" aria-label="Saved selections by provider">
+          <div class="selection-row">
+            <span>ChatGPT</span><span id="scope-chatgpt" class="selection-value">—</span>
+          </div>
+          <div class="selection-row">
+            <span>Claude</span><span id="scope-claude" class="selection-value">—</span>
+          </div>
+          <div class="selection-row">
+            <span>Gemini</span><span id="scope-gemini" class="selection-value">—</span>
+          </div>
         </div>
+        <p id="sync-scope" class="sr-only" hidden></p>
         <p id="plan-hint" class="muted" hidden></p>
         <button id="connection-action" type="button" hidden>Connection settings</button>
-        <p id="sync-scope" class="muted" hidden></p>
-        <p id="schedule" class="muted" hidden></p>
+        <button id="sync" class="primary" aria-describedby="sync-scope schedule plan-hint" disabled>
+          Sync now
+        </button>
         <progress id="sync-progress" aria-label="Local sync progress" hidden></progress>
+        <p id="schedule" class="muted" hidden></p>
         <div id="notice" role="status" aria-atomic="true">
           <p id="last-sync" class="muted"></p>
           <strong id="notice-label"></strong><span id="notice-counts"></span>
@@ -40,70 +44,105 @@
         </div>
       </section>
       <section id="settings-panel" hidden aria-labelledby="settings-title" class="panel">
-        <div class="line">
-          <h2 id="settings-title">Local connection</h2>
-          <button id="retry">Check connection</button>
-        </div>
-        <p id="api-detail" class="muted"></p>
-        <details id="automatic-connection">
-          <summary>Set up automatic connection</summary>
-          <label class="field"
-            >Browser<select id="browser-family">
-              <option value="brave">Brave</option>
-              <option value="chrome">Chrome</option>
-              <option value="chromium">Chromium</option>
-            </select></label
+        <h1 id="settings-title">Settings</h1>
+        <section id="list-panel" class="settings-group" aria-labelledby="selection-title">
+          <h2 id="selection-title">Chat selection</h2>
+          <span id="mode-site" hidden>Current tab</span>
+          <button
+            type="button"
+            id="list-mode"
+            aria-pressed="false"
+            aria-describedby="mode-site mode-status"
+            disabled
           >
-          <p class="muted">
-            Run this once from your AI Memory folder, then click Check connection. For a custom
-            archive, add <kbd>--db PATH</kbd> before <kbd>connect</kbd>.
-          </p>
-          <code id="setup-command"></code>
-          <button id="copy-command" type="button">Copy command</button>
-          <p id="copy-status" class="feedback" role="status"></p>
-        </details>
-        <details id="manual-connection">
-          <summary>Connect a different archive manually</summary>
-          <label class="field"
-            >Connection file<input
-              id="connection-file"
-              type="file"
-              accept=".json,application/json"
-              aria-describedby="file-status"
-          /></label>
-          <p id="file-status" class="feedback" role="status"></p>
-          <details>
-            <summary>Paste connection file contents instead</summary>
+            List mode
+            <span class="switch-state" aria-hidden="true">
+              <span class="switch-track"></span><span id="mode-state">Off</span>
+            </span>
+          </button>
+          <p id="mode-status" class="muted" role="status">Checking the current tab…</p>
+          <div id="bulk-controls" class="bulk-controls" aria-label="Chat selection" hidden>
+            <p id="bulk-account" class="muted"></p>
+            <button id="bulk-select" type="button">Select all chats</button>
+            <button id="bulk-clear" type="button">Clear workspace selection</button>
+            <label id="bulk-workspace-field" class="field inline" hidden
+              >Workspace<select id="bulk-workspace"></select
+            ></label>
+            <p id="bulk-status" class="feedback bulk-status" role="status"></p>
+            <button id="bulk-undo" type="button" aria-describedby="bulk-status" hidden>
+              Undo clear
+            </button>
+            <button id="bulk-enable" type="button" hidden>Enable provider</button>
+          </div>
+        </section>
+        <section class="settings-group" aria-labelledby="connection-title">
+          <div class="line">
+            <h2 id="connection-title">Local connection</h2>
+            <button id="retry">Check connection</button>
+          </div>
+          <p id="api-detail" class="muted"></p>
+          <details id="automatic-connection">
+            <summary>Set up automatic connection</summary>
             <label class="field"
-              >Connection JSON<textarea
-                id="connection-json"
-                spellcheck="false"
-                autocomplete="off"
-                maxlength="16384"
-                rows="2"
-                aria-describedby="json-status"
-              ></textarea>
-            </label>
-            <p id="json-status" class="feedback" role="status"></p>
-            <button id="verify-json" type="button">Verify connection</button>
+              >Browser<select id="browser-family">
+                <option value="brave">Brave</option>
+                <option value="chrome">Chrome</option>
+                <option value="chromium">Chromium</option>
+              </select></label
+            >
+            <p class="muted">
+              Run this once from your AI Memory folder, then click Check connection. For a custom
+              archive, add <kbd>--db PATH</kbd> before <kbd>connect</kbd>.
+            </p>
+            <code id="setup-command"></code>
+            <button id="copy-command" type="button">Copy command</button>
+            <p id="copy-status" class="feedback" role="status"></p>
           </details>
-        </details>
-        <h2>Sync preferences</h2>
-        <p class="muted">Only checked items from enabled providers can sync.</p>
-        <div class="toggles">
-          <label><input id="toggle-chatgpt" type="checkbox" />ChatGPT</label
-          ><label><input id="toggle-claude" type="checkbox" />Claude</label
-          ><label><input id="toggle-gemini" type="checkbox" />Gemini</label>
-        </div>
-        <label class="check-line"
-          ><input id="auto-paused" type="checkbox" />Pause automatic sync</label
-        >
-        <label class="field inline"
-          >Check every
-          <input id="interval" type="number" min="1" max="720" step="1" /> minutes</label
-        >
-        <p id="preferences-status" class="feedback" role="status"></p>
-        <details>
+          <details id="manual-connection">
+            <summary>Connect a different archive manually</summary>
+            <label class="field"
+              >Connection file<input
+                id="connection-file"
+                type="file"
+                accept=".json,application/json"
+                aria-describedby="file-status"
+            /></label>
+            <p id="file-status" class="feedback" role="status"></p>
+            <details>
+              <summary>Paste connection file contents instead</summary>
+              <label class="field"
+                >Connection JSON<textarea
+                  id="connection-json"
+                  spellcheck="false"
+                  autocomplete="off"
+                  maxlength="16384"
+                  rows="2"
+                  aria-describedby="json-status"
+                ></textarea>
+              </label>
+              <p id="json-status" class="feedback" role="status"></p>
+              <button id="verify-json" type="button">Verify connection</button>
+            </details>
+          </details>
+        </section>
+        <section class="settings-group" aria-labelledby="preferences-title">
+          <h2 id="preferences-title">Sync preferences</h2>
+          <p class="muted">Only checked items from enabled providers can sync.</p>
+          <div class="toggles">
+            <label><input id="toggle-chatgpt" type="checkbox" />ChatGPT</label
+            ><label><input id="toggle-claude" type="checkbox" />Claude</label
+            ><label><input id="toggle-gemini" type="checkbox" />Gemini</label>
+          </div>
+          <label class="check-line"
+            ><input id="auto-paused" type="checkbox" />Pause automatic sync</label
+          >
+          <label class="field inline"
+            >Check every
+            <input id="interval" type="number" min="1" max="720" step="1" /> minutes</label
+          >
+          <p id="preferences-status" class="feedback" role="status"></p>
+        </section>
+        <details class="settings-group">
           <summary>Sync activity and rescan</summary>
           <p class="muted">Rescan checks older saved items without duplicating messages.</p>
           <div id="provider-status"></div>
@@ -112,35 +151,6 @@
           <div id="activity"></div>
         </details>
         <small id="version" class="muted"></small>
-      </section>
-      <section id="list-panel" aria-label="Choose items to sync">
-        <span id="mode-site" hidden>Current tab</span>
-        <button
-          type="button"
-          id="list-mode"
-          aria-pressed="false"
-          aria-describedby="mode-site mode-status"
-          disabled
-        >
-          List mode
-          <span class="switch-state" aria-hidden="true">
-            <span class="switch-track"></span><span id="mode-state">Off</span>
-          </span>
-        </button>
-        <p id="mode-status" class="muted" role="status">Checking the current tab…</p>
-        <div id="bulk-controls" class="bulk-controls" aria-label="Chat selection" hidden>
-          <p id="bulk-account" class="muted"></p>
-          <button id="bulk-select" type="button">Select all chats</button>
-          <button id="bulk-clear" type="button">Clear workspace selection</button>
-          <label id="bulk-workspace-field" class="field inline" hidden
-            >Workspace<select id="bulk-workspace"></select
-          ></label>
-          <p id="bulk-status" class="feedback bulk-status" role="status"></p>
-          <button id="bulk-undo" type="button" aria-describedby="bulk-status" hidden>
-            Undo clear
-          </button>
-          <button id="bulk-enable" type="button" hidden>Enable provider</button>
-        </div>
       </section>
     </main>
     <script src="popup.js" type="module"></script>

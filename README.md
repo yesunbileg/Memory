@@ -148,11 +148,11 @@ For a standalone extension, run `.venv/bin/python scripts/package_extension.py`.
 
 Click **AI Memory** in the browser toolbar. On first open, the popup verifies the registered archive and connects automatically. The browser launches the local host as needed. If you registered with an older AI Memory version and the popup is still disconnected, run the command again using the updated local installation, then click **Settings → Check connection**. For a second archive or a custom browser data directory, see [native pairing](docs/native-pairing.md).
 
-Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in the AI Memory toolbar popup. Checkboxes appear beside supported links on that page. After installing or reloading the extension, refresh any provider tab that was already open. List mode is per tab and starts off on each new document.
+Open a signed-in ChatGPT, Claude or Gemini tab and turn on **List mode** in **AI Memory → Settings**. Checkboxes appear beside supported links on that page. After installing or reloading the extension, refresh any provider tab that was already open. List mode is per tab and starts off on each new document.
 
 | What you do | What happens |
 | --- | --- |
-| Click **Select all chats** in the popup | Selects the current eligible chats in the active account's workspace, including chats outside the visible sidebar. Choose a workspace if several are available. **Clear workspace selection** removes the workspace's saved choices. |
+| Click **Select all chats** in Settings | Selects the current eligible chats in the active account's workspace, including chats outside the visible sidebar. Choose a workspace if several are available. **Clear workspace selection** removes the workspace's saved choices. |
 | Check a project in the sidebar | Saves the project ID immediately. At sync, its eligible chats are included, even when the project was collapsed or a chat was not visible. Gemini offers chats only. |
 | Check the **Recents** heading on ChatGPT | Includes all ordinary Recent chats in that account on each sync, including newly added ones. Pinned, project, GPT, locked and archived chats are excluded from this group. Turning it off keeps individual selections. |
 | Check an individual chat | Saves that chat separately. A dash means a selected project already includes it. You can still check it to keep it on the list independently of its project. A chat covered twice is captured once. |

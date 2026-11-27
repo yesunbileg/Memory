@@ -2,6 +2,12 @@
 // scope authority. Only the worker verifies membership and persists a single ID.
 (() => {
   if (window !== window.top || !chrome.runtime?.id) return;
+  // Manifest injection and recovery may race; keep a single live listener.
+  if (
+    globalThis.aiMemoryPickerListener &&
+    chrome.runtime.onMessage.hasListener?.(globalThis.aiMemoryPickerListener)
+  )
+    return;
   const routes = globalThis.aiMemoryPageRoutes;
   const nav =
     'nav,aside,[role="navigation"],#history,[id*="sidebar" i],[data-testid*="sidebar" i],bard-sidenav,mat-sidenav,side-navigation-v2';
@@ -17,6 +23,18 @@
   const outside = outsideContent + ',[role="dialog"]';
   // Claude uses a modal dialog for its navigation drawer in a narrow window.
   const claudeOutside = outsideContent + ',[role="dialog"]:not(' + claudeCompactSidebar + ')';
+  // Gemini's Angular drawer is mounted inside main.chat-app, unlike the
+  // transcript (which must remain excluded). Only permit that outer shell.
+  const geminiDrawer = 'side-navigation-v2 mat-sidenav';
+  function isExcluded(el, provider) {
+    const excluded = provider === 'claude' ? claudeOutside : outside;
+    const drawer = provider === 'gemini' && el.closest(geminiDrawer);
+    for (let node = el.closest(excluded); node; node = node.parentElement?.closest(excluded)) {
+      if (drawer && node.matches('main.chat-app') && node.contains(drawer)) continue;
+      return true;
+    }
+    return false;
+  }
   const hidden = '[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]';
   const privacyAttrs = ['data-locked', 'data-is-locked', 'data-archived', 'data-is-archived'];
   const marked = privacyAttrs
@@ -40,7 +58,7 @@
       'a[href*="/c/"],a[href*="/g/g-p-" i],button[data-project-id],[role="button"][data-project-id],' +
       `[role="button"][${nativeProjectRow}][${nativeProjectId}]`,
     claude: 'a[href*="/chat/"],a[href*="/project/"]',
-    gemini: 'a[href*="/app/"]',
+    gemini: 'a[href*="/app/"],a[href*="/gem/"]',
   };
   const css = [
     '[data-memory-sync-row]{anchor-name:var(--ai-memory-picker-anchor)!important;padding-inline-start:44px!important}',
@@ -82,7 +100,7 @@
     const r = el.getBoundingClientRect();
     return r.height > 0 && r.width > 0 && r.right > 0 && r.left < window.innerWidth;
   }
-  function label(el, excluded) {
+  function label(el, provider) {
     const id = el.getAttribute('aria-labelledby');
     return (
       el.getAttribute('aria-label') ||
@@ -91,7 +109,7 @@
           .split(/\s+/)
           .map((i) => {
             const node = document.getElementById(i);
-            return node && !node.closest(excluded) ? node.textContent : '';
+            return node && !isExcluded(node, provider) ? node.textContent : '';
           })
           .join(' ')) ||
       el.getAttribute('title') ||
@@ -137,15 +155,22 @@
     const excluded = s.provider === 'claude' ? claudeOutside : outside;
     // Query navigation candidates, not messages or titles in the conversation.
     // Excluding main/article here also keeps streamed message links out of scans.
+    const candidates = ':is(' + selector + ',' + heads + ')';
     const query =
-      ':is(' + selector + ',' + heads + '):not(:is(' + excluded + '),:is(' + excluded + ') *)';
+      candidates +
+      ':not(:is(' +
+      excluded +
+      '),:is(' +
+      excluded +
+      ') *)' +
+      (s.provider === 'gemini' ? ',' + geminiDrawer + ' ' + candidates : '');
     for (const el of document.querySelectorAll(query)) {
-      if (!visible(el) || !geometrySidebar(el)) continue;
+      if (isExcluded(el, s.provider) || !visible(el) || !geometrySidebar(el)) continue;
       let item;
       if (!el.matches(selector)) {
         const root = el.closest(nav);
         if (!root) continue;
-        const name = label(el, excluded);
+        const name = label(el, s.provider);
         const locked = privateLabel.test(name);
         const closed = el.getAttribute('aria-expanded') === 'false';
         if (s.provider === 'chatgpt' && recentsHeading.test(name)) {
@@ -213,7 +238,6 @@
     return c;
   }
   function paint(s) {
-    const excluded = s.provider === 'claude' ? claudeOutside : outside;
     for (const [row, c] of s.controls) {
       const i = s.rows.get(row);
       if (
@@ -236,7 +260,7 @@
       c.box.indeterminate = !!state.inherited && !state.checked;
       c.box.setAttribute('aria-busy', String(s.pending.has(k)));
       const title =
-        label(row, excluded) || (i.kind === 'project' ? 'Untitled project' : 'Untitled chat');
+        label(row, s.provider) || (i.kind === 'project' ? 'Untitled project' : 'Untitled chat');
       const ident =
         i.kind === 'recents'
           ? 'All Recent chats'
@@ -513,7 +537,6 @@
         options,
       );
       const target = selectors[s.provider] + ',' + nav + ',' + modal;
-      const excluded = s.provider === 'claude' ? claudeOutside : outside;
       s.observer = new MutationObserver((records) => {
         if (active !== s) return;
         for (const r of records) {
@@ -530,7 +553,7 @@
             stop(s);
             return;
           }
-          if (s.scheduled || el.closest(excluded)) continue;
+          if (s.scheduled || isExcluded(el, s.provider)) continue;
           if (r.type === 'attributes') {
             const layout = r.attributeName === 'class' || r.attributeName === 'style';
             if (
@@ -550,7 +573,7 @@
                 nodes.some(
                   (n) =>
                     n.nodeType === 1 &&
-                    !n.matches(excluded) &&
+                    !isExcluded(n, s.provider) &&
                     (n.matches(target) || n.querySelector(target)),
                 ))
             ) {
@@ -578,6 +601,7 @@
           'aria-label',
           'aria-controls',
           'data-testid',
+          'data-test-id',
           'data-state',
           'data-project-id',
           nativeProjectRow,
@@ -667,7 +691,7 @@
       retryAfter: response.headers.get('retry-after'),
     };
   }
-  chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  const listener = (m, sender, reply) => {
     if (m?.type === 'REFRESH_PAGE_SELECTION' && workerSender(sender)) {
       if (active) schedule(active, true);
       return;
@@ -733,5 +757,7 @@
       }),
     );
     return true;
-  });
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  globalThis.aiMemoryPickerListener = listener;
 })();

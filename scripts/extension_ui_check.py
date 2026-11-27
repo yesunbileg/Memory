@@ -107,6 +107,10 @@ async def verify(output, executable):
             assert await page.locator("#connection-file").count() == 1
             await page.locator("#settings").press("Space")
             await expect(page.locator("#settings-panel")).to_be_hidden()
+            await expect(page.locator("#list-mode")).to_be_hidden()
+            await expect(page.locator("#archive-panel")).to_be_visible()
+            await page.locator("#settings").click()
+            await expect(page.locator("#archive-panel")).to_be_hidden()
             mode = page.get_by_role("button", name="List mode", exact=True)
             await expect(mode).to_be_enabled()
             await expect(mode).to_have_attribute("aria-pressed", "false")
@@ -119,6 +123,7 @@ async def verify(output, executable):
                 await page.evaluate("qaPageCommands.filter(t=>t==='SET_PAGE_LIST_MODE').length")
                 == 2
             )
+            await page.locator("#settings").click()
             for width in (320, 380, 440):
                 await page.set_viewport_size({"width": width, "height": 600})
                 assert_layout(await page.evaluate(f"({LAYOUT})(document)"))
@@ -127,7 +132,12 @@ async def verify(output, executable):
                     await page.screenshot(
                         path=output / f"popup-{width}-{theme}.png", full_page=True
                     )
+                    await page.locator("#settings").click()
+                    assert_layout(await page.evaluate(f"({LAYOUT})(document)"))
+                    await page.screenshot(path=output / f"settings-{width}-{theme}.png", full_page=True)
+                    await page.locator("#settings").click()
             await page.goto(ORIGIN + "/popup.html?unsupported")
+            await page.locator("#settings").click()
             await expect(mode).to_be_disabled()
             await expect(mode).to_have_attribute("aria-pressed", "false")
             assert await page.evaluate("qaPageCommands") == []

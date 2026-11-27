@@ -11,6 +11,7 @@ function summarize(records, phase) {
     accountsTotal: records.size,
     accountsChecked: 0,
     accountsUnavailable: 0,
+    tabBridgeFailures: 0,
   };
   for (const entry of records.values()) {
     const p = entry.progress ?? {};
@@ -66,6 +67,9 @@ export async function syncTabScopes(provider, contexts, options) {
         if (!routes.has(principalId)) routes.set(principalId, candidates[index]);
     }
   });
+  const tabBridgeFailures = verified.filter(
+    (result) => result.status === 'rejected' && result.reason?.code === 'provider_tab_unavailable',
+  ).length;
   await guard();
   for (const [id, account] of records)
     if (!account.done && !routes.has(id)) account.done = account.unavailable = true;
@@ -95,6 +99,7 @@ export async function syncTabScopes(provider, contexts, options) {
       account.state = result.state;
       account.done = !result.hasMore;
       account.warning = Boolean(result.selectionWarning);
+      account.warningDetail = result.selectionWarning || null;
       conversations = result.conversations ?? 0;
       break;
     } catch (error) {
@@ -109,14 +114,23 @@ export async function syncTabScopes(provider, contexts, options) {
 
   const hasMore = remaining();
   const final = summarize(records, hasMore ? 'queued' : 'complete');
+  final.tabBridgeFailures = tabBridgeFailures;
   const unavailable = final.accountsUnavailable;
   const warnings = [];
   if (unavailable)
     warnings.push(
       `Open a signed-in tab for ${unavailable} account${unavailable === 1 ? '' : 's'}.`,
     );
-  if ([...records.values()].some((entry) => entry.warning))
-    warnings.push('Some selected chats could not be verified.');
+  if (unavailable && tabBridgeFailures)
+    warnings.push('Some provider tabs could not be connected. Reload the affected tabs if needed.');
+  const details = [
+    ...new Set(
+      [...records.values()]
+        .filter((e) => e.warning)
+        .map((e) => e.warningDetail || 'Some selected chats could not be verified.'),
+    ),
+  ];
+  warnings.push(...details);
   const selectionWarning = warnings.join(' ') || null;
   await guard();
   if (!hasMore && selectionWarning) final.phase = 'attention';

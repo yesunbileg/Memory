@@ -130,6 +130,9 @@ class Toolbar:
         )
 
     async def click(self, selector):
+        if selector == "#list-mode" or selector.startswith("#bulk-"):
+            if await self.ui("()=>q('#settings-panel').hidden"):
+                await self.click("#settings")
         await wait_for(
             lambda: self.ui(
                 "s=>{const el=q(s); return !!el && !el.disabled && !!el.getClientRects().length}",
@@ -428,6 +431,11 @@ async def exercise(context, worker, driver, archive_id, db):
         await toolbar.toggle(True)
         individual = box(site, item)
         await expect(individual).to_be_visible()
+        if provider == "gemini":
+            await expect(site.locator("#quoted + " + BOX)).to_have_count(0)
+            await expect(site.locator("#gemini-dialog-chat " + BOX)).to_have_count(0)
+            await site.evaluate("window.replaceGeminiRow()")
+            await expect(individual).to_be_visible()
         projects = [CLAUDE_PROJECT] if provider == "claude" else []
         if projects:
             await expect(site.locator("#dialog-chat " + BOX)).to_have_count(0)
