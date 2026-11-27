@@ -17,7 +17,9 @@ async def test_real_source_budget_recovers_with_a_pair_when_three_render_too_lar
                     "native_id": f"m-{i}",
                     "sequence": i + 1,
                     "role": "user",
-                    "timestamp": None,
+                    # Compact v2 headings without timestamps now fit all three groups.
+                    # Use a real timestamp so only the two-parent fallback fits the ceiling.
+                    "timestamp": "2026-11-10T15:00:00+08:00",
                     "text": f"conversation {group} message {i} " + "word " * 16,
                 }
                 for i in range(7500)
