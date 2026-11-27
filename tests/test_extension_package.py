@@ -81,7 +81,7 @@ def test_extension_zip_loads_from_root_and_excludes_connection_and_test_data(tmp
         assert not manifest.get("externally_connectable") and not manifest.get(
             "web_accessible_resources"
         )
-        assert not ({"scripting", "tabs", "activeTab", "downloads"} & set(manifest["permissions"]))
+        assert set(manifest["permissions"]) == {"alarms", "storage", "nativeMessaging", "scripting"}
         assert {name for name in names if name.endswith(".html")} == {"popup.html"}
         assert (
             not {

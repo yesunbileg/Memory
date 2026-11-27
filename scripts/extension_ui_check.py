@@ -134,7 +134,9 @@ async def verify(output, executable):
                     )
                     await page.locator("#settings").click()
                     assert_layout(await page.evaluate(f"({LAYOUT})(document)"))
-                    await page.screenshot(path=output / f"settings-{width}-{theme}.png", full_page=True)
+                    await page.screenshot(
+                        path=output / f"settings-{width}-{theme}.png", full_page=True
+                    )
                     await page.locator("#settings").click()
             await page.goto(ORIGIN + "/popup.html?unsupported")
             await page.locator("#settings").click()
